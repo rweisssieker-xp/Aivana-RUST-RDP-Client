@@ -1,0 +1,23 @@
+{
+  "events": [
+    {
+      "command": "venture",
+      "durationMs": 687,
+      "recordedAt": "2026-09-11T04:35:22.391Z",
+      "status": "passed"
+    },
+    {
+      "command": "research",
+      "durationMs": 32,
+      "recordedAt": "2026-09-11T04:36:01.815Z",
+      "status": "recorded"
+    },
+    {
+      "command": "venture",
+      "durationMs": 268,
+      "recordedAt": "2026-09-11T04:36:25.284Z",
+      "status": "passed"
+    }
+  ],
+  "schemaVersion": 1
+}

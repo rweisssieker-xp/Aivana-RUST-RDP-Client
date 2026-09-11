@@ -1,0 +1,176 @@
+{
+  "artifactPath": ".codex-orchestrator/market-intelligence/latest.json",
+  "buyerJourney": {
+    "champion": "Hypothesis: DACH IT administrators and small MSP support teams operating Windows RDP estates; not customer-validated",
+    "economicBuyer": "service operations leader",
+    "procurement": "security, procurement, and data review are possible assumptions",
+    "salesCycle": {
+      "evidence": "observed",
+      "sources": [
+        "project profile configuration"
+      ],
+      "value": 6
+    },
+    "user": "Hypothesis: DACH IT administrators and small MSP support teams operating Windows RDP estates; not customer-validated"
+  },
+  "claimBoundary": "Market sizing, competitor gaps, pricing, buyer, and sensitivity outputs are evidence-labelled scenarios, not market facts or forecasts.",
+  "competitors": [],
+  "errors": [],
+  "generatedAt": "2026-09-11T04:36:25.276Z",
+  "marketMemory": {
+    "outcomes": 0,
+    "researchRecordIds": [
+      "research_ccee159d47acb05a49a33b0e",
+      "research_f83da62705e1a13d0e9abfc4",
+      "research_dda5303111a95bc2f5922693",
+      "research_b27e25a0f185bfdeceb03368"
+    ],
+    "rule": "Future Venture runs must retain sources and update only the assumptions changed by newer project-local evidence.",
+    "telemetryEvents": 0
+  },
+  "marketSizing": {
+    "formula": "reachableAccounts × penetration × monthlyPrice × 12",
+    "method": "bottom-up-reachable-account-model",
+    "reachableAccounts": {
+      "evidence": "observed",
+      "sources": [
+        "project profile configuration"
+      ],
+      "value": 300
+    },
+    "serviceableRevenueAtOnePercent": {
+      "evidence": "assumption",
+      "sources": [
+        "1% penetration is a scenario variable, not a market fact"
+      ],
+      "value": 54000
+    }
+  },
+  "nextExperiments": [
+    {
+      "decisionValue": "high",
+      "killCondition": "No qualified participant confirms the problem as material.",
+      "metric": "problem confirmation and workflow baseline",
+      "question": "Which qualified buyer has the sharpest recurring problem?"
+    },
+    {
+      "decisionValue": "high",
+      "killCondition": "No credible willingness-to-pay signal at the hypothesis price.",
+      "metric": "price-sensitive purchase intent",
+      "question": "Will the target buyer consider the 1500 monthly price hypothesis?"
+    },
+    {
+      "decisionValue": "high",
+      "killCondition": "No measurable improvement against the current alternative.",
+      "metric": "time-to-outcome and independent completion",
+      "question": "Can Diagnose interrupted remote sessions, execute operator-approved recovery steps and produce a traceable incident handoff improve with the thin slice?"
+    }
+  ],
+  "region": {
+    "evidence": "missing",
+    "sources": [
+      "no region configured"
+    ],
+    "value": "unspecified"
+  },
+  "schemaVersion": 1,
+  "sensitivity": {
+    "decisionRule": "Validate the highest-impact uncertain driver before expanding scope or spend.",
+    "drivers": [
+      {
+        "base": 1500,
+        "high": 1950,
+        "key": "monthlyPrice",
+        "low": 1050
+      },
+      {
+        "base": 2200,
+        "high": 2860,
+        "key": "customerAcquisitionCost",
+        "low": 1540
+      },
+      {
+        "base": 1.5,
+        "high": 1.95,
+        "key": "monthlyChurnPercent",
+        "low": 1.05
+      },
+      {
+        "base": 2,
+        "high": 2.6,
+        "key": "monthlyNewCustomers",
+        "low": 1.4
+      }
+    ],
+    "method": "deterministic-parameter-sweep"
+  },
+  "sourceCoverage": {
+    "outcomeRecords": 0,
+    "primary": 4,
+    "secondary": 0,
+    "telemetryEvents": 0
+  },
+  "sources": [
+    {
+      "claim": "Vendor presents centralized remote connection management, credential and PAM integrations and AI assistance in Devolutions Server. AI alone is therefore not a demonstrated differentiator.",
+      "confidence": 0.5,
+      "id": "research_ccee159d47acb05a49a33b0e",
+      "limitations": [
+        "Vendor marketing, not independent testing or customer demand evidence."
+      ],
+      "rank": "primary",
+      "recency": null,
+      "title": "Devolutions Remote Desktop Manager",
+      "url": "https://devolutions.net/remote-desktop-manager/"
+    },
+    {
+      "claim": "Royal TS advertises RDP, VNC, SSH, credential management and task automation; the page displays EUR 49 single-user licensing.",
+      "confidence": 0.5,
+      "id": "research_f83da62705e1a13d0e9abfc4",
+      "limitations": [
+        "Pricing is version-specific; a newer licensing announcement exists. Do not treat EUR 49 as a verified current checkout quote."
+      ],
+      "rank": "primary",
+      "recency": null,
+      "title": "Royal TS features",
+      "url": "https://www.royalapps.com/ts/win/features"
+    },
+    {
+      "claim": "A separate licensing announcement describes pricing changes for version 26.x; competitor price comparison requires matching versions and maintenance scope.",
+      "confidence": 0.5,
+      "id": "research_dda5303111a95bc2f5922693",
+      "limitations": [
+        "No final quote verified in this review."
+      ],
+      "rank": "primary",
+      "recency": null,
+      "title": "Royal Apps licensing and versioning",
+      "url": "https://blog.royalapps.com/blog/licensing-and-versioning"
+    },
+    {
+      "claim": "mRemoteNG is an open-source Windows connection manager supporting RDP, VNC, SSH and HTTP/S.",
+      "confidence": 0.5,
+      "id": "research_b27e25a0f185bfdeceb03368",
+      "limitations": [
+        "Feature description establishes an alternative, not relative performance."
+      ],
+      "rank": "primary",
+      "recency": null,
+      "title": "mRemoteNG",
+      "url": "https://mremoteng.org/"
+    }
+  ],
+  "status": "passed",
+  "willingnessToPay": {
+    "buyer": "service operations leader",
+    "pricingHypothesis": {
+      "evidence": "observed",
+      "sources": [
+        "project profile configuration"
+      ],
+      "value": "1500 monthly price hypothesis"
+    },
+    "validation": "Run a price-sensitive concept test with qualified buyers; do not infer willingness to pay from repository context.",
+    "valueDriver": "Diagnose interrupted remote sessions, execute operator-approved recovery steps and produce a traceable incident handoff and avoided manual effort"
+  }
+}

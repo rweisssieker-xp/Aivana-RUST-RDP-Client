@@ -45,11 +45,12 @@ const ACTIVE_GOAL_OBJECTIVE: &str =
 mod capture;
 mod connection_probe;
 mod desktop;
+mod integrations_panel;
 mod mission_panel;
 mod operations_panel;
-mod session_windows;
-mod integrations_panel;
 mod recordings_panel;
+mod session_windows;
+mod teaching_panel;
 
 mod tw {
     use eframe::egui::Color32;
@@ -80,6 +81,7 @@ enum View {
     SessionWindows,
     Integrations,
     Recordings,
+    Teaching,
     Connections,
     Sessions,
     Approvals,
@@ -125,7 +127,7 @@ pub struct KiPreferencesSaveReport {
 pub struct AivanaApp {
     profiles: Vec<ConnectionProfile>,
     sessions: Vec<RemoteSession>,
-    session_sources: HashMap<Uuid,crate::mission::Target>,
+    session_sources: HashMap<Uuid, crate::mission::Target>,
     selected_profile: Option<Uuid>,
     selected_session: Option<Uuid>,
     view: View,
@@ -161,6 +163,7 @@ pub struct AivanaApp {
     session_windows: session_windows::SessionWindows,
     integrations: integrations_panel::IntegrationsState,
     recordings: recordings_panel::RecordingsState,
+    teaching: teaching_panel::TeachingState,
 }
 
 impl AivanaApp {
@@ -221,7 +224,7 @@ impl AivanaApp {
             session_sources: HashMap::new(),
             selected_profile,
             selected_session: None,
-            view: View::Sessions,
+            view: View::Missions,
             search: String::new(),
             draft: initial_draft,
             editing_profile: selected_profile,
@@ -254,6 +257,7 @@ impl AivanaApp {
             session_windows: session_windows::SessionWindows::default(),
             integrations: integrations_panel::IntegrationsState::default(),
             recordings: recordings_panel::RecordingsState::default(),
+            teaching: teaching_panel::TeachingState::default(),
         }
     }
 
@@ -507,7 +511,8 @@ impl AivanaApp {
 
         match self.engine.connect(&profile) {
             Ok(session) => {
-                self.session_sources.insert(session.id,crate::mission::Target::from_profile(&profile));
+                self.session_sources
+                    .insert(session.id, crate::mission::Target::from_profile(&profile));
                 self.autopilot.abort();
                 self.timeline.append_event(
                     session.id,
@@ -999,7 +1004,8 @@ impl eframe::App for AivanaApp {
         let ctx = ui.ctx().clone();
         self.gui_capture.tick(&ctx);
         self.poll_certificate_probe();
-        self.engine.release_inputs_except(self.remote_input_owner(ui));
+        self.engine
+            .release_inputs_except(self.remote_input_owner(ui));
         let mut received_frame = false;
 
         for session in &mut self.sessions {
@@ -1054,11 +1060,26 @@ impl eframe::App for AivanaApp {
         self.poll_operations();
         self.poll_integrations();
         self.poll_recordings();
+        if !ui.input(|i| i.focused || i.raw.viewports.values().any(|v| v.focused == Some(true))) {
+            self.teaching.teacher.stop();
+            self.teaching.cancel_approval();
+        }
+        self.poll_teaching();
+        for (session, action, at) in self.engine.take_manual_inputs() {
+            let size = self
+                .latest_frames
+                .get(&session)
+                .map(|f| (f.width, f.height));
+            self.teaching.observe_at(session, &action, size, at);
+        }
+        self.engine
+            .set_manual_capture(self.teaching.teacher.is_recording());
         self.process_autopilot();
 
         self.desktop_shell(ui);
         self.detached_sessions(&ctx);
-        self.engine.release_inputs_except(self.remote_input_owner(ui));
+        self.engine
+            .release_inputs_except(self.remote_input_owner(ui));
 
         if received_frame {
             ctx.request_repaint();
@@ -2682,7 +2703,7 @@ impl AivanaApp {
                                 _ => continue,
                             };
                             let (x, y) = viewport_to_remote(pos, image_rect, source, frame);
-                            let _ = self.engine.send_input(
+                            let _ = self.engine.send_manual_input(
                                 session_id,
                                 InputAction::PointerButton {
                                     x,
@@ -2702,7 +2723,7 @@ impl AivanaApp {
                         let (x, y) = viewport_to_remote(pos, image_rect, source, frame);
                         let _ = self
                             .engine
-                            .send_input(session_id, InputAction::MovePointer { x, y });
+                            .send_manual_input(session_id, InputAction::MovePointer { x, y });
                     }
                     egui::Event::Key {
                         key,
@@ -2713,7 +2734,7 @@ impl AivanaApp {
                     } if focused => {
                         for (scan_code, down) in remote_modifier_keys(modifiers) {
                             if self.engine.key_is_held(session_id, scan_code) != down {
-                                let _ = self.engine.send_input(
+                                let _ = self.engine.send_manual_input(
                                     session_id,
                                     InputAction::Key {
                                         scan_code,
@@ -2723,9 +2744,10 @@ impl AivanaApp {
                             }
                         }
                         if let Some(scan_code) = remote_scan_code(physical_key.unwrap_or(key)) {
-                            let _ = self
-                                .engine
-                                .send_input(session_id, InputAction::Key { scan_code, pressed });
+                            let _ = self.engine.send_manual_input(
+                                session_id,
+                                InputAction::Key { scan_code, pressed },
+                            );
                         }
                     }
                     egui::Event::Copy | egui::Event::Cut | egui::Event::Paste(_) if focused => {
@@ -2734,7 +2756,7 @@ impl AivanaApp {
                             remote_modifier_keys(ui.input(|input| input.modifiers))
                         {
                             if self.engine.key_is_held(session_id, scan_code) != pressed {
-                                let _ = self.engine.send_input(
+                                let _ = self.engine.send_manual_input(
                                     session_id,
                                     InputAction::Key { scan_code, pressed },
                                 );
@@ -2745,7 +2767,7 @@ impl AivanaApp {
                             egui::Event::Cut => 0x2d,
                             _ => 0x2f,
                         };
-                        let _ = self.engine.send_input(
+                        let _ = self.engine.send_manual_input(
                             session_id,
                             InputAction::Key {
                                 scan_code,
@@ -2756,12 +2778,12 @@ impl AivanaApp {
                     egui::Event::Text(text) if focused && !raw_keys => {
                         let _ = self
                             .engine
-                            .send_input(session_id, InputAction::TypeText { text });
+                            .send_manual_input(session_id, InputAction::TypeText { text });
                     }
                     egui::Event::Ime(egui::ImeEvent::Commit(text)) if focused => {
                         let _ = self
                             .engine
-                            .send_input(session_id, InputAction::TypeText { text });
+                            .send_manual_input(session_id, InputAction::TypeText { text });
                     }
                     egui::Event::MouseWheel { unit, delta, .. }
                         if focused && response.hovered() =>
@@ -2775,9 +2797,10 @@ impl AivanaApp {
                             let (x, y) = viewport_to_remote(pos, image_rect, source, frame);
                             let delta = (delta.y * scale).round().clamp(-255.0, 255.0) as i16;
                             if delta != 0 {
-                                let _ = self
-                                    .engine
-                                    .send_input(session_id, InputAction::Scroll { x, y, delta });
+                                let _ = self.engine.send_manual_input(
+                                    session_id,
+                                    InputAction::Scroll { x, y, delta },
+                                );
                             }
                         }
                     }
@@ -2793,14 +2816,14 @@ impl AivanaApp {
                     if self.engine.key_is_held(session_id, scan_code) != pressed {
                         let _ = self
                             .engine
-                            .send_input(session_id, InputAction::Key { scan_code, pressed });
+                            .send_manual_input(session_id, InputAction::Key { scan_code, pressed });
                     }
                 }
                 for (scan_code, pressed) in native_extra_keys() {
                     if self.engine.key_is_held(session_id, scan_code) != pressed {
                         let _ = self
                             .engine
-                            .send_input(session_id, InputAction::Key { scan_code, pressed });
+                            .send_manual_input(session_id, InputAction::Key { scan_code, pressed });
                     }
                 }
             }

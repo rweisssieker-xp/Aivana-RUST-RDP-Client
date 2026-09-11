@@ -29,7 +29,7 @@ impl AivanaApp {
                         Some(result) if result.status == JobStatus::Completed && !result.truncated => {
                             integrations::parse_inventory(&result.stdout, false)
                         }
-                        _ => Err("AD-Inventar nicht verfügbar: ActiveDirectory-Modul, Domänenzugriff und Leserechte prüfen; maximal 500 Computer und 128 KiB Antwort. Bei größeren Domänen JSON/CSV importieren.".into()),
+                        _ => Err("Inventar nicht verfügbar: Quellenmodule, Zugriff und Leserechte prüfen; maximal 500 Computer und 128 KiB Antwort. Bei größeren Verzeichnissen JSON/CSV importieren.".into()),
                     };
                     match parsed {
                         Ok(rows) => self.set_inventory_review(rows),
@@ -49,12 +49,17 @@ impl AivanaApp {
             self.integrations.vault = None;
             match result {
                 Ok(mut secret) => {
-                    if let Some(index) = self.profiles.iter().position(|p| p.id==reviewed_profile.id && p.updated_at==reviewed_profile.updated_at && p.credential_id==reviewed_profile.credential_id && crate::mission::Target::from_profile(&reviewed_profile).matches(p)) {
+                    if let Some(index) = self.profiles.iter().position(|p| {
+                        p.id == reviewed_profile.id
+                            && p.updated_at == reviewed_profile.updated_at
+                            && p.credential_id == reviewed_profile.credential_id
+                            && crate::mission::Target::from_profile(&reviewed_profile).matches(p)
+                    }) {
                         let mut profile = self.profiles[index].clone();
                         secret.domain = profile.domain.clone();
                         profile.username = secret.username.clone();
                         // Use a fresh record: profile persistence must never alter the old login on failure.
-                        profile.credential_id=None;
+                        profile.credential_id = None;
                         match self.credentials.save(&mut profile, secret) {
                             Ok(reference) => {
                                 profile.updated_at = Utc::now();
@@ -72,7 +77,8 @@ impl AivanaApp {
                         }
                     } else {
                         self.integrations.notice =
-                            "Zielprofil wurde entfernt oder geändert; Vault-Login verworfen.".into();
+                            "Zielprofil wurde entfernt oder geändert; Vault-Login verworfen."
+                                .into();
                     }
                 }
                 Err(error) => self.integrations.notice = error,
@@ -132,7 +138,9 @@ impl AivanaApp {
                     for job in &self.integrations.jobs.jobs { job.cancel(); }
                 }
             });
-            ui.label("Entra ID: kein Live-Connector implementiert. Ein extern erstelltes Inventar kann unten importiert werden.");
+            ui.strong("Entra ID");
+            ui.label("Voraussetzungen: Microsoft.Graph.Authentication und Identity.DirectoryManagement; explizites Token in AIVANA_GRAPH_ACCESS_TOKEN mit Device.Read.All. Liest maximal 500 Geräte. Windows-Anzeigenamen sind nur Zielkandidaten: DNS-Namen vor Übernahme prüfen.");
+            if ui.add_enabled(self.integrations.ad_job.is_none(),egui::Button::new("Entra-Geräte jetzt lesen")).clicked(){match self.integrations.jobs.enqueue(integrations::entra_inventory_command()){Ok(id)=>{self.integrations.ad_job=Some(id);self.integrations.notice="Entra-Abfrage gestartet …".into();},Err(e)=>self.integrations.notice=e}}
             ui.separator();
             ui.strong("JSON / CSV importieren");
             ui.label("JSON: Array mit name, host; optional port, protocol (rdp/ssh/vnc), username, domain, group. CSV: dieselben Spalten. Kennwörter, IDs und Credential-Referenzen werden nicht übernommen. Maximal 2 MiB / 2000 Zeilen.");

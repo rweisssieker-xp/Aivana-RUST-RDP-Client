@@ -135,7 +135,7 @@ impl PersistentCredentialStore {
             records: self.records.values().cloned().collect(),
         };
         let json = serde_json::to_string_pretty(&persisted).context("serialize credentials")?;
-        fs::write(&self.path, json).context("write credential store")
+        atomic_write(&self.path, json.as_bytes()).context("write credential store")
     }
 }
 
@@ -158,10 +158,8 @@ impl CredentialStore for PersistentCredentialStore {
         let clear = serde_json::to_vec(&secret).context("serialize secret")?;
         let protected = protect_secret(&clear).context("protect credential")?;
 
-        profile.credential_id = Some(id);
-        profile.password.clear();
-        self.refs.insert(id, credential_ref.clone());
-        self.records.insert(
+        let previous_ref = self.refs.insert(id, credential_ref.clone());
+        let previous_record = self.records.insert(
             id,
             ProtectedCredentialRecord {
                 id,
@@ -169,7 +167,19 @@ impl CredentialStore for PersistentCredentialStore {
                 updated_at: now,
             },
         );
-        self.persist()?;
+        if let Err(error) = self.persist() {
+            self.refs.remove(&id);
+            self.records.remove(&id);
+            if let Some(value) = previous_ref {
+                self.refs.insert(id, value);
+            }
+            if let Some(value) = previous_record {
+                self.records.insert(id, value);
+            }
+            return Err(error);
+        }
+        profile.credential_id = Some(id);
+        profile.password.clear();
         Ok(credential_ref)
     }
 
@@ -184,11 +194,19 @@ impl CredentialStore for PersistentCredentialStore {
     }
 
     fn delete(&mut self, credential_id: Uuid) -> Result<()> {
-        self.refs
+        let reference = self
+            .refs
             .remove(&credential_id)
             .context("credential ref missing")?;
-        self.records.remove(&credential_id);
-        self.persist()
+        let record = self.records.remove(&credential_id);
+        if let Err(error) = self.persist() {
+            self.refs.insert(credential_id, reference);
+            if let Some(record) = record {
+                self.records.insert(credential_id, record);
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn has_credential(&self, credential_id: Uuid) -> bool {
@@ -254,6 +272,26 @@ fn redact_secret_token(token: &str) -> String {
         }
     }
     token.to_owned()
+}
+
+pub(crate) fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let temp = path.with_extension(format!("{}.tmp", Uuid::new_v4()));
+    let result = (|| -> Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temp, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
 }
 
 pub fn app_data_file(file: &str) -> Result<PathBuf> {
@@ -391,6 +429,55 @@ pub(crate) fn unprotect_secret(protected: &[u8]) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::services::ProfileStore;
+
+    #[test]
+    fn failed_credential_save_preserves_existing_login() {
+        let root = std::env::temp_dir().join(format!("credential-transaction-{}", Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("secrets.json");
+        let mut store = PersistentCredentialStore::at(path.clone()).unwrap();
+        let mut p = ConnectionProfile::sample("test", "example.invalid", "", false);
+        let id = store
+            .save(
+                &mut p,
+                SecretCredential {
+                    username: "before".into(),
+                    password: "old-test-value".into(),
+                    domain: String::new(),
+                },
+            )
+            .unwrap()
+            .id;
+        let bad = root.join("directory");
+        fs::create_dir(&bad).unwrap();
+        store.path = bad.clone();
+        assert!(
+            store
+                .save(
+                    &mut p,
+                    SecretCredential {
+                        username: "after".into(),
+                        password: "new-test-value".into(),
+                        domain: String::new()
+                    }
+                )
+                .is_err()
+        );
+        assert_eq!(p.credential_id, Some(id));
+        assert_eq!(store.get(id).unwrap().unwrap().password, "old-test-value");
+        assert_eq!(
+            PersistentCredentialStore::at(path.clone())
+                .unwrap()
+                .get(id)
+                .unwrap()
+                .unwrap()
+                .username,
+            "before"
+        );
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(bad).unwrap();
+        fs::remove_dir(root).unwrap();
+    }
 
     #[test]
     fn credential_save_clears_profile_password() {

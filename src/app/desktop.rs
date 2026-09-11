@@ -161,7 +161,15 @@ impl AivanaApp {
                 self.view = View::Sessions;
             }
             if !focused {
-                ui.label(RichText::new(if self.view==View::Missions{"MISSION CONTROL"}else{"RECHNERZENTRALE"}).size(11.0).color(MUTED));
+                ui.label(
+                    RichText::new(if self.view == View::Missions {
+                        "MISSION CONTROL"
+                    } else {
+                        "RECHNERZENTRALE"
+                    })
+                    .size(11.0)
+                    .color(MUTED),
+                );
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui
@@ -209,7 +217,10 @@ impl AivanaApp {
                 pos2(content.left(), root.bottom()),
             );
             let mut nav = child(ui, "desktop-navigation", rail.shrink(14.0));
-            self.desktop_navigation(&mut nav);
+            ScrollArea::vertical()
+                .id_salt("main-navigation-scroll")
+                .auto_shrink([false, false])
+                .show(&mut nav, |ui| self.desktop_navigation(ui));
         }
         let mut body = child(ui, "desktop-content", content.shrink(16.0));
         if focused {
@@ -242,6 +253,7 @@ impl AivanaApp {
                     View::SessionWindows => self.session_layouts_ui(ui),
                     View::Integrations => self.integrations_view(ui),
                     View::Recordings => self.recordings_view(ui),
+                    View::Teaching => self.teaching_view(ui),
                     View::Connections => self.connections_view(ui),
                     View::Approvals => self.approvals_view(ui),
                     View::Workspaces => self.workspaces_view(ui),
@@ -311,6 +323,7 @@ impl AivanaApp {
             (View::SessionWindows, "Sitzungsfenster"),
             (View::Integrations, "Inventar & Vault"),
             (View::Recordings, "Aufzeichnungen"),
+            (View::Teaching, "Vormachen & Lernen"),
             (View::Connections, "Verbindungen"),
             (View::Approvals, "Freigaben"),
             (View::Workspaces, "Abläufe & Wissen"),
@@ -751,7 +764,9 @@ impl AivanaApp {
             if ui.button("Dateien").clicked() {
                 self.workbench_open_transfer();
             }
-            if ui.button("Eigenes Fenster").clicked() && !self.session_windows.open.contains(&session.id) {
+            if ui.button("Eigenes Fenster").clicked()
+                && !self.session_windows.open.contains(&session.id)
+            {
                 self.session_windows.open.push(session.id);
             }
             ui.toggle_value(&mut self.desktop.assistant, "KI & Diagnose");
@@ -789,7 +804,9 @@ impl AivanaApp {
         }
         if self.session_windows.open.contains(&session.id) {
             ui.label("Diese Sitzung ist in einem eigenen Fenster geöffnet.");
-            if ui.button("Hier anzeigen").clicked(){self.session_windows.open.retain(|id|*id!=session.id);}
+            if ui.button("Hier anzeigen").clicked() {
+                self.session_windows.open.retain(|id| *id != session.id);
+            }
             return;
         }
         let rect = ui.available_rect_before_wrap();
@@ -1034,6 +1051,7 @@ impl AivanaApp {
                         ("Sitzungsfenster", View::SessionWindows),
                         ("Inventar & Vault", View::Integrations),
                         ("Aufzeichnungen", View::Recordings),
+                        ("Vormachen & Lernen", View::Teaching),
                         ("Arbeitsbereich", View::Sessions),
                         ("Verbindungen", View::Connections),
                         ("Freigaben", View::Approvals),
@@ -1083,6 +1101,7 @@ mod tests {
 
     fn fixture(ctx: &Context) -> AivanaApp {
         let mut app = AivanaApp::from_context(ctx);
+        app.view = View::Sessions;
         app.profiles = ["WIN-ADMIN-01", "APP-SERVER-02", "TEST-LAB-03"]
             .iter()
             .map(|name| ConnectionProfile::sample(name, "test.invalid", "Test", false))
@@ -1377,5 +1396,27 @@ mod tests {
         assert!(needs_attention(SessionStatus::Reconnecting));
         assert!(!needs_attention(SessionStatus::Connected));
         assert!(!needs_attention(SessionStatus::Authenticating));
+    }
+    #[test]
+    fn mission_and_tools_render_at_narrow_and_wide_sizes_without_connections() {
+        let ctx = Context::default();
+        let mut app = fixture(&ctx);
+        app.sessions.clear();
+        app.selected_session = None;
+        for width in [640.0, 1440.0] {
+            for view in [
+                View::Missions,
+                View::Operations,
+                View::SessionWindows,
+                View::Integrations,
+                View::Recordings,
+                View::Teaching,
+            ] {
+                app.view = view;
+                let out = render(&mut app, &ctx, egui::vec2(width, 1000.0), vec![]);
+                assert!(!out.shapes.is_empty());
+                assert!(app.sessions.is_empty());
+            }
+        }
     }
 }

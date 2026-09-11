@@ -1,0 +1,166 @@
+{
+  "artifactPath": ".codex-orchestrator/foundation/latest.json",
+  "assumptions": [
+    {
+      "evidence": "missing",
+      "id": "customer-evidence",
+      "severity": "medium",
+      "statement": "Target users, demand, and success baseline require validation."
+    }
+  ],
+  "decisionsNeeded": [],
+  "errors": [],
+  "foundation": {
+    "architecture": {
+      "assumptions": [],
+      "decisions": [
+        "Follow existing repository stack and conventions.",
+        "Use a reversible boundary for the first delivery."
+      ],
+      "decisionState": "draft",
+      "dependsOn": [
+        "foundation_mtwgrrsd_prd"
+      ],
+      "id": "foundation_mtwgrrsd_architecture",
+      "revision": 1,
+      "state": "ready"
+    },
+    "assumptions": [
+      {
+        "evidence": "missing",
+        "id": "customer-evidence",
+        "severity": "medium",
+        "statement": "Target users, demand, and success baseline require validation."
+      }
+    ],
+    "context": {
+      "assumptions": [],
+      "decisionState": "draft",
+      "dependsOn": [],
+      "evidence": "repository-derived",
+      "id": "foundation_mtwgrrsd_context",
+      "revision": 1,
+      "state": "ready"
+    },
+    "decisionsNeeded": [],
+    "epics": [
+      {
+        "decisionState": "draft",
+        "dependsOn": [
+          "foundation_mtwgrrsd_prd",
+          "foundation_mtwgrrsd_architecture",
+          "foundation_mtwgrrsd_nfrs"
+        ],
+        "id": "foundation_mtwgrrsd_epic_1",
+        "revision": 1,
+        "state": "ready",
+        "title": "Validate the Aivana native RDP incident workbench for DACH IT administrators and small MSPs. Compare sourced alternatives and evaluate operator-approved recovery plus incident evidence as the differentiation hypothesis. Consult docs/forgemind/venture-sources.json. No customer demand or willingness to pay has been measured. Category financial defaults must not be called observed evidence; the reviewed economics will be in docs/forgemind/venture-review.md. Naming remains unresolved. No outreach, spending, deployment or application implementation."
+      }
+    ],
+    "goal": "Validate the Aivana native RDP incident workbench for DACH IT administrators and small MSPs. Compare sourced alternatives and evaluate operator-approved recovery plus incident evidence as the differentiation hypothesis. Consult docs/forgemind/venture-sources.json. No customer demand or willingness to pay has been measured. Category financial defaults must not be called observed evidence; the reviewed economics will be in docs/forgemind/venture-review.md. Naming remains unresolved. No outreach, spending, deployment or application implementation.",
+    "goalSource": "user",
+    "id": "foundation_mtwgrrsd",
+    "mode": "venture",
+    "nfrs": {
+      "assumptions": [],
+      "decisionState": "draft",
+      "dependsOn": [
+        "foundation_mtwgrrsd_architecture"
+      ],
+      "id": "foundation_mtwgrrsd_nfrs",
+      "requirements": [
+        "Preserve applicable accessibility.",
+        "Avoid secrets in artifacts.",
+        "Record verification and rollback evidence."
+      ],
+      "revision": 1,
+      "state": "ready"
+    },
+    "prd": {
+      "acceptanceCriteria": [
+        "Implement the smallest useful slice.",
+        "Record relevant verification evidence.",
+        "Preserve a rollback or recovery path."
+      ],
+      "assumptions": [
+        {
+          "evidence": "missing",
+          "id": "customer-evidence",
+          "severity": "medium",
+          "statement": "Target users, demand, and success baseline require validation."
+        }
+      ],
+      "decisionState": "draft",
+      "dependsOn": [
+        "foundation_mtwgrrsd_context"
+      ],
+      "id": "foundation_mtwgrrsd_prd",
+      "outcome": "Validate the Aivana native RDP incident workbench for DACH IT administrators and small MSPs. Compare sourced alternatives and evaluate operator-approved recovery plus incident evidence as the differentiation hypothesis. Consult docs/forgemind/venture-sources.json. No customer demand or willingness to pay has been measured. Category financial defaults must not be called observed evidence; the reviewed economics will be in docs/forgemind/venture-review.md. Naming remains unresolved. No outreach, spending, deployment or application implementation.",
+      "revision": 1,
+      "scope": "One reversible, measurable thin slice.",
+      "state": "ready"
+    },
+    "revision": 1,
+    "sprint": {
+      "decisionState": "draft",
+      "dependsOn": [
+        "foundation_mtwgrrsd_story_1"
+      ],
+      "id": "foundation_mtwgrrsd_sprint",
+      "revision": 1,
+      "state": "ready",
+      "stories": [
+        {
+          "id": "foundation_mtwgrrsd_story_1",
+          "state": "ready"
+        }
+      ],
+      "wipLimit": 1
+    },
+    "stories": [
+      {
+        "acceptanceCriteria": [
+          "Implement the smallest useful slice.",
+          "Record relevant verification evidence.",
+          "Preserve a rollback or recovery path."
+        ],
+        "decisionState": "draft",
+        "definitionOfDone": "Relevant tests pass or gaps are recorded.",
+        "dependsOn": [
+          "foundation_mtwgrrsd_epic_1"
+        ],
+        "id": "foundation_mtwgrrsd_story_1",
+        "revision": 1,
+        "state": "ready",
+        "title": "Implement the smallest reversible outcome slice"
+      }
+    ]
+  },
+  "foundationId": "foundation_mtwgrrsd",
+  "goal": "Validate the Aivana native RDP incident workbench for DACH IT administrators and small MSPs. Compare sourced alternatives and evaluate operator-approved recovery plus incident evidence as the differentiation hypothesis. Consult docs/forgemind/venture-sources.json. No customer demand or willingness to pay has been measured. Category financial defaults must not be called observed evidence; the reviewed economics will be in docs/forgemind/venture-review.md. Naming remains unresolved. No outreach, spending, deployment or application implementation.",
+  "goalSource": "user",
+  "nextStory": {
+    "acceptanceCriteria": [
+      "Implement the smallest useful slice.",
+      "Record relevant verification evidence.",
+      "Preserve a rollback or recovery path."
+    ],
+    "decisionState": "draft",
+    "definitionOfDone": "Relevant tests pass or gaps are recorded.",
+    "dependsOn": [
+      "foundation_mtwgrrsd_epic_1"
+    ],
+    "id": "foundation_mtwgrrsd_story_1",
+    "revision": 1,
+    "state": "ready",
+    "title": "Implement the smallest reversible outcome slice"
+  },
+  "readiness": {
+    "blockers": [],
+    "status": "concerns"
+  },
+  "revision": 1,
+  "schemaVersion": 1,
+  "scope": "lightweight",
+  "status": "concerns"
+}

@@ -1,0 +1,69 @@
+{
+  "claimBoundary": "Imported sources support only their stated claims; validate customer fit and current relevance before deciding.",
+  "errors": [],
+  "importedAt": "2026-09-11T04:36:01.800Z",
+  "records": [
+    {
+      "claim": "Vendor presents centralized remote connection management, credential and PAM integrations and AI assistance in Devolutions Server. AI alone is therefore not a demonstrated differentiator.",
+      "commercial": {},
+      "confidence": 0.5,
+      "evidenceType": "primary",
+      "id": "research_ccee159d47acb05a49a33b0e",
+      "limitations": [
+        "Vendor marketing, not independent testing or customer demand evidence."
+      ],
+      "publishedAt": null,
+      "retrievedAt": "2026-09-11",
+      "source": "manual-research",
+      "title": "Devolutions Remote Desktop Manager",
+      "url": "https://devolutions.net/remote-desktop-manager/"
+    },
+    {
+      "claim": "Royal TS advertises RDP, VNC, SSH, credential management and task automation; the page displays EUR 49 single-user licensing.",
+      "commercial": {},
+      "confidence": 0.5,
+      "evidenceType": "primary",
+      "id": "research_f83da62705e1a13d0e9abfc4",
+      "limitations": [
+        "Pricing is version-specific; a newer licensing announcement exists. Do not treat EUR 49 as a verified current checkout quote."
+      ],
+      "publishedAt": null,
+      "retrievedAt": "2026-09-11",
+      "source": "manual-research",
+      "title": "Royal TS features",
+      "url": "https://www.royalapps.com/ts/win/features"
+    },
+    {
+      "claim": "A separate licensing announcement describes pricing changes for version 26.x; competitor price comparison requires matching versions and maintenance scope.",
+      "commercial": {},
+      "confidence": 0.5,
+      "evidenceType": "primary",
+      "id": "research_dda5303111a95bc2f5922693",
+      "limitations": [
+        "No final quote verified in this review."
+      ],
+      "publishedAt": null,
+      "retrievedAt": "2026-09-11",
+      "source": "manual-research",
+      "title": "Royal Apps licensing and versioning",
+      "url": "https://blog.royalapps.com/blog/licensing-and-versioning"
+    },
+    {
+      "claim": "mRemoteNG is an open-source Windows connection manager supporting RDP, VNC, SSH and HTTP/S.",
+      "commercial": {},
+      "confidence": 0.5,
+      "evidenceType": "primary",
+      "id": "research_b27e25a0f185bfdeceb03368",
+      "limitations": [
+        "Feature description establishes an alternative, not relative performance."
+      ],
+      "publishedAt": null,
+      "retrievedAt": "2026-09-11",
+      "source": "manual-research",
+      "title": "mRemoteNG",
+      "url": "https://mremoteng.org/"
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "recorded"
+}

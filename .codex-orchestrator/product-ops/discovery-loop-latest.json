@@ -1,0 +1,36 @@
+{
+  "claimBoundary": "No causal conclusion is made from imported telemetry or research alone.",
+  "errors": [],
+  "generatedAt": "2026-09-11T04:36:25.066Z",
+  "goal": "Validate the Aivana native RDP incident workbench for DACH IT administrators and small MSPs. Compare sourced alternatives and evaluate operator-approved recovery plus incident evidence as the differentiation hypothesis. Consult docs/forgemind/venture-sources.json. No customer demand or willingness to pay has been measured. Category financial defaults must not be called observed evidence; the reviewed economics will be in docs/forgemind/venture-review.md. Naming remains unresolved. No outreach, spending, deployment or application implementation.",
+  "inputs": {
+    "citedResearch": 4,
+    "customerSignals": 0,
+    "telemetryEvents": 0
+  },
+  "loops": [
+    {
+      "action": "Import interviews, support, sales, reviews, and product telemetry with source and date.",
+      "evidence": 4,
+      "name": "listen"
+    },
+    {
+      "action": "Separate observed demand from desk research and behavioral data; flag disagreements.",
+      "evidence": 0,
+      "name": "triangulate"
+    },
+    {
+      "action": "Choose one reversible experiment with a kill condition and an owner.",
+      "evidence": 0,
+      "name": "bet"
+    },
+    {
+      "action": "Record outcome, update confidence, and reprioritize the portfolio.",
+      "evidence": 0,
+      "name": "learn"
+    }
+  ],
+  "nextAction": "create-or-update-an-experiment",
+  "schemaVersion": 1,
+  "status": "passed"
+}

@@ -1,0 +1,281 @@
+{
+  "boundary": "User-selected starting price EUR 9.99 per seat/month; net VAT treatment assumed. All other inputs are illustrative analyst assumptions, not forecasts. Accounts are paying organizations. No market sizing or demand evidence.",
+  "scenarios": [
+    {
+      "name": "Konservativ",
+      "reachableAccounts": 30,
+      "newAccountsPerMonth": 1,
+      "seats": 3,
+      "price": 9.99,
+      "churn": 0.04,
+      "grossMargin": 0.7,
+      "cac": 500,
+      "build": 15000,
+      "fixedMonthly": 0,
+      "months": [
+        {
+          "month": 1,
+          "accounts": 1,
+          "revenue": 29.97
+        },
+        {
+          "month": 2,
+          "accounts": 1.96,
+          "revenue": 58.7412
+        },
+        {
+          "month": 3,
+          "accounts": 2.8815999999999997,
+          "revenue": 86.361552
+        },
+        {
+          "month": 4,
+          "accounts": 3.7663359999999995,
+          "revenue": 112.87708991999999
+        },
+        {
+          "month": 5,
+          "accounts": 4.61568256,
+          "revenue": 138.3320063232
+        },
+        {
+          "month": 6,
+          "accounts": 5.4310552576,
+          "revenue": 162.76872607027198
+        },
+        {
+          "month": 7,
+          "accounts": 6.213813047295999,
+          "revenue": 186.2279770274611
+        },
+        {
+          "month": 8,
+          "accounts": 6.965260525404159,
+          "revenue": 208.74885794636265
+        },
+        {
+          "month": 9,
+          "accounts": 7.686650104387993,
+          "revenue": 230.36890362850815
+        },
+        {
+          "month": 10,
+          "accounts": 8.379184100212473,
+          "revenue": 251.12414748336784
+        },
+        {
+          "month": 11,
+          "accounts": 9.044016736203973,
+          "revenue": 271.0491815840331
+        },
+        {
+          "month": 12,
+          "accounts": 9.682256066755814,
+          "revenue": 290.1772143206718
+        }
+      ],
+      "endAccounts": 9.682256066755814,
+      "revenue": 2026.7468563038765,
+      "grossProfit": 1418.7227994127134,
+      "acquisitionCost": 6000,
+      "net12": -19581.277200587287,
+      "operatingBreakEvenAccounts": 0,
+      "breakEvenWithAcquisition": 24,
+      "cacPaybackMonths": 23.8333571666905
+    },
+    {
+      "name": "Basis",
+      "reachableAccounts": 100,
+      "newAccountsPerMonth": 3,
+      "seats": 5,
+      "price": 9.99,
+      "churn": 0.02,
+      "grossMargin": 0.8,
+      "cac": 600,
+      "build": 25000,
+      "fixedMonthly": 0,
+      "months": [
+        {
+          "month": 1,
+          "accounts": 3,
+          "revenue": 149.85
+        },
+        {
+          "month": 2,
+          "accounts": 5.9399999999999995,
+          "revenue": 296.703
+        },
+        {
+          "month": 3,
+          "accounts": 8.8212,
+          "revenue": 440.61893999999995
+        },
+        {
+          "month": 4,
+          "accounts": 11.644775999999998,
+          "revenue": 581.6565611999999
+        },
+        {
+          "month": 5,
+          "accounts": 14.411880479999999,
+          "revenue": 719.873429976
+        },
+        {
+          "month": 6,
+          "accounts": 17.123642870399998,
+          "revenue": 855.32596137648
+        },
+        {
+          "month": 7,
+          "accounts": 19.781170012991996,
+          "revenue": 988.0694421489502
+        },
+        {
+          "month": 8,
+          "accounts": 22.385546612732156,
+          "revenue": 1118.1580533059712
+        },
+        {
+          "month": 9,
+          "accounts": 24.937835680477512,
+          "revenue": 1245.6448922398517
+        },
+        {
+          "month": 10,
+          "accounts": 27.43907896686796,
+          "revenue": 1370.5819943950546
+        },
+        {
+          "month": 11,
+          "accounts": 29.8902973875306,
+          "revenue": 1493.0203545071536
+        },
+        {
+          "month": 12,
+          "accounts": 32.292491439779994,
+          "revenue": 1613.0099474170108
+        }
+      ],
+      "endAccounts": 32.292491439779994,
+      "revenue": 10872.512576566472,
+      "grossProfit": 8698.010061253179,
+      "acquisitionCost": 21600,
+      "net12": -37901.98993874682,
+      "operatingBreakEvenAccounts": 0,
+      "breakEvenWithAcquisition": 46,
+      "cacPaybackMonths": 15.015015015015011
+    },
+    {
+      "name": "Positiv",
+      "reachableAccounts": 250,
+      "newAccountsPerMonth": 8,
+      "seats": 10,
+      "price": 9.99,
+      "churn": 0.01,
+      "grossMargin": 0.85,
+      "cac": 600,
+      "build": 25000,
+      "fixedMonthly": 0,
+      "months": [
+        {
+          "month": 1,
+          "accounts": 8,
+          "revenue": 799.2
+        },
+        {
+          "month": 2,
+          "accounts": 15.92,
+          "revenue": 1590.408
+        },
+        {
+          "month": 3,
+          "accounts": 23.7608,
+          "revenue": 2373.70392
+        },
+        {
+          "month": 4,
+          "accounts": 31.523191999999998,
+          "revenue": 3149.1668808
+        },
+        {
+          "month": 5,
+          "accounts": 39.20796008,
+          "revenue": 3916.875211992
+        },
+        {
+          "month": 6,
+          "accounts": 46.8158804792,
+          "revenue": 4676.90645987208
+        },
+        {
+          "month": 7,
+          "accounts": 54.347721674408,
+          "revenue": 5429.337395273359
+        },
+        {
+          "month": 8,
+          "accounts": 61.80424445766392,
+          "revenue": 6174.244021320626
+        },
+        {
+          "month": 9,
+          "accounts": 69.18620201308728,
+          "revenue": 6911.70158110742
+        },
+        {
+          "month": 10,
+          "accounts": 76.49433999295641,
+          "revenue": 7641.784565296345
+        },
+        {
+          "month": 11,
+          "accounts": 83.72939659302685,
+          "revenue": 8364.566719643382
+        },
+        {
+          "month": 12,
+          "accounts": 90.89210262709658,
+          "revenue": 9080.121052446948
+        }
+      ],
+      "endAccounts": 90.89210262709658,
+      "revenue": 60108.01580775216,
+      "grossProfit": 51091.813436589335,
+      "acquisitionCost": 57600,
+      "net12": -31508.186563410665,
+      "operatingBreakEvenAccounts": 0,
+      "breakEvenWithAcquisition": 57,
+      "cacPaybackMonths": 7.0658894188305945
+    }
+  ],
+  "sensitivity": [
+    {
+      "change": "Preis -20%",
+      "net12": -39641.591950997456
+    },
+    {
+      "change": "Preis +20%",
+      "net12": -36162.38792649619
+    },
+    {
+      "change": "Neukunden halbiert",
+      "net12": -31450.99496937341
+    },
+    {
+      "change": "Neukunden verdoppelt",
+      "net12": -50803.97987749364
+    },
+    {
+      "change": "CAC +50%",
+      "net12": -48701.98993874682
+    },
+    {
+      "change": "Churn 4%",
+      "net12": -38493.012574784494
+    },
+    {
+      "change": "Fixkosten +1000 EUR",
+      "net12": -49901.98993874682
+    }
+  ]
+}

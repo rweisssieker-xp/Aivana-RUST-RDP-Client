@@ -63,12 +63,32 @@ pub enum ServiceAction {
 }
 #[derive(Clone, Debug)]
 pub enum Request {
-    Ssh { command: String },
+    Ssh {
+        command: String,
+    },
     WinRm(Query),
-    Service { name: String, action: ServiceAction },
-    List { remote: String },
-    Upload { local: String, remote: String },
-    Download { remote: String, local: String },
+    Service {
+        name: String,
+        action: ServiceAction,
+    },
+    List {
+        remote: String,
+    },
+    Upload {
+        local: String,
+        remote: String,
+    },
+    Download {
+        remote: String,
+        local: String,
+    },
+    Transfer {
+        local: String,
+        remote: String,
+        upload: bool,
+        resume: bool,
+        recursive: bool,
+    },
 }
 #[derive(Clone, Debug)]
 pub struct CommandSpec {
@@ -92,6 +112,44 @@ pub fn sftp_path(value: &str) -> Result<String, String> {
 impl Request {
     pub fn build(&self, endpoint: &Endpoint) -> Result<CommandSpec, String> {
         Endpoint::new(&endpoint.host, &endpoint.user, endpoint.port)?;
+        if let Self::Transfer {
+            local,
+            remote,
+            upload,
+            resume,
+            recursive,
+        } = self
+        {
+            let base = if *upload {
+                Self::Upload {
+                    local: local.clone(),
+                    remote: remote.clone(),
+                }
+            } else {
+                Self::Download {
+                    local: local.clone(),
+                    remote: remote.clone(),
+                }
+            };
+            let mut spec = base.build(endpoint)?;
+            let verb = if *upload { "put" } else { "get" };
+            let flags = format!(
+                "{}{}",
+                if *resume { " -a" } else { "" },
+                if *recursive { " -R" } else { "" }
+            );
+            let (source, destination) = if *upload {
+                (local, remote)
+            } else {
+                (remote, local)
+            };
+            spec.stdin = format!(
+                "{verb}{flags} {} {}\n",
+                sftp_path(source)?,
+                sftp_path(destination)?
+            );
+            return Ok(spec);
+        }
         if let Self::Upload { local, .. } | Self::Download { local, .. } = self {
             if !std::path::Path::new(local).is_absolute() {
                 return Err("Lokaler Dateipfad muss absolut sein.".into());
@@ -104,6 +162,7 @@ impl Request {
             source: endpoint.host.clone(),
         };
         match self {
+            Self::Transfer { .. } => unreachable!("Transfer options handled before base request"),
             Self::Ssh { command } => {
                 if command.trim().is_empty() || command.len() > 8192 || command.contains('\0') {
                     return Err("SSH-Befehl ist leer oder zu lang.".into());
@@ -270,6 +329,25 @@ impl Drop for JobQueue {
     }
 }
 impl JobQueue {
+    /// Only stdout from an exact endpoint+path List command can be a listing.
+    pub fn latest_listing(&self, endpoint: &Endpoint, remote: &str) -> Option<&Job> {
+        let expected = Request::List {
+            remote: remote.into(),
+        }
+        .build(endpoint)
+        .ok()?;
+        self.jobs.iter().rev().find(|job| {
+            job.status == JobStatus::Completed
+                && job
+                    .result
+                    .as_ref()
+                    .is_some_and(|r| r.status == JobStatus::Completed)
+                && job.spec.program == expected.program
+                && job.spec.args == expected.args
+                && job.spec.stdin == expected.stdin
+                && job.spec.source == expected.source
+        })
+    }
     pub fn enqueue(&mut self, spec: CommandSpec) -> Result<u64, String> {
         if self.jobs.len() >= JOB_LIMIT {
             return Err("Auftragsliste voll; abgeschlossene Aufträge entfernen.".into());
@@ -544,6 +622,103 @@ fn run(spec: CommandSpec, cancel: Arc<AtomicBool>, timeout: Duration) -> JobResu
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn resume_recursive_specs_and_listing_identity() {
+        let endpoint = Endpoint::new("host", "alice", 22).unwrap();
+        let local = if cfg!(windows) {
+            "C:/tmp/file"
+        } else {
+            "/tmp/file"
+        };
+        for upload in [true, false] {
+            for resume in [true, false] {
+                for recursive in [true, false] {
+                    let spec = Request::Transfer {
+                        local: local.into(),
+                        remote: "/remote file".into(),
+                        upload,
+                        resume,
+                        recursive,
+                    }
+                    .build(&endpoint)
+                    .unwrap();
+                    assert!(spec.stdin.starts_with(if upload { "put " } else { "get " }));
+                    assert_eq!(spec.stdin.contains(" -a"), resume);
+                    assert_eq!(spec.stdin.contains(" -R"), recursive);
+                    assert!(spec.stdin.contains("\"/remote file\""));
+                }
+            }
+        }
+        assert!(
+            Request::Transfer {
+                local: "relative".into(),
+                remote: "/remote".into(),
+                upload: true,
+                resume: true,
+                recursive: true
+            }
+            .build(&endpoint)
+            .is_err()
+        );
+        assert!(
+            Request::Transfer {
+                local: local.into(),
+                remote: "/remote\n!evil".into(),
+                upload: false,
+                resume: true,
+                recursive: false
+            }
+            .build(&endpoint)
+            .is_err()
+        );
+        let mut queue = JobQueue::default();
+        queue
+            .enqueue(
+                Request::List {
+                    remote: "/files".into(),
+                }
+                .build(&endpoint)
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(queue.latest_listing(&endpoint, "/files").is_none());
+        queue.jobs[0].status = JobStatus::Completed;
+        queue.jobs[0].result = Some(JobResult {
+            status: JobStatus::Completed,
+            stdout: "actual listing".into(),
+            stderr: "not a listing".into(),
+            truncated: false,
+            finished: SystemTime::now(),
+        });
+        assert_eq!(
+            queue
+                .latest_listing(&endpoint, "/files")
+                .unwrap()
+                .result
+                .as_ref()
+                .unwrap()
+                .stdout,
+            "actual listing"
+        );
+        assert!(queue.latest_listing(&endpoint, "/other").is_none());
+        assert!(
+            queue
+                .latest_listing(&Endpoint::new("host", "bob", 22).unwrap(), "/files")
+                .is_none()
+        );
+        assert!(
+            queue
+                .latest_listing(&Endpoint::new("host", "alice", 23).unwrap(), "/files")
+                .is_none()
+        );
+        assert!(
+            queue
+                .latest_listing(&Endpoint::new("other", "alice", 22).unwrap(), "/files")
+                .is_none()
+        );
+        queue.jobs[0].result.as_mut().unwrap().status = JobStatus::Failed("no access".into());
+        assert!(queue.latest_listing(&endpoint, "/files").is_none());
+    }
     #[cfg(windows)]
     fn stub(script: &str) -> CommandSpec {
         CommandSpec {

@@ -53,7 +53,8 @@ impl ProfileStore {
     pub fn save(&self, profiles: &[ConnectionProfile]) -> Result<()> {
         let json =
             serde_json::to_string_pretty(profiles).context("failed to serialize profiles")?;
-        fs::write(&self.path, json).context("failed to write profiles file")
+        crate::security::atomic_write(&self.path, json.as_bytes())
+            .context("failed to write profiles file")
     }
 
     fn seed_profiles() -> Vec<ConnectionProfile> {
@@ -89,7 +90,7 @@ pub struct NativeRdpEngine {
     requested_sizes: HashMap<Uuid, (u16, u16)>,
     clipboard_focus: Option<Uuid>,
     manual_capture: bool,
-    manual_inputs: Vec<(Uuid, InputAction)>,
+    manual_inputs: Vec<(Uuid, InputAction, Instant)>,
 }
 
 #[derive(Default)]
@@ -352,15 +353,32 @@ fn spawn_runtime(
 
 impl NativeRdpEngine {
     pub fn set_manual_capture(&mut self, enabled: bool) {
-        self.manual_capture=enabled;
-        if !enabled {self.manual_inputs.clear();}
+        self.manual_capture = enabled;
+        if !enabled {
+            self.manual_inputs.clear();
+        }
     }
-    pub fn take_manual_inputs(&mut self)->Vec<(Uuid,InputAction)>{std::mem::take(&mut self.manual_inputs)}
-    pub fn send_manual_input(&mut self,session_id:Uuid,action:InputAction)->Result<()> {
-        self.send_input(session_id,action.clone())?;
-        if self.manual_capture && !matches!(action,InputAction::MovePointer{..}) && self.manual_inputs.len()<512 {
+    pub fn take_manual_inputs(&mut self) -> Vec<(Uuid, InputAction, Instant)> {
+        std::mem::take(&mut self.manual_inputs)
+    }
+    pub fn send_manual_input(&mut self, session_id: Uuid, action: InputAction) -> Result<()> {
+        self.send_input(session_id, action.clone())?;
+        if self.manual_capture
+            && !matches!(action, InputAction::MovePointer { .. })
+            && self.manual_inputs.len() < 512
+        {
             // Text is only a marker; passwords never enter the observation queue.
-            self.manual_inputs.push((session_id,match action{InputAction::TypeText{..}=>InputAction::TypeText{text:String::new()},other=>other}));
+            self.manual_inputs.push((
+                session_id,
+                match action {
+                    InputAction::TypeText { .. } => InputAction::TypeText {
+                        text: String::new(),
+                    },
+                    InputAction::Hotkey { .. } => InputAction::Hotkey { keys: vec![] },
+                    other => other,
+                },
+                Instant::now(),
+            ));
         }
         Ok(())
     }

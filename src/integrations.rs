@@ -137,6 +137,31 @@ pub fn ad_inventory_command() -> CommandSpec {
     }
 }
 
+/// Explicit tenant read with a caller-provided Graph token; the token never appears in args/output.
+pub fn entra_inventory_command() -> CommandSpec {
+    CommandSpec {
+        program:"powershell.exe".into(),
+        args:["-NoLogo","-NoProfile","-NonInteractive","-Command","-"].into_iter().map(str::to_owned).collect(),
+        stdin:r#"$ErrorActionPreference='Stop'
+[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false)
+try {
+  if (-not $env:AIVANA_GRAPH_ACCESS_TOKEN) { throw 'Graph token fehlt' }
+  Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
+  Import-Module Microsoft.Graph.Identity.DirectoryManagement -ErrorAction Stop
+  $token=ConvertTo-SecureString $env:AIVANA_GRAPH_ACCESS_TOKEN -AsPlainText -Force
+  Connect-MgGraph -AccessToken $token -NoWelcome -ErrorAction Stop | Out-Null
+  $devices=@(Get-MgDevice -Top 501 -Property DisplayName,OperatingSystem -ErrorAction Stop)
+  if ($devices.Count -gt 500) { throw 'Inventarlimit' }
+  $rows=@($devices | Where-Object {$_.OperatingSystem -eq 'Windows'} | ForEach-Object {[pscustomobject]@{name=$_.DisplayName;host=$_.DisplayName;group='Entra (Zielname prüfen)';protocol='rdp'}})
+  ConvertTo-Json -InputObject $rows -Compress
+  Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
+  exit 0
+} catch { [Console]::Error.WriteLine('Entra-Abfrage fehlgeschlagen. Graph-Module, AIVANA_GRAPH_ACCESS_TOKEN, Device.Read.All und Grenze von 500 Geräten prüfen.'); exit 1 }
+"#.into(),
+        source:"Entra ID / explizites Graph-Zugriffstoken; Anzeigenamen sind unbestätigte Zielkandidaten".into(),
+    }
+}
+
 #[derive(Clone, Default, Deserialize, Serialize)]
 pub struct GroupRule {
     pub name: String,

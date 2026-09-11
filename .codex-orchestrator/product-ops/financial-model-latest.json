@@ -1,0 +1,146 @@
+{
+  "assumptions": {
+    "addressableAccounts": 300,
+    "buildCost": 60000,
+    "customerAcquisitionCost": 2200,
+    "grossMarginPercent": 70,
+    "monthlyChurnPercent": 1.5,
+    "monthlyNewCustomers": 2,
+    "monthlyPrice": 1500,
+    "monthlyRunCost": 4500,
+    "salesCycleMonths": 6,
+    "startingCustomers": 0
+  },
+  "assumptionSources": {
+    "addressableAccounts": {
+      "evidence": "observed",
+      "inputs": [
+        "project profile configuration"
+      ],
+      "source": "project-evidence",
+      "value": 300
+    },
+    "buildCost": {
+      "evidence": "observed",
+      "inputs": [
+        "project profile configuration"
+      ],
+      "source": "project-evidence",
+      "value": 60000
+    },
+    "customerAcquisitionCost": {
+      "evidence": "observed",
+      "inputs": [
+        "project profile configuration"
+      ],
+      "source": "project-evidence",
+      "value": 2200
+    },
+    "grossMarginPercent": {
+      "evidence": "observed",
+      "inputs": [
+        "project profile configuration"
+      ],
+      "source": "project-evidence",
+      "value": 70
+    },
+    "monthlyChurnPercent": {
+      "evidence": "observed",
+      "inputs": [
+        "project profile configuration"
+      ],
+      "source": "project-evidence",
+      "value": 1.5
+    },
+    "monthlyNewCustomers": {
+      "evidence": "observed",
+      "inputs": [
+        "project profile configuration"
+      ],
+      "source": "project-evidence",
+      "value": 2
+    },
+    "monthlyPrice": {
+      "evidence": "observed",
+      "inputs": [
+        "project profile configuration"
+      ],
+      "source": "project-evidence",
+      "value": 1500
+    },
+    "monthlyRunCost": {
+      "evidence": "observed",
+      "inputs": [
+        "project profile configuration"
+      ],
+      "source": "project-evidence",
+      "value": 4500
+    },
+    "salesCycleMonths": {
+      "evidence": "observed",
+      "inputs": [
+        "project profile configuration"
+      ],
+      "source": "project-evidence",
+      "value": 6
+    },
+    "startingCustomers": {
+      "evidence": "observed",
+      "inputs": [
+        "project profile configuration"
+      ],
+      "source": "project-evidence",
+      "value": 0
+    }
+  },
+  "claimBoundary": "Financial outputs are scenario calculations from explicit assumptions, not forecasts or investment advice.",
+  "decisionRule": "Proceed only if the conservative scenario reaches contribution-positive acquisition inside the available runway.",
+  "errors": [],
+  "generatedAt": "2026-09-11T04:36:25.062Z",
+  "projectDocuments": [
+    "docs/forgemind/financial-model.md"
+  ],
+  "scenarios": [
+    {
+      "acquiredCustomers": 15.6,
+      "acquisitionCost": 44616,
+      "annualRevenue": 249210,
+      "churnedCustomers": 1.76,
+      "endCustomers": 13.85,
+      "grossProfit": 174447,
+      "ltv": 70000,
+      "ltvToCac": 24.48,
+      "name": "conservative",
+      "twelveMonthNet": 15831,
+      "viabilityScore": 84
+    },
+    {
+      "acquiredCustomers": 24,
+      "acquisitionCost": 52800,
+      "annualRevenue": 393120,
+      "churnedCustomers": 2.16,
+      "endCustomers": 21.84,
+      "grossProfit": 275184,
+      "ltv": 70000,
+      "ltvToCac": 31.82,
+      "name": "base",
+      "twelveMonthNet": 108384,
+      "viabilityScore": 92
+    },
+    {
+      "acquiredCustomers": 32.4,
+      "acquisitionCost": 57024,
+      "annualRevenue": 538585.2,
+      "churnedCustomers": 2.48,
+      "endCustomers": 29.92,
+      "grossProfit": 377009.64,
+      "ltv": 70000,
+      "ltvToCac": 39.77,
+      "name": "upside",
+      "twelveMonthNet": 205985.64,
+      "viabilityScore": 100
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "passed"
+}

@@ -1,5 +1,58 @@
 use super::*;
 use crate::operations::{Endpoint, JobQueue, Query, Request, ServiceAction};
+use std::sync::mpsc;
+
+struct LocalEntry {
+    path: std::path::PathBuf,
+    directory: bool,
+}
+struct LocalListing {
+    requested: String,
+    path: std::path::PathBuf,
+    entries: Vec<LocalEntry>,
+    capped: bool,
+    captured: chrono::DateTime<chrono::Utc>,
+}
+fn list_local_directory(requested: String) -> Result<LocalListing, String> {
+    let path = std::fs::canonicalize(&requested).map_err(|e| e.to_string())?;
+    // Windows canonicalize returns extended-length names; OpenSSH expects the
+    // conventional absolute drive/UNC form, not a //?/ path after normalization.
+    #[cfg(windows)]
+    let path = {
+        let text = path.to_string_lossy();
+        std::path::PathBuf::from(if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            format!(r"\\{rest}")
+        } else {
+            text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned()
+        })
+    };
+    let mut entries = Vec::new();
+    let mut capped = false;
+    for entry in std::fs::read_dir(&path).map_err(|e| e.to_string())? {
+        if entries.len() == 500 {
+            capped = true;
+            break;
+        }
+        let entry = entry.map_err(|e| e.to_string())?;
+        let directory = entry.file_type().map_err(|e| e.to_string())?.is_dir();
+        entries.push(LocalEntry {
+            path: entry.path(),
+            directory,
+        });
+    }
+    entries.sort_by(|a, b| {
+        b.directory
+            .cmp(&a.directory)
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    Ok(LocalListing {
+        requested,
+        path,
+        entries,
+        capped,
+        captured: chrono::Utc::now(),
+    })
+}
 
 pub struct OperationsState {
     host: String,
@@ -10,6 +63,12 @@ pub struct OperationsState {
     service: String,
     local: String,
     remote: String,
+    resume: bool,
+    recursive: bool,
+    local_directory: String,
+    local_listing: Option<LocalListing>,
+    local_pending: Option<mpsc::Receiver<Result<LocalListing, String>>>,
+    local_error: String,
     reviewed: bool,
     preview: String,
     pub queue: JobQueue,
@@ -25,6 +84,12 @@ impl Default for OperationsState {
             service: String::new(),
             local: String::new(),
             remote: "/".into(),
+            resume: false,
+            recursive: false,
+            local_directory: ".".into(),
+            local_listing: None,
+            local_pending: None,
+            local_error: String::new(),
             reviewed: false,
             preview: String::new(),
             queue: JobQueue::default(),
@@ -34,6 +99,26 @@ impl Default for OperationsState {
 impl AivanaApp {
     pub(super) fn poll_operations(&mut self) {
         self.operations.queue.poll();
+        if let Some(rx) = &self.operations.local_pending {
+            match rx.try_recv() {
+                Ok(result) => {
+                    match result {
+                        Ok(listing) => {
+                            self.operations.local_listing = Some(listing);
+                            self.operations.local_error.clear();
+                        }
+                        Err(error) => self.operations.local_error = error,
+                    };
+                    self.operations.local_pending = None;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.operations.local_pending = None;
+                    self.operations.local_error =
+                        "Lokale Verzeichnisabfrage beendet ohne Ergebnis.".into();
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
     }
     pub(super) fn operations_view(&mut self, ui: &mut Ui) {
         ui.heading("Remote-Verwaltung");
@@ -93,6 +178,9 @@ impl AivanaApp {
                     ui.selectable_value(&mut state.mode, index, *label);
                 }
             });
+        if state.mode >= 8 {
+            transfer_browser(state, ui);
+        }
         let request = match state.mode {
             0 => {
                 ui.label("Dieser Befehl wird durch die Shell auf dem Ziel ausgeführt. Keine Kennwörter oder Geheimnisse eintragen.");
@@ -130,18 +218,22 @@ impl AivanaApp {
                         ui.text_edit_singleline(&mut state.local);
                     });
                     ui.label("Übertragung kann vorhandene Dateien überschreiben; nach Abbruch können Teildateien bestehen. Kein automatischer Wiederanlauf.");
+                    ui.checkbox(&mut state.resume, "Teildatei ausdrücklich fortsetzen (-a)");
+                    if state.resume {
+                        ui.colored_label(Color32::YELLOW,"Voraussetzung: Die vorhandene Zieldatei entspricht bytegenau dem Anfang der unveränderten Quelle. SFTP prüft diesen Inhalt nicht; sonst drohen beschädigte Dateien. Quelle und Ziel vor Freigabe prüfen.");
+                    }
+                    ui.checkbox(&mut state.recursive, "Verzeichnis rekursiv übertragen (-R)");
                 }
                 match state.mode {
                     8 => Request::List {
                         remote: state.remote.clone(),
                     },
-                    9 => Request::Upload {
-                        local: state.local.clone(),
-                        remote: state.remote.clone(),
-                    },
-                    _ => Request::Download {
+                    _ => Request::Transfer {
                         remote: state.remote.clone(),
                         local: state.local.clone(),
+                        upload: state.mode == 9,
+                        resume: state.resume,
+                        recursive: state.recursive,
                     },
                 }
             }
@@ -226,9 +318,80 @@ impl AivanaApp {
                     });
                 }
             });
-        if state.queue.jobs.iter().any(|job| !job.status.terminal()) {
+        if state.local_pending.is_some()
+            || state.queue.jobs.iter().any(|job| !job.status.terminal())
+        {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(100));
         }
+    }
+}
+
+fn transfer_browser(state: &mut OperationsState, ui: &mut Ui) {
+    ui.columns(2,|columns| {
+        let ui=&mut columns[0];
+        ui.strong("Lokal");
+        ui.text_edit_singleline(&mut state.local_directory);
+        if ui.add_enabled(state.local_pending.is_none(),egui::Button::new("Lokales Verzeichnis lesen")).clicked() {
+            let (tx,rx)=mpsc::channel();let requested=state.local_directory.clone();
+            state.local_pending=Some(rx);state.local_error.clear();
+            std::thread::spawn(move||{let _=tx.send(list_local_directory(requested));});
+        }
+        if state.local_pending.is_some() {ui.label("Verzeichnis wird gelesen …");}
+        if !state.local_error.is_empty() {ui.colored_label(Color32::YELLOW,&state.local_error);}
+        if let Some(listing)=state.local_listing.as_ref().filter(|l|l.requested==state.local_directory) {
+            ui.small(format!("{} · {}",listing.path.display(),listing.captured.to_rfc3339()));
+            if listing.capped {ui.label("Auf 500 Einträge begrenzt.");}
+            ScrollArea::vertical().id_salt("local-transfer-files").max_height(190.0).show(ui,|ui| {
+                for entry in &listing.entries {
+                    let name=entry.path.file_name().unwrap_or_default().to_string_lossy();
+                    ui.horizontal(|ui| {
+                        if entry.directory && ui.small_button("Öffnen").clicked() {state.local_directory=entry.path.to_string_lossy().into_owned();}
+                        if ui.selectable_label(state.local==entry.path.to_string_lossy(),format!("{}{}",if entry.directory {"Ordner: "} else {""},name)).clicked() {state.local=entry.path.to_string_lossy().into_owned();}
+                    });
+                }
+            });
+        } else {ui.small("Noch keine passende lokale Verzeichnisaufnahme. Datei auswählen, um den absoluten lokalen Pfad zu übernehmen.");}
+        let ui=&mut columns[1];ui.strong("Remote · letzte erfolgreiche Verzeichnisaufnahme");
+        ui.small("Remote-Pfad unten ausdrücklich bearbeiten. Für eine neue Aufnahme Modus SFTP: Verzeichnis wählen, Vorschau prüfen und einreihen. Namen werden aus der Textausgabe nicht automatisch übernommen.");
+        if let Ok(endpoint)=Endpoint::new(&state.host,&state.user,state.port) {
+            if let Some(job)=state.queue.latest_listing(&endpoint,&state.remote) {
+                let result=job.result.as_ref().unwrap();let captured:chrono::DateTime<chrono::Utc>=result.finished.into();
+                ui.small(format!("{}@{}:{} · {} · {}",state.user,state.host,state.port,state.remote,captured.to_rfc3339()));
+                if result.truncated {ui.colored_label(Color32::YELLOW,"Unvollständige/verkleinerte Aufnahme; nicht alle Einträge sichtbar.");}
+                ScrollArea::vertical().id_salt("remote-transfer-files").max_height(190.0).show(ui,|ui|{ui.monospace(&result.stdout);});
+            } else {ui.label("Keine erfolgreiche Aufnahme für dieses Ziel, diesen Benutzer, Port und Pfad.");}
+        }
+    });
+}
+
+#[cfg(test)]
+mod transfer_tests {
+    use super::*;
+    #[test]
+    fn local_listing_has_absolute_paths_and_stops_at_500() {
+        let directory =
+            std::env::temp_dir().join(format!("aivana-local-listing-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let files: Vec<_> = (0..501)
+            .map(|i| directory.join(format!("file-{i}.txt")))
+            .collect();
+        for file in &files {
+            std::fs::write(file, b"local-test").unwrap();
+        }
+        let listing = list_local_directory(directory.to_string_lossy().into_owned()).unwrap();
+        for file in &files {
+            std::fs::remove_file(file).unwrap();
+        }
+        std::fs::remove_dir(&directory).unwrap();
+        assert_eq!(listing.entries.len(), 500);
+        assert!(listing.capped);
+        assert!(
+            listing
+                .entries
+                .iter()
+                .all(|entry| entry.path.is_absolute() && !entry.directory)
+        );
+        assert!(!listing.path.to_string_lossy().starts_with(r"\\?\"));
     }
 }

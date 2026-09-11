@@ -1,0 +1,15 @@
+{
+  "projectProfile": {
+    "productCategory": "enterprise-operations",
+    "targetAudience": "Hypothesis: DACH IT administrators and small MSP support teams operating Windows RDP estates; not customer-validated",
+    "primaryJob": "Diagnose interrupted remote sessions, execute operator-approved recovery steps and produce a traceable incident handoff"
+  },
+  "evidenceNotes": "Category is repository-based. Audience is a hypothesis. ForgeMind category financial defaults are not observed business evidence and must not be used as forecasts. See docs/forgemind/venture-review.md.",
+  "commercialDecisions": {
+    "monthlyPricePerUser": 9.99,
+    "salesChannel": "web-only",
+    "monthlyFixedCosts": 0,
+    "vatTreatment": "net assumed, not confirmed",
+    "evidence": "user decision; not measured demand"
+  }
+}

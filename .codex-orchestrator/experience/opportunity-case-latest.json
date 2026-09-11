@@ -1,0 +1,282 @@
+{
+  "artifactPath": ".codex-orchestrator/experience/opportunity-case-latest.json",
+  "businessCase": {
+    "annualRevenue": 108000,
+    "assumptions": {
+      "addressableAccounts": 300,
+      "buildCost": 60000,
+      "grossMarginPercent": 70,
+      "monthlyPrice": 1500,
+      "monthlyRunCost": 4500,
+      "penetrationPercent": 2
+    },
+    "assumptionSources": {
+      "addressableAccounts": {
+        "evidence": "observed",
+        "inputs": [
+          "project profile configuration"
+        ],
+        "source": "project-evidence"
+      },
+      "buildCost": {
+        "evidence": "observed",
+        "inputs": [
+          "project profile configuration"
+        ],
+        "source": "project-evidence"
+      },
+      "grossMarginPercent": {
+        "evidence": "observed",
+        "inputs": [
+          "project profile configuration"
+        ],
+        "source": "project-evidence"
+      },
+      "monthlyPrice": {
+        "evidence": "observed",
+        "inputs": [
+          "project profile configuration"
+        ],
+        "source": "project-evidence"
+      },
+      "monthlyRunCost": {
+        "evidence": "observed",
+        "inputs": [
+          "project profile configuration"
+        ],
+        "source": "project-evidence"
+      },
+      "penetrationPercent": {
+        "evidence": "assumption",
+        "inputs": [
+          "no observed penetration evidence"
+        ],
+        "source": "assumption"
+      }
+    },
+    "breakEvenMonths": 33.33,
+    "confidence": "illustrative-until-validated",
+    "grossProfit": 75600,
+    "requiredValidation": [
+      "Confirm buyer segment and reachable accounts.",
+      "Validate price and willingness to pay.",
+      "Measure build and operating cost with the selected architecture."
+    ],
+    "roiPercent": -64,
+    "twelveMonthNet": -38400
+  },
+  "errors": [],
+  "evidence": {
+    "basis": "project-profile-assumptions",
+    "note": "No customer signals are present; market chance and business case are illustrative assumptions, not market facts.",
+    "signalCount": 0
+  },
+  "generatedAt": "2026-09-11T04:36:25.269Z",
+  "goal": "Validate the Aivana native RDP incident workbench for DACH IT administrators and small MSPs. Compare sourced alternatives and evaluate operator-approved recovery plus incident evidence as the differentiation hypothesis. Consult docs/forgemind/venture-sources.json. No customer demand or willingness to pay has been measured. Category financial defaults must not be called observed evidence; the reviewed economics will be in docs/forgemind/venture-review.md. Naming remains unresolved. No outreach, spending, deployment or application implementation.",
+  "marketChance": {
+    "band": "weak",
+    "confidence": "assumption-led",
+    "dimensions": {
+      "differentiation": 65,
+      "evidence": 25,
+      "feasibility": 62,
+      "frequency": 45,
+      "pain": 50,
+      "reach": 35,
+      "willingnessToPay": 55
+    },
+    "evidence": {
+      "differentiation": "assumption",
+      "evidence": "assumption",
+      "feasibility": "assumption",
+      "frequency": "assumption",
+      "pain": "assumption",
+      "reach": "assumption",
+      "willingnessToPay": "assumption"
+    },
+    "total": 48
+  },
+  "projectDocuments": [
+    "docs/forgemind/market-opportunity.md"
+  ],
+  "projectProfile": {
+    "artifactPath": ".codex-orchestrator/project-profile.json",
+    "claimBoundary": "Project-derived fields describe repository context. They are inferred or assumed until customer, market, pricing, or operating evidence is imported.",
+    "commercialAssumptions": {
+      "addressableAccounts": {
+        "evidence": "observed",
+        "sources": [
+          "project profile configuration"
+        ],
+        "value": 300
+      },
+      "buildCost": {
+        "evidence": "observed",
+        "sources": [
+          "project profile configuration"
+        ],
+        "value": 60000
+      },
+      "customerAcquisitionCost": {
+        "evidence": "observed",
+        "sources": [
+          "project profile configuration"
+        ],
+        "value": 2200
+      },
+      "grossMarginPercent": {
+        "evidence": "observed",
+        "sources": [
+          "project profile configuration"
+        ],
+        "value": 70
+      },
+      "monthlyChurnPercent": {
+        "evidence": "observed",
+        "sources": [
+          "project profile configuration"
+        ],
+        "value": 1.5
+      },
+      "monthlyNewCustomers": {
+        "evidence": "observed",
+        "sources": [
+          "project profile configuration"
+        ],
+        "value": 2
+      },
+      "monthlyPrice": {
+        "evidence": "observed",
+        "sources": [
+          "project profile configuration"
+        ],
+        "value": 1500
+      },
+      "monthlyRunCost": {
+        "evidence": "observed",
+        "sources": [
+          "project profile configuration"
+        ],
+        "value": 4500
+      },
+      "salesCycleMonths": {
+        "evidence": "observed",
+        "sources": [
+          "project profile configuration"
+        ],
+        "value": 6
+      },
+      "startingCustomers": {
+        "evidence": "observed",
+        "sources": [
+          "project profile configuration"
+        ],
+        "value": 0
+      }
+    },
+    "deploymentModel": {
+      "evidence": "missing",
+      "sources": [
+        "no deployment signal"
+      ],
+      "value": "unknown"
+    },
+    "differentiationApproach": {
+      "evidence": "observed",
+      "sources": [
+        "project profile configuration"
+      ],
+      "value": "enterprise-operations workflow with existing integration context"
+    },
+    "errors": [],
+    "evidenceGaps": [
+      "no structured commercial evidence was imported from research or telemetry",
+      "pricing, market size, CAC, churn, and cost values are project-derived assumptions",
+      "deployment model is unknown; validate operating cost assumptions"
+    ],
+    "evidenceSummary": {
+      "importedSignals": 0,
+      "outcomes": 0,
+      "packagePresent": false,
+      "projectDocuments": 8,
+      "readmePresent": true,
+      "researchRecords": 4,
+      "sourceSignals": 0,
+      "telemetryEvents": 0
+    },
+    "generatedAt": "2026-09-11T04:36:25.049Z",
+    "primaryJob": {
+      "evidence": "observed",
+      "sources": [
+        "forgemind.config.json"
+      ],
+      "value": "Diagnose interrupted remote sessions, execute operator-approved recovery steps and produce a traceable incident handoff"
+    },
+    "productCategory": {
+      "evidence": "observed",
+      "sources": [
+        "project profile configuration"
+      ],
+      "value": "enterprise-operations"
+    },
+    "schemaVersion": 1,
+    "status": "passed",
+    "targetAudience": {
+      "evidence": "observed",
+      "sources": [
+        "forgemind.config.json"
+      ],
+      "value": "Hypothesis: DACH IT administrators and small MSP support teams operating Windows RDP estates; not customer-validated"
+    },
+    "technicalCostSignals": [
+      {
+        "evidence": "observed",
+        "sources": [
+          "AI inference dependency or documentation"
+        ],
+        "value": "ai-inference"
+      }
+    ],
+    "workspace": "C:\\tmp\\Aivana-RUST-RDP-Client"
+  },
+  "recommendation": "refine-assumptions-before-build",
+  "schemaVersion": 1,
+  "status": "passed",
+  "ventureContext": {
+    "alternatives": {
+      "evidence": "inferred",
+      "sources": [
+        "project profile configuration"
+      ],
+      "value": "manual triage and existing ITSM routing workflows"
+    },
+    "goToMarket": {
+      "evidence": "inferred",
+      "sources": [
+        "project profile configuration"
+      ],
+      "value": "recruit a small set of qualified operations design partners through existing enterprise channels"
+    },
+    "pricingHypothesis": {
+      "evidence": "inferred",
+      "sources": [
+        "project profile configuration"
+      ],
+      "value": "enterprise workspace subscription with implementation scope validated separately"
+    },
+    "targetSegment": {
+      "evidence": "inferred",
+      "sources": [
+        "project profile configuration"
+      ],
+      "value": "service operations teams with incident-management workflows"
+    },
+    "validationPlan": {
+      "evidence": "inferred",
+      "sources": [
+        "project profile configuration"
+      ],
+      "value": "test incident-resolution workflow completion, approval rate, and willingness to pilot with qualified operators"
+    }
+  }
+}
