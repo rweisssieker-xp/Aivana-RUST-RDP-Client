@@ -125,6 +125,7 @@ pub struct KiPreferencesSaveReport {
 pub struct AivanaApp {
     profiles: Vec<ConnectionProfile>,
     sessions: Vec<RemoteSession>,
+    session_sources: HashMap<Uuid,crate::mission::Target>,
     selected_profile: Option<Uuid>,
     selected_session: Option<Uuid>,
     view: View,
@@ -217,6 +218,7 @@ impl AivanaApp {
         Self {
             profiles,
             sessions: Vec::new(),
+            session_sources: HashMap::new(),
             selected_profile,
             selected_session: None,
             view: View::Sessions,
@@ -505,6 +507,7 @@ impl AivanaApp {
 
         match self.engine.connect(&profile) {
             Ok(session) => {
+                self.session_sources.insert(session.id,crate::mission::Target::from_profile(&profile));
                 self.autopilot.abort();
                 self.timeline.append_event(
                     session.id,

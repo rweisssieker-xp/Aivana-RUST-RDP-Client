@@ -88,6 +88,8 @@ pub struct NativeRdpEngine {
     held: HashMap<Uuid, HeldInput>,
     requested_sizes: HashMap<Uuid, (u16, u16)>,
     clipboard_focus: Option<Uuid>,
+    manual_capture: bool,
+    manual_inputs: Vec<(Uuid, InputAction)>,
 }
 
 #[derive(Default)]
@@ -349,6 +351,19 @@ fn spawn_runtime(
 }
 
 impl NativeRdpEngine {
+    pub fn set_manual_capture(&mut self, enabled: bool) {
+        self.manual_capture=enabled;
+        if !enabled {self.manual_inputs.clear();}
+    }
+    pub fn take_manual_inputs(&mut self)->Vec<(Uuid,InputAction)>{std::mem::take(&mut self.manual_inputs)}
+    pub fn send_manual_input(&mut self,session_id:Uuid,action:InputAction)->Result<()> {
+        self.send_input(session_id,action.clone())?;
+        if self.manual_capture && !matches!(action,InputAction::MovePointer{..}) && self.manual_inputs.len()<512 {
+            // Text is only a marker; passwords never enter the observation queue.
+            self.manual_inputs.push((session_id,match action{InputAction::TypeText{..}=>InputAction::TypeText{text:String::new()},other=>other}));
+        }
+        Ok(())
+    }
     pub fn release_inputs(&mut self, session_id: Uuid) {
         if self.clipboard_focus == Some(session_id) {
             self.set_clipboard_focus(None);

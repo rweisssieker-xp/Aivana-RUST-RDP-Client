@@ -13,7 +13,7 @@ pub(super) struct IntegrationsState {
     vault_item: String,
     vault_target: Option<Uuid>,
     vault_replace: bool,
-    vault: Option<(Uuid, VaultRequest)>,
+    vault: Option<(ConnectionProfile, VaultRequest)>,
     rules: Vec<GroupRule>,
     rule: GroupRule,
     rules_loaded: bool,
@@ -44,17 +44,19 @@ impl AivanaApp {
             .integrations
             .vault
             .as_ref()
-            .and_then(|(id, request)| request.poll().map(|result| (*id, result)));
-        if let Some((id, result)) = completed {
+            .and_then(|(profile, request)| request.poll().map(|result| (profile.clone(), result)));
+        if let Some((reviewed_profile, result)) = completed {
             self.integrations.vault = None;
             match result {
                 Ok(mut secret) => {
-                    if let Some(index) = self.profiles.iter().position(|p| p.id == id) {
+                    if let Some(index) = self.profiles.iter().position(|p| p.id==reviewed_profile.id && p.updated_at==reviewed_profile.updated_at && p.credential_id==reviewed_profile.credential_id && crate::mission::Target::from_profile(&reviewed_profile).matches(p)) {
                         let mut profile = self.profiles[index].clone();
                         secret.domain = profile.domain.clone();
                         profile.username = secret.username.clone();
+                        // Use a fresh record: profile persistence must never alter the old login on failure.
+                        profile.credential_id=None;
                         match self.credentials.save(&mut profile, secret) {
-                            Ok(_) => {
+                            Ok(reference) => {
                                 profile.updated_at = Utc::now();
                                 let mut profiles = self.profiles.clone();
                                 profiles[index] = profile;
@@ -63,14 +65,14 @@ impl AivanaApp {
                                         self.profiles = profiles;
                                         self.integrations.notice = "Vault-Login geschützt gespeichert und Profil aktualisiert.".into();
                                     }
-                                    _ => self.integrations.notice = "Credential gespeichert, aber Profilverknüpfung konnte nicht gespeichert werden. Profil nicht aktualisiert; Speichern erneut ausführen.".into(),
+                                    _ => {let _=self.credentials.delete(reference.id);self.integrations.notice = "Profilverknüpfung konnte nicht gespeichert werden. Bestehendes Profil und bisheriger Login bleiben unverändert.".into();},
                                 }
                             }
                             Err(_) => self.integrations.notice = "Lokales geschütztes Speichern fehlgeschlagen; Profil nicht geändert.".into(),
                         }
                     } else {
                         self.integrations.notice =
-                            "Zielprofil wurde entfernt; Vault-Login verworfen.".into();
+                            "Zielprofil wurde entfernt oder geändert; Vault-Login verworfen.".into();
                     }
                 }
                 Err(error) => self.integrations.notice = error,
@@ -214,7 +216,7 @@ impl AivanaApp {
                 ui.checkbox(&mut self.integrations.vault_replace, "Login dem gewählten Ziel zuordnen; vorhandene Zugangsdaten ersetzen");
                 if ui.add_enabled(self.store.is_some() && self.integrations.vault_target.is_some() && self.integrations.vault_replace, egui::Button::new("Vault-Login abrufen und geschützt speichern")).clicked() {
                     match VaultRequest::start(self.integrations.vault_item.trim()) {
-                        Ok(request) => { self.integrations.vault = Some((self.integrations.vault_target.unwrap(), request)); self.integrations.vault_replace = false; self.integrations.notice = "Vault-Abruf läuft …".into(); }
+                        Ok(request) => { if let Some(profile)=self.profiles.iter().find(|p|Some(p.id)==self.integrations.vault_target).cloned(){self.integrations.vault = Some((profile, request));} self.integrations.vault_replace = false; self.integrations.notice = "Vault-Abruf läuft …".into(); }
                         Err(error) => self.integrations.notice = error,
                     }
                 }

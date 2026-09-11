@@ -18,14 +18,16 @@ pub(super) struct RecordingsState {
 impl AivanaApp {
     pub(super) fn poll_recordings(&mut self){
         if let Some(rec)=&self.recordings.active {
-            if !self.recordings.stopping{if let Some(f)=self.latest_frames.get(&rec.session){let note=self.recordings.note.clone();self.recordings.active.as_mut().unwrap().capture(f,&note);}}
+            if !self.recordings.stopping{if let Some(f)=self.latest_frames.get(&rec.session){let mut note=self.recordings.note.clone();for e in self.timeline.events_for_session(rec.session).iter().rev().take(6).rev(){note.push_str(&format!("\n{} {}",e.created_at,e.message));}self.recordings.active.as_mut().unwrap().capture(f,&note);}}
         }
         let mut updates=vec![];
-        if let Some(rec)=&self.recordings.active{while let Ok(r)=rec.rx.try_recv(){updates.push(r);}}
+        let mut disconnected=false;
+        if let Some(rec)=&self.recordings.active{loop{match rec.rx.try_recv(){Ok(r)=>updates.push(r),Err(std::sync::mpsc::TryRecvError::Disconnected)=>{disconnected=true;break;},Err(_)=>break}}}
         for update in updates{match update{
             Ok(r)=>{if r.finished{self.recordings.active=None;self.recordings.stopping=false;}self.recordings.catalog.retain(|old|old.id!=r.id);self.recordings.selected.get_or_insert(r.id);self.recordings.catalog.push(r);},
             Err(e)=>{self.status=format!("Aufzeichnung: {e}");if let Some(rec)=&mut self.recordings.active{rec.stop();}self.recordings.stopping=true;}
         }}
+        if disconnected && self.recordings.active.is_some(){self.recordings.active=None;self.recordings.stopping=false;self.status="Aufzeichnungsworker beendet. Archivstatus prüfen; letzte Speicherung möglicherweise fehlgeschlagen.".into();}
     }
     pub(super) fn recordings_view(&mut self,ui:&mut Ui){
         ui.heading("Lokale Aufzeichnungen");

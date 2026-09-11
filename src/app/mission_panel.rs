@@ -27,13 +27,13 @@ impl Default for MissionState {
     }
 }
 impl AivanaApp {
-    fn save_missions(&mut self) {
-        if self.missions.error.is_some(){return;}
-        if let Err(e)=app_data_file("missions.dpapi").and_then(|p|self.missions.book.save(&p)){self.status=format!("Auftrag konnte nicht gespeichert werden: {e:#}");}
+    fn save_missions(&mut self)->bool {
+        if self.missions.error.is_some(){return false;}
+        if let Err(e)=app_data_file("missions.dpapi").and_then(|p|self.missions.book.save(&p)){self.status=format!("Auftrag konnte nicht gespeichert werden: {e:#}");false}else{true}
     }
     pub(super) fn poll_missions(&mut self) {
         if let Some((id,target,step,job_id))=self.missions.remote {
-            let done=self.operations.queue.jobs.iter().find(|j|j.id==job_id).and_then(|j|j.result.as_ref().map(|r|(j.spec.source.clone(),r.clone())));
+            let done=self.operations.queue.jobs.iter().find(|j|j.id==job_id).and_then(|j|j.result.as_ref().cloned().or_else(||j.status.terminal().then(||crate::operations::JobResult{status:j.status.clone(),stdout:String::new(),stderr:"Auftrag beendet ohne Ausgabe; Remote-Zustand prüfen".into(),truncated:false,finished:std::time::SystemTime::now()})).map(|r|(j.spec.source.clone(),r)));
             if let Some((source,r))=done {
                 self.missions.remote=None;
                 if let Some(m)=self.missions.book.missions.iter_mut().find(|m|m.id==id){
@@ -78,12 +78,12 @@ impl AivanaApp {
             facts.insert("Profil · Auflösung".into(),format!("{} × {}",p.options.width,p.options.height));
         }
         let mut notes=String::new();
-        if let Some(s)=self.sessions.iter().rev().find(|s|s.profile_id==t.profile_id) {
+        if let Some(s)=self.sessions.iter().rev().find(|s|self.session_sources.get(&s.id).is_some_and(|source|source.same_endpoint(&t))) {
             facts.insert("Sitzung · Status".into(),format!("{:?}",s.status));
             if let Some(e)=&s.last_error {facts.insert("Sitzung · letzter Fehler".into(),e.clone());}
             if let Some(f)=self.latest_frames.get(&s.id) {facts.insert("Bild · Größe".into(),format!("{} × {}",f.width,f.height));facts.insert("Bild · Hash".into(),f.frame_hash.to_string());}
             for e in self.timeline.events_for_session(s.id).iter().rev().take(40).rev(){notes.push_str(&format!("{} {}\n",e.created_at,e.message));}
-        }else{facts.insert("Sitzung · Status".into(),"Keine Sitzung in dieser App geöffnet".into());}
+        }else{facts.insert("Sitzung · Status".into(),"Kein Sitzungskontext mit passender Endpunkt-Identität vorhanden".into());}
         Evidence::new(t,"Profil und lokaler Sitzungsverlauf",facts,&notes)
     }
     fn start_mission_step(&mut self,id:Uuid,target:Uuid,step:usize) {
@@ -100,7 +100,8 @@ impl AivanaApp {
             let spec=match endpoint.and_then(|e|request.build(&e)){Ok(s)=>s,Err(e)=>{self.status=e;return;}};
             let m=self.missions.book.missions.iter_mut().find(|m|m.id==id).unwrap();
             if let Err(e)=m.begin(target,step){self.status=e.to_string();return;}
-            match self.operations.queue.enqueue(spec){Ok(job)=>self.missions.remote=Some((id,target,step,job)),Err(e)=>{m.pause();self.status=e;}}
+            if !self.save_missions(){self.missions.book.missions.iter_mut().find(|m|m.id==id).unwrap().pause();return;}
+            match self.operations.queue.enqueue(spec){Ok(job)=>self.missions.remote=Some((id,target,step,job)),Err(e)=>{self.missions.book.missions.iter_mut().find(|m|m.id==id).unwrap().pause();self.status=e;}}
             self.save_missions();return;
         }
         let mut evidence=self.mission_evidence(t);

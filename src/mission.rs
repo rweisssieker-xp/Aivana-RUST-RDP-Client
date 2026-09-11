@@ -12,14 +12,23 @@ pub struct Target {
     pub name: String,
     pub host: String,
     pub port: u16,
+    #[serde(default)]
+    pub protocol: String,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub domain: String,
+    #[serde(default)]
+    pub route: String,
 }
 impl Target {
     pub fn from_profile(p: &ConnectionProfile) -> Self {
-        Self { profile_id: p.id, name: p.name.clone(), host: p.host.clone(), port: p.port }
+        Self { profile_id: p.id, name: p.name.clone(), host: p.host.clone(), port: p.port,protocol:p.protocol.label().into(),username:p.username.clone(),domain:p.domain.clone(),route:if p.options.gateway.enabled{format!("{}:{}",p.options.gateway.host,p.options.gateway.port)}else{String::new()} }
     }
     pub fn matches(&self, p: &ConnectionProfile) -> bool {
-        self.profile_id == p.id && self.host == p.host && self.port == p.port
+        self.same_endpoint(&Self::from_profile(p))
     }
+    pub fn same_endpoint(&self,t:&Self)->bool {self.profile_id==t.profile_id&&self.host==t.host&&self.port==t.port&&self.protocol==t.protocol&&self.username==t.username&&self.domain==t.domain&&self.route==t.route}
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,7 +118,7 @@ impl Mission {
     pub fn record(&mut self,target:Uuid,step:usize,evidence:Evidence)->Result<()> {
         if evidence.target.profile_id!=target { bail!("Befund gehört zu einem anderen Rechner"); }
         let t=self.targets.iter().find(|t|t.profile_id==target).context("Rechner fehlt")?;
-        if t.host!=evidence.target.host||t.port!=evidence.target.port { bail!("Befund gehört zu einem anderen Endpunkt"); }
+        if !t.same_endpoint(&evidence.target) { bail!("Befund gehört zu einem anderen Endpunkt"); }
         let o=self.outcomes.iter_mut().find(|o|o.target==target&&o.step==step).context("Schritt fehlt")?;
         if o.status!=Status::Running { bail!("Schritt läuft nicht mehr"); }
         if evidence.facts.is_empty()&&evidence.notes.trim().is_empty() { bail!("Leerer Befund"); }
@@ -149,7 +158,9 @@ impl MissionBook {
         #[cfg(not(windows))] { let _=path; bail!("Verschlüsselter Auftragsspeicher benötigt Windows DPAPI"); }
         #[cfg(windows)] {
             if let Some(p)=path.parent(){std::fs::create_dir_all(p)?;}
-            let bytes=protect_secret(&serde_json::to_vec(self)?)?;
+            let clear=serde_json::to_vec(self)?;
+            if clear.len()>64*1024*1024 {bail!("Auftragsspeicher überschreitet 64 MiB");}
+            let bytes=protect_secret(&clear)?;
             let temp=path.with_extension(format!("{}.tmp",Uuid::new_v4()));
             std::fs::write(&temp,bytes)?;
             if let Err(e)=std::fs::rename(&temp,path){let _=std::fs::remove_file(&temp);return Err(e.into());}
@@ -173,6 +184,8 @@ impl MissionBook {
         let mut m:Mission=serde_json::from_str(json).context("Übergabe lesen")?;validate_mission(&m)?;
         // Imported reports are history; local execution must be explicitly resumed and targets matched.
         m.id=Uuid::new_v4();m.paused=true;m.rollout=false;
+        let mut ids=BTreeMap::new();for e in &mut m.evidence{let old=e.id;e.id=Uuid::new_v4();ids.insert(old,e.id);}
+        for o in &mut m.outcomes{for id in &mut o.evidence{*id=ids[id];}}
         for o in &mut m.outcomes {if o.status==Status::Running{o.status=Status::Interrupted;}}
         m.objective=redact_secret_text(&m.objective);m.handoff=redact_secret_text(&m.handoff);
         for e in &mut m.evidence {e.notes=redact_secret_text(&e.notes);for v in e.facts.values_mut(){*v=redact_secret_text(v);}}
@@ -188,8 +201,10 @@ fn validate_mission(m:&Mission)->Result<()> {
     if evidence_ids.len()!=m.evidence.len() || m.evidence.len()>16384 {bail!("Ungültige Befundliste");}
     for o in &m.outcomes {
         if matches!(o.status,Status::Passed|Status::Review)&&o.evidence.is_empty(){bail!("Prüfergebnis ohne Befund");}
+        if o.status==Status::Passed&&o.verification.trim().is_empty(){bail!("Erfolg ohne Prüfnotiz");}
         for id in &o.evidence {if !m.evidence.iter().any(|e|e.id==*id&&e.target.profile_id==o.target){bail!("Befundzuordnung ungültig");}}
     }
+    for e in &m.evidence {if !m.targets.iter().any(|t|t.same_endpoint(&e.target))||(e.facts.is_empty()&&e.notes.trim().is_empty()){bail!("Befund enthält keinen Inhalt oder gehört zu einem anderen Endpunkt");}}
     Ok(())
 }
 #[derive(Debug, PartialEq, Eq)]

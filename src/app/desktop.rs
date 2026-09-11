@@ -161,7 +161,7 @@ impl AivanaApp {
                 self.view = View::Sessions;
             }
             if !focused {
-                ui.label(RichText::new("RECHNERZENTRALE").size(11.0).color(MUTED));
+                ui.label(RichText::new(if self.view==View::Missions{"MISSION CONTROL"}else{"RECHNERZENTRALE"}).size(11.0).color(MUTED));
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui
