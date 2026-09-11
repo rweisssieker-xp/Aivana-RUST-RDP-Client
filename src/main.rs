@@ -3,12 +3,23 @@ mod app;
 mod autopilot;
 mod certificate;
 mod computer_use;
+mod connection_options;
 mod diagnostics;
 mod ironrdp_client;
+mod integrations;
 mod legacy_rdp;
 mod memory;
+mod mission;
+mod operations;
+mod recording;
 mod models;
 mod policy;
+mod profile_exchange;
+mod rd_gateway;
+mod rdp_audio_input;
+mod rdp_audio_output;
+mod rdp_channels;
+mod rdp_drives;
 mod runbook;
 mod security;
 mod services;
@@ -588,8 +599,12 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([1280.0, 820.0])
-            .with_min_inner_size([900.0, 620.0]),
+            .with_inner_size(if args.iter().any(|arg| arg == "--gui-capture") {
+                [1440.0, 1024.0]
+            } else {
+                [1280.0, 820.0]
+            })
+            .with_min_inner_size([640.0, 620.0]),
         ..Default::default()
     };
 

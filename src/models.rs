@@ -45,6 +45,8 @@ pub struct ConnectionProfile {
     pub group: String,
     pub tags: Vec<String>,
     pub favorite: bool,
+    #[serde(default)]
+    pub options: crate::connection_options::ProfileOptions,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -66,6 +68,7 @@ impl ConnectionProfile {
             group: group.to_owned(),
             tags: vec!["windows".to_owned(), "rdp".to_owned()],
             favorite,
+            options: Default::default(),
             created_at: now,
             updated_at: now,
         }
@@ -122,11 +125,11 @@ pub struct PerformanceMetrics {
 impl Default for PerformanceMetrics {
     fn default() -> Self {
         Self {
-            latency_ms: 18.0,
-            bandwidth_mbps: 85.0,
-            frame_rate: 60.0,
-            packet_loss_pct: 0.2,
-            quality_score: 92,
+            latency_ms: 0.0,
+            bandwidth_mbps: 0.0,
+            frame_rate: 0.0,
+            packet_loss_pct: 0.0,
+            quality_score: 0,
         }
     }
 }
@@ -142,6 +145,7 @@ pub struct DraftProfile {
     pub group: String,
     pub tags: String,
     pub favorite: bool,
+    pub options: crate::connection_options::ProfileOptions,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -190,15 +194,62 @@ pub struct DirtyRegion {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub enum InputAction {
-    MovePointer { x: u16, y: u16 },
-    Click { x: u16, y: u16, button: MouseButton },
-    DoubleClick { x: u16, y: u16, button: MouseButton },
-    Scroll { x: u16, y: u16, delta: i16 },
-    TypeText { text: String },
-    Hotkey { keys: Vec<String> },
-    Wait { millis: u64 },
+    ClipboardFocus {
+        active: bool,
+    },
+    ClipboardFiles {
+        paths: Vec<String>,
+    },
+    ClipboardDownload {
+        directory: String,
+    },
+    Resize {
+        width: u16,
+        height: u16,
+    },
+    /// PC set-1 scan code; bit 8 denotes an extended (E0) key.
+    Key {
+        scan_code: u16,
+        pressed: bool,
+    },
+    PointerButton {
+        x: u16,
+        y: u16,
+        button: MouseButton,
+        pressed: bool,
+    },
+    MovePointer {
+        x: u16,
+        y: u16,
+    },
+    Click {
+        x: u16,
+        y: u16,
+        button: MouseButton,
+    },
+    DoubleClick {
+        x: u16,
+        y: u16,
+        button: MouseButton,
+    },
+    Scroll {
+        x: u16,
+        y: u16,
+        delta: i16,
+    },
+    TypeText {
+        text: String,
+    },
+    Hotkey {
+        keys: Vec<String>,
+    },
+    Wait {
+        millis: u64,
+    },
     Screenshot,
-    Verify { expectation: String },
+    Verify {
+        expectation: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -550,6 +601,7 @@ impl From<&ConnectionProfile> for DraftProfile {
             group: profile.group.clone(),
             tags: profile.tags.join(", "),
             favorite: profile.favorite,
+            options: profile.options.clone(),
         }
     }
 }

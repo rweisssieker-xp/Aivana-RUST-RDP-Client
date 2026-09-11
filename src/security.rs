@@ -298,7 +298,7 @@ fn hex_decode(hex: &str) -> Result<Vec<u8>> {
 }
 
 #[cfg(windows)]
-fn protect_secret(clear: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn protect_secret(clear: &[u8]) -> Result<Vec<u8>> {
     use std::ptr::null_mut;
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Cryptography::{
@@ -338,7 +338,7 @@ fn protect_secret(clear: &[u8]) -> Result<Vec<u8>> {
 }
 
 #[cfg(windows)]
-fn unprotect_secret(protected: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn unprotect_secret(protected: &[u8]) -> Result<Vec<u8>> {
     use std::ptr::null_mut;
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Cryptography::{
@@ -378,12 +378,12 @@ fn unprotect_secret(protected: &[u8]) -> Result<Vec<u8>> {
 }
 
 #[cfg(not(windows))]
-fn protect_secret(clear: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn protect_secret(clear: &[u8]) -> Result<Vec<u8>> {
     Ok(clear.iter().map(|b| b ^ 0xa5).collect())
 }
 
 #[cfg(not(windows))]
-fn unprotect_secret(protected: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn unprotect_secret(protected: &[u8]) -> Result<Vec<u8>> {
     Ok(protected.iter().map(|b| b ^ 0xa5).collect())
 }
 

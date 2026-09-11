@@ -99,8 +99,15 @@ impl AiProvider for LocalAiProvider {
             InputAction::Screenshot | InputAction::Verify { .. } | InputAction::Wait { .. } => {
                 RiskLevel::ReadOnly
             }
-            InputAction::MovePointer { .. } | InputAction::Scroll { .. } => RiskLevel::LowRisk,
+            InputAction::MovePointer { .. }
+            | InputAction::Scroll { .. }
+            | InputAction::Resize { .. }
+            | InputAction::ClipboardFocus { .. } => RiskLevel::LowRisk,
             InputAction::Click { .. }
+            | InputAction::Key { .. }
+            | InputAction::PointerButton { .. }
+            | InputAction::ClipboardFiles { .. }
+            | InputAction::ClipboardDownload { .. }
             | InputAction::DoubleClick { .. }
             | InputAction::Hotkey { .. }
             | InputAction::TypeText { .. } => RiskLevel::ElevatedRisk,

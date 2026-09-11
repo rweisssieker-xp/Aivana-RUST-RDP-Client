@@ -1,6 +1,8 @@
 //! Native spatial workspace, focused session and contextual incident investigation.
 use super::*;
 
+mod workbench;
+
 const INK: Color32 = Color32::from_rgb(24, 43, 53);
 const TEAL: Color32 = Color32::from_rgb(0, 108, 123);
 const PAPER: Color32 = Color32::from_rgb(245, 248, 248);
@@ -12,6 +14,9 @@ const AMBER: Color32 = Color32::from_rgb(159, 87, 12);
 pub(super) struct DesktopState {
     order: Vec<Uuid>,
     group: String,
+    compact: bool,
+    featured: Option<Uuid>,
+    workbench: workbench::WorkbenchState,
     #[serde(skip)]
     pub focus: bool,
     #[serde(skip)]
@@ -108,7 +113,16 @@ fn child(ui: &mut Ui, id: impl std::hash::Hash, rect: Rect) -> Ui {
 impl AivanaApp {
     pub(super) fn desktop_shell(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
-        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::K)) {
+        let scale = self.desktop.workbench.scale.clamp(0.8, 1.75);
+        if (ctx.zoom_factor() - scale).abs() > 0.01 {
+            ctx.set_zoom_factor(scale);
+        }
+        let shortcut = if self.desktop.focus {
+            egui::Modifiers::CTRL | egui::Modifiers::SHIFT
+        } else {
+            egui::Modifiers::CTRL
+        };
+        if ctx.input_mut(|input| input.consume_key(shortcut, egui::Key::K)) {
             self.desktop.palette = !self.desktop.palette;
             self.desktop.palette_focus = self.desktop.palette;
             self.desktop.query.clear();
@@ -116,21 +130,48 @@ impl AivanaApp {
         let focused =
             self.view == View::Sessions && self.desktop.focus && self.selected_session.is_some();
         let root = ui.max_rect();
-        ui.painter().rect_filled(root, 0, PAPER);
+        ui.painter().rect_filled(
+            root,
+            0,
+            if focused {
+                Color32::from_rgb(30, 36, 43)
+            } else {
+                PAPER
+            },
+        );
         let header = Rect::from_min_size(root.min, egui::vec2(root.width(), 62.0));
         let mut top = child(ui, "desktop-header", header.shrink2(egui::vec2(18.0, 10.0)));
+        if focused {
+            top.style_mut().visuals = egui::Visuals::dark();
+        }
         top.horizontal(|ui| {
-            ui.label(RichText::new("Aivana").size(25.0).strong().color(TEAL));
+            ui.label(
+                RichText::new("Aivana")
+                    .size(25.0)
+                    .strong()
+                    .color(if focused {
+                        Color32::from_rgb(132, 211, 221)
+                    } else {
+                        TEAL
+                    }),
+            );
             ui.add_space(12.0);
             if (focused || self.view != View::Sessions) && ui.button("Arbeitsbereich").clicked() {
                 self.desktop.focus = false;
                 self.view = View::Sessions;
             }
             if !focused {
-                ui.label(RichText::new("REMOTE WORKSPACE").size(11.0).color(MUTED));
+                ui.label(RichText::new("RECHNERZENTRALE").size(11.0).color(MUTED));
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button("Suchen & Aktionen   Strg K").clicked() {
+                if ui
+                    .button(if focused {
+                        "Aktionen · Strg Umschalt K"
+                    } else {
+                        "Suchen & Aktionen · Strg K"
+                    })
+                    .clicked()
+                {
                     self.desktop.palette = true;
                     self.desktop.palette_focus = true;
                 }
@@ -146,7 +187,22 @@ impl AivanaApp {
         } else {
             184.0
         };
-        let content = Rect::from_min_max(pos2(root.left() + rail_width, header.bottom()), root.max);
+        let footer_height = if !focused && !self.sessions.is_empty() {
+            46.0
+        } else {
+            0.0
+        };
+        let content = Rect::from_min_max(
+            pos2(root.left() + rail_width, header.bottom()),
+            pos2(root.right(), root.bottom() - footer_height),
+        );
+        if footer_height > 0.0 {
+            let rect = Rect::from_min_max(
+                pos2(root.left() + rail_width, root.bottom() - footer_height),
+                root.max,
+            );
+            self.workbench_session_strip(&mut child(ui, "session-strip", rect.shrink(6.0)));
+        }
         if rail_width > 0.0 {
             let rail = Rect::from_min_max(
                 pos2(root.left(), header.bottom()),
@@ -156,6 +212,9 @@ impl AivanaApp {
             self.desktop_navigation(&mut nav);
         }
         let mut body = child(ui, "desktop-content", content.shrink(16.0));
+        if focused {
+            body.style_mut().visuals = egui::Visuals::dark();
+        }
         if !focused {
             body.label(RichText::new(&self.status).size(12.0).color(MUTED));
             body.add_space(8.0);
@@ -164,12 +223,25 @@ impl AivanaApp {
             if focused {
                 self.desktop_focus(&mut body);
             } else {
-                self.desktop_overview(&mut body);
+                if self.desktop.workbench.directory {
+                    self.workbench_directory(&mut body);
+                } else {
+                    if body.button("Zur Rechnerzentrale").clicked() {
+                        self.desktop.workbench.directory = true;
+                        self.save_desktop_layout();
+                    }
+                    self.desktop_overview(&mut body);
+                }
             }
         } else {
             ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(&mut body, |ui| match self.view {
+                    View::Missions => self.missions_view(ui),
+                    View::Operations => self.operations_view(ui),
+                    View::SessionWindows => self.session_layouts_ui(ui),
+                    View::Integrations => self.integrations_view(ui),
+                    View::Recordings => self.recordings_view(ui),
                     View::Connections => self.connections_view(ui),
                     View::Approvals => self.approvals_view(ui),
                     View::Workspaces => self.workspaces_view(ui),
@@ -178,6 +250,7 @@ impl AivanaApp {
                 });
         }
         self.desktop_palette(&ctx);
+        self.workbench_dialogs(&ctx);
     }
 
     fn desktop_navigation(&mut self, ui: &mut Ui) {
@@ -186,14 +259,26 @@ impl AivanaApp {
         if ui
             .selectable_label(
                 self.view == View::Sessions && self.desktop.group.is_empty(),
-                "Alle Sitzungen",
+                "Alle Rechner",
             )
             .clicked()
         {
+            self.desktop.workbench.favorites = false;
+            self.desktop.workbench.directory = true;
             self.desktop.group.clear();
             self.desktop.focus = false;
             self.view = View::Sessions;
             self.save_desktop_layout();
+        }
+        if ui
+            .selectable_label(self.desktop.workbench.favorites, "Favoriten")
+            .clicked()
+        {
+            self.desktop.workbench.favorites = true;
+            self.desktop.workbench.directory = true;
+            self.desktop.focus = false;
+            self.desktop.group.clear();
+            self.view = View::Sessions;
         }
         let mut groups: Vec<_> = self.profiles.iter().map(|p| p.group.clone()).collect();
         groups.sort();
@@ -210,6 +295,7 @@ impl AivanaApp {
                         )
                         .clicked()
                     {
+                        self.desktop.workbench.favorites = false;
                         self.desktop.group = group;
                         self.desktop.focus = false;
                         self.view = View::Sessions;
@@ -220,9 +306,14 @@ impl AivanaApp {
         ui.add_space(26.0);
         ui.label(RichText::new("VERWALTEN").size(11.0).color(MUTED));
         for (view, label) in [
+            (View::Missions, "Mission Control"),
+            (View::Operations, "Remote-Werkzeuge"),
+            (View::SessionWindows, "Sitzungsfenster"),
+            (View::Integrations, "Inventar & Vault"),
+            (View::Recordings, "Aufzeichnungen"),
             (View::Connections, "Verbindungen"),
             (View::Approvals, "Freigaben"),
-            (View::Workspaces, "Runbooks & Wissen"),
+            (View::Workspaces, "Abläufe & Wissen"),
             (View::Settings, "Einstellungen"),
         ] {
             if ui.selectable_label(self.view == view, label).clicked() {
@@ -239,12 +330,13 @@ impl AivanaApp {
 
     fn save_desktop_layout(&mut self) {
         self.status = match self.desktop.save() {
-            Ok(()) => "Layout gespeichert".to_owned(),
-            Err(err) => format!("Layout konnte nicht gespeichert werden: {err}"),
+            Ok(()) => "Ansicht gespeichert".to_owned(),
+            Err(err) => format!("Ansicht konnte nicht gespeichert werden: {err}"),
         };
     }
 
     fn focus_session(&mut self, id: Uuid) {
+        self.engine.release_inputs_except(Some(id));
         if let Some(session) = self.sessions.iter().find(|s| s.id == id) {
             if self.selected_session != Some(id) {
                 self.autopilot.abort();
@@ -281,17 +373,26 @@ impl AivanaApp {
                 self.start_new_profile();
                 self.view = View::Connections;
             }
-            if ui.button("Layout speichern").clicked() {
+            if ui.button("Ansicht speichern").clicked() {
                 self.save_desktop_layout();
             }
         });
-        let live = self
-            .sessions
-            .iter()
-            .filter(|s| s.status == SessionStatus::Connected)
-            .count();
-        ui.label(RichText::new(format!("{live} verbunden  ·  Kachel öffnen zum Fokussieren  ·  Am Griff ziehen zum Anordnen")).small().color(MUTED));
-        ui.add_space(14.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Ansicht:");
+            let changed = ui
+                .selectable_value(&mut self.desktop.compact, false, "Raster")
+                .changed()
+                | ui.selectable_value(&mut self.desktop.compact, true, "Liste")
+                    .changed();
+            if changed {
+                self.save_desktop_layout();
+            }
+            if self.desktop.featured.is_some() && ui.button("Hervorhebung aufheben").clicked() {
+                self.desktop.featured = None;
+                self.save_desktop_layout();
+            }
+        });
+        ui.add_space(8.0);
         self.desktop
             .order
             .retain(|id| self.profiles.iter().any(|p| p.id == *id));
@@ -300,7 +401,7 @@ impl AivanaApp {
                 self.desktop.order.push(profile.id);
             }
         }
-        let profiles: Vec<_> = self
+        let mut profiles: Vec<_> = self
             .desktop
             .order
             .iter()
@@ -320,59 +421,77 @@ impl AivanaApp {
             }
             return;
         }
+        let live = profiles
+            .iter()
+            .filter(|profile| {
+                self.sessions
+                    .iter()
+                    .rev()
+                    .find(|s| s.profile_id == profile.id)
+                    .is_some_and(|s| s.status == SessionStatus::Connected)
+            })
+            .count();
+        ui.label(
+            RichText::new(format!(
+                "{} Verbindungen · {live} verbunden · Am Griff ziehen zum Anordnen",
+                profiles.len()
+            ))
+            .small()
+            .color(MUTED),
+        );
+        ui.add_space(10.0);
+        let featured = if !self.desktop.compact {
+            self.desktop
+                .featured
+                .and_then(|id| profiles.iter().position(|p| p.id == id))
+                .map(|index| profiles.remove(index))
+        } else {
+            None
+        };
         ScrollArea::vertical()
-            .id_salt("spatial-sessions")
+            .id_salt((
+                "spatial-sessions",
+                self.desktop.compact,
+                self.desktop.group.clone(),
+            ))
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 let width = ui.available_width();
-                let tile_height = 290.0;
-                if width > 780.0 && profiles.len() >= 3 {
-                    let start = ui.cursor().min;
-                    let left = Rect::from_min_size(
-                        start,
-                        egui::vec2(width * 0.56 - 8.0, tile_height * 2.0 + 12.0),
+                if let Some(profile) = &featured {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(width, 420.0), Sense::hover());
+                    self.desktop_tile(
+                        &mut child(ui, (profile.id, "featured"), rect),
+                        profile,
+                        false,
                     );
-                    self.desktop_tile(&mut child(ui, "hero-tile", left), &profiles[0]);
-                    for index in 0..2 {
-                        let rect = Rect::from_min_size(
-                            pos2(
-                                left.right() + 16.0,
-                                start.y + index as f32 * (tile_height + 12.0),
-                            ),
-                            egui::vec2(width - left.width() - 16.0, tile_height),
-                        );
-                        self.desktop_tile(
-                            &mut child(ui, ("side-tile", index), rect),
-                            &profiles[index + 1],
-                        );
-                    }
-                    ui.allocate_space(egui::vec2(width, tile_height * 2.0 + 24.0));
-                    for profile in profiles.iter().skip(3) {
-                        let (rect, _) =
-                            ui.allocate_exact_size(egui::vec2(width, 320.0), Sense::hover());
-                        self.desktop_tile(&mut child(ui, profile.id, rect), profile);
-                        ui.add_space(12.0);
-                    }
-                } else if width > 780.0 && profiles.len() == 2 {
-                    let start = ui.cursor().min;
-                    let tile_width = (width - 16.0) / 2.0;
-                    for (index, profile) in profiles.iter().enumerate() {
-                        let rect = Rect::from_min_size(
-                            start + egui::vec2(index as f32 * (tile_width + 16.0), 0.0),
-                            egui::vec2(tile_width, 460.0),
-                        );
-                        self.desktop_tile(&mut child(ui, profile.id, rect), profile);
-                    }
-                    ui.allocate_space(egui::vec2(width, 472.0));
+                    ui.add_space(12.0);
+                }
+                let columns = if self.desktop.compact {
+                    1
                 } else {
-                    for profile in &profiles {
-                        let (rect, _) = ui.allocate_exact_size(
-                            egui::vec2(width, if profiles.len() == 1 { 460.0 } else { 320.0 }),
-                            Sense::hover(),
-                        );
-                        self.desktop_tile(&mut child(ui, profile.id, rect), profile);
-                        ui.add_space(12.0);
+                    (((width + 12.0) / 360.0).floor().max(1.0) as usize).min(profiles.len().max(1))
+                };
+                let tile_width = (width - 12.0 * (columns - 1) as f32) / columns as f32;
+                let tile_height = if self.desktop.compact { 112.0 } else { 290.0 };
+                for row in profiles.chunks(columns) {
+                    let (row_rect, _) =
+                        ui.allocate_exact_size(egui::vec2(width, tile_height), Sense::hover());
+                    // Off-screen previews need no painting or texture lookup.
+                    if ui.is_rect_visible(row_rect) {
+                        for (column, profile) in row.iter().enumerate() {
+                            let rect = Rect::from_min_size(
+                                row_rect.min + egui::vec2(column as f32 * (tile_width + 12.0), 0.0),
+                                egui::vec2(tile_width, tile_height),
+                            );
+                            self.desktop_tile(
+                                &mut child(ui, profile.id, rect),
+                                profile,
+                                self.desktop.compact,
+                            );
+                        }
                     }
+                    ui.add_space(12.0);
                 }
             });
         if ui.input(|i| i.pointer.any_released()) {
@@ -380,7 +499,7 @@ impl AivanaApp {
         }
     }
 
-    fn desktop_tile(&mut self, ui: &mut Ui, profile: &ConnectionProfile) {
+    fn desktop_tile(&mut self, ui: &mut Ui, profile: &ConnectionProfile, compact: bool) {
         let rect = ui.max_rect();
         let session = self
             .sessions
@@ -416,9 +535,29 @@ impl AivanaApp {
             if grip.drag_started() {
                 self.desktop.dragging = Some(profile.id);
             }
-            ui.label(RichText::new(&profile.name).strong().color(INK));
+            ui.add_sized(
+                egui::vec2((ui.available_width() - 42.0).max(40.0), 20.0),
+                egui::Label::new(RichText::new(&profile.name).strong().color(INK)).truncate(),
+            )
+            .on_hover_text(&profile.name);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.menu_button("…", |ui| {
+                    let featured = self.desktop.featured == Some(profile.id);
+                    if ui
+                        .button(if featured {
+                            "Hervorhebung aufheben"
+                        } else {
+                            "Groß hervorheben"
+                        })
+                        .clicked()
+                    {
+                        self.desktop.featured = if featured { None } else { Some(profile.id) };
+                        if !featured {
+                            self.desktop.compact = false;
+                        }
+                        self.save_desktop_layout();
+                        ui.close();
+                    }
                     if ui.button("Profil bearbeiten").clicked() {
                         self.load_profile_into_editor(profile.id);
                         self.view = View::Connections;
@@ -458,33 +597,35 @@ impl AivanaApp {
                     .color(MUTED),
             );
         });
-        let preview = Rect::from_min_max(
-            pos2(rect.left() + 8.0, rect.top() + 76.0),
-            pos2(rect.right() - 8.0, rect.bottom() - 46.0),
-        );
-        ui.painter().rect_filled(preview, 4, tw::SLATE_900);
-        if let Some(session) = &session {
-            self.desktop_preview(ui, preview, session);
-        } else {
-            ui.painter().text(
-                preview.center(),
-                egui::Align2::CENTER_CENTER,
-                "Noch keine Sitzung",
-                FontId::proportional(16.0),
-                tw::SLATE_300,
+        if !compact {
+            let preview = Rect::from_min_max(
+                pos2(rect.left() + 8.0, rect.top() + 76.0),
+                pos2(rect.right() - 8.0, rect.bottom() - 46.0),
             );
-        }
-        let response = ui.interact(
-            preview,
-            ui.id().with((profile.id, "preview")),
-            Sense::click(),
-        );
-        if response.clicked() {
+            ui.painter().rect_filled(preview, 4, tw::SLATE_900);
             if let Some(session) = &session {
-                self.focus_session(session.id);
+                self.desktop_preview(ui, preview, session);
             } else {
-                self.load_profile_into_editor(profile.id);
-                self.view = View::Connections;
+                ui.painter().text(
+                    preview.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "Noch keine Sitzung",
+                    FontId::proportional(16.0),
+                    tw::SLATE_300,
+                );
+            }
+            let response = ui.interact(
+                preview,
+                ui.id().with((profile.id, "preview")),
+                Sense::click(),
+            );
+            if response.clicked() {
+                if let Some(session) = &session {
+                    self.focus_session(session.id);
+                } else {
+                    self.load_profile_into_editor(profile.id);
+                    self.view = View::Connections;
+                }
             }
         }
         if rect.contains(ui.input(|i| i.pointer.interact_pos()).unwrap_or(Pos2::ZERO))
@@ -504,7 +645,11 @@ impl AivanaApp {
             ),
         );
         footer.horizontal(|ui| {
-            ui.label(RichText::new(&profile.host).small().color(MUTED));
+            ui.add_sized(
+                egui::vec2((ui.available_width() - 120.0).max(40.0), 20.0),
+                egui::Label::new(RichText::new(&profile.host).small().color(MUTED)).truncate(),
+            )
+            .on_hover_text(&profile.host);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui
                     .button(if session.is_some() {
@@ -587,13 +732,13 @@ impl AivanaApp {
             });
         ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(&session.title).strong().color(INK));
+            ui.label(RichText::new(&session.title).strong().color(tw::SLATE_100));
             if let Some(profile) = self.profiles.iter().find(|p| p.id == session.profile_id) {
                 ui.label(
                     RichText::new(environment_label(profile))
                         .small()
                         .strong()
-                        .color(AMBER),
+                        .color(Color32::from_rgb(255, 196, 113)),
                 );
             }
             ui.selectable_value(&mut self.remote_view_mode, RemoteViewMode::Fit, "Anpassen");
@@ -602,6 +747,13 @@ impl AivanaApp {
                 RemoteViewMode::ActualSize,
                 "100 %",
             );
+            ui.toggle_value(&mut self.desktop.workbench.split, "Nebeneinander");
+            if ui.button("Dateien").clicked() {
+                self.workbench_open_transfer();
+            }
+            if ui.button("Eigenes Fenster").clicked() && !self.session_windows.open.contains(&session.id) {
+                self.session_windows.open.push(session.id);
+            }
             ui.toggle_value(&mut self.desktop.assistant, "KI & Diagnose");
             ui.toggle_value(&mut self.desktop.timeline, "Zeitleiste");
             if ui.button("Vollbild").clicked() {
@@ -615,7 +767,29 @@ impl AivanaApp {
             }
         });
         ui.add_space(6.0);
+        if let Some((attempt, delay)) = self.engine.retry_status(session.id) {
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(
+                    AMBER,
+                    format!(
+                        "Wiederverbindung · Versuch {attempt} · in {} s",
+                        delay.as_secs()
+                    ),
+                );
+                if ui.button("Wiederverbindung abbrechen").clicked() {
+                    self.engine.cancel_reconnect(session.id);
+                    if let Some(s) = self.sessions.iter_mut().find(|s| s.id == session.id) {
+                        s.status = SessionStatus::Disconnected;
+                    }
+                }
+            });
+        }
         if self.selected_session != Some(session.id) {
+            return;
+        }
+        if self.session_windows.open.contains(&session.id) {
+            ui.label("Diese Sitzung ist in einem eigenen Fenster geöffnet.");
+            if ui.button("Hier anzeigen").clicked(){self.session_windows.open.retain(|id|*id!=session.id);}
             return;
         }
         let rect = ui.available_rect_before_wrap();
@@ -634,6 +808,9 @@ impl AivanaApp {
             0.0
         };
         let narrow = main.width() < 760.0 && self.desktop.assistant;
+        if narrow {
+            self.engine.release_inputs_except(None);
+        }
         if !narrow {
             let canvas = Rect::from_min_max(
                 main.min,
@@ -657,10 +834,14 @@ impl AivanaApp {
                     ),
                 );
             }
-            remote.add_enabled_ui(
-                session.status == SessionStatus::Connected && !self.desktop.palette,
-                |ui| self.remote_canvas(ui, session.id),
-            );
+            if self.desktop.workbench.split {
+                self.workbench_split(&mut remote, &session);
+            } else {
+                remote.add_enabled_ui(
+                    session.status == SessionStatus::Connected && !self.desktop.palette,
+                    |ui| self.remote_canvas(ui, session.id),
+                );
+            }
         }
         if self.desktop.assistant {
             let side = if narrow {
@@ -691,6 +872,7 @@ impl AivanaApp {
     }
 
     fn desktop_diagnosis(&mut self, ui: &mut Ui, session: &RemoteSession) {
+        ui.style_mut().visuals = egui::Visuals::light();
         ui.horizontal(|ui| {
             ui.heading(if needs_attention(session.status) {
                 "Was ist passiert?"
@@ -747,7 +929,7 @@ impl AivanaApp {
             self.ai_session_panel(ui, session.id)
         });
         ui.collapsing("Technische Sitzungsdaten",|ui| {
-            ui.label(format!("Session: {}",session.id));
+            ui.label(format!("Sitzung: {}",session.id));
             ui.label(format!("Sitzungsbeginn: {}", session.connected_at.with_timezone(&chrono::Local).format("%d.%m.%Y %H:%M:%S")));
             ui.label(self.canvas_status(session.id));
             ui.label("Qualitätsmesswerte werden hier erst angezeigt, wenn reale Messdaten verfügbar sind.");
@@ -757,11 +939,15 @@ impl AivanaApp {
     fn desktop_timeline(&mut self, ui: &mut Ui, id: Uuid) {
         ui.separator();
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Ereignisverlauf").strong().color(INK));
+            ui.label(
+                RichText::new("Ereignisverlauf")
+                    .strong()
+                    .color(tw::SLATE_100),
+            );
             ui.label(
                 RichText::new("Sitzungsprotokoll · keine Video-Wiedergabe")
                     .small()
-                    .color(MUTED),
+                    .color(tw::SLATE_300),
             );
             if ui.small_button("Schließen").clicked() {
                 self.desktop.timeline = false;
@@ -832,7 +1018,7 @@ impl AivanaApp {
             .show(ctx, |ui| {
                 let query = ui.add(
                     egui::TextEdit::singleline(&mut self.desktop.query)
-                        .hint_text("Host, Sitzung oder Aktion suchen …")
+                        .hint_text("Rechner, Sitzung oder Aktion suchen …")
                         .desired_width(f32::INFINITY),
                 );
                 if self.desktop.palette_focus {
@@ -843,10 +1029,15 @@ impl AivanaApp {
                 let needle = self.desktop.query.trim().to_lowercase();
                 ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
                     for (label, view) in [
+                        ("Mission Control", View::Missions),
+                        ("Remote-Werkzeuge", View::Operations),
+                        ("Sitzungsfenster", View::SessionWindows),
+                        ("Inventar & Vault", View::Integrations),
+                        ("Aufzeichnungen", View::Recordings),
                         ("Arbeitsbereich", View::Sessions),
                         ("Verbindungen", View::Connections),
                         ("Freigaben", View::Approvals),
-                        ("Runbooks & Wissen", View::Workspaces),
+                        ("Abläufe & Wissen", View::Workspaces),
                         ("Einstellungen", View::Settings),
                     ] {
                         if label.to_lowercase().contains(&needle) && ui.button(label).clicked() {
@@ -911,6 +1102,7 @@ mod tests {
             })
             .collect();
         app.desktop = DesktopState::default();
+        app.desktop.workbench.directory = false;
         app.selected_session = None;
         app
     }
@@ -966,6 +1158,106 @@ mod tests {
                 modifiers: egui::Modifiers::NONE,
             }],
         );
+    }
+
+    #[test]
+    fn directory_selection_never_starts_a_connection_and_actions_fit_narrow_windows() {
+        let ctx = Context::default();
+        let mut app = fixture(&ctx);
+        app.desktop.workbench.directory = true;
+        app.selected_profile = None;
+        let original_sessions = app.sessions.len();
+        for width in [1440.0, 640.0] {
+            let size = egui::vec2(width, 900.0);
+            render(&mut app, &ctx, size, vec![]);
+            let output = render(&mut app, &ctx, size, vec![]);
+            assert!(text_center(&output, "Rechnerzentrale").is_some());
+            let host = text_center(&output, "APP-SERVER-02").expect("host visible");
+            click(&mut app, &ctx, size, host);
+            assert_eq!(app.selected_profile, Some(app.profiles[1].id));
+            assert_eq!(app.sessions.len(), original_sessions);
+            assert!(!app.desktop.focus);
+            let output = render(&mut app, &ctx, size, vec![]);
+            let action = if width < 900.0 {
+                "Profil bearbeiten"
+            } else {
+                "Sitzung öffnen"
+            };
+            let center = text_center(&output, action).expect("selected profile actions visible");
+            assert!(center.y < size.y && center.x < size.x);
+        }
+    }
+
+    #[test]
+    fn comparison_switches_active_session_without_connecting_again() {
+        let ctx = Context::default();
+        let mut app = fixture(&ctx);
+        app.focus_session(app.sessions[0].id);
+        app.desktop.workbench.split = true;
+        let size = egui::vec2(1440.0, 1024.0);
+        render(&mut app, &ctx, size, vec![]);
+        let output = render(&mut app, &ctx, size, vec![]);
+        let activate = text_center(&output, "APP-SERVER-02 · Aktivieren").unwrap();
+        click(&mut app, &ctx, size, activate);
+        assert_eq!(app.selected_session, Some(app.sessions[1].id));
+        assert!(app.desktop.workbench.split);
+        assert_eq!(app.sessions.len(), 3);
+    }
+
+    #[test]
+    fn grid_keeps_three_sessions_equal_and_feature_is_explicit() {
+        let ctx = Context::default();
+        let mut app = fixture(&ctx);
+        let size = egui::vec2(1440.0, 1024.0);
+        render(&mut app, &ctx, size, vec![]);
+        let output = render(&mut app, &ctx, size, vec![]);
+        let first = text_center(&output, "WIN-ADMIN-01").unwrap();
+        let third = text_center(&output, "TEST-LAB-03").unwrap();
+        assert!((first.y - third.y).abs() < 2.0);
+        app.desktop.featured = Some(app.profiles[2].id);
+        let output = render(&mut app, &ctx, size, vec![]);
+        let first = text_center(&output, "WIN-ADMIN-01").unwrap();
+        let third = text_center(&output, "TEST-LAB-03").unwrap();
+        assert!(first.y > third.y + 400.0);
+        assert_eq!(app.profiles[0].name, "WIN-ADMIN-01");
+    }
+
+    #[test]
+    fn list_is_compact_on_narrow_windows_and_opens_sessions() {
+        let ctx = Context::default();
+        let mut app = fixture(&ctx);
+        app.desktop.compact = true;
+        for width in [640.0, 1440.0] {
+            let size = egui::vec2(width, 900.0);
+            render(&mut app, &ctx, size, vec![]);
+            let output = render(&mut app, &ctx, size, vec![]);
+            let first = text_center(&output, "WIN-ADMIN-01").unwrap();
+            let third = text_center(&output, "TEST-LAB-03").unwrap();
+            assert!((third.x - first.x).abs() < 20.0);
+            assert!(third.y - first.y < 270.0);
+            assert!(third.y > first.y + 200.0);
+        }
+        let size = egui::vec2(640.0, 900.0);
+        let output = render(&mut app, &ctx, size, vec![]);
+        let button = text_center(&output, "Fokussieren").unwrap();
+        click(&mut app, &ctx, size, button);
+        assert!(app.desktop.focus);
+    }
+
+    #[test]
+    fn old_layouts_default_to_grid_and_new_preferences_round_trip() {
+        let old: DesktopState = serde_json::from_str(r#"{"order":[],"group":"Test"}"#).unwrap();
+        assert!(!old.compact);
+        assert!(old.featured.is_none());
+        let state = DesktopState {
+            compact: true,
+            featured: Some(Uuid::new_v4()),
+            ..Default::default()
+        };
+        let restored: DesktopState =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert!(restored.compact);
+        assert_eq!(restored.featured, state.featured);
     }
 
     #[test]
@@ -1038,7 +1330,7 @@ mod tests {
                 physical_key: None,
                 pressed: true,
                 repeat: false,
-                modifiers: egui::Modifiers::CTRL,
+                modifiers: egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
             }],
         );
         assert!(app.desktop.palette);

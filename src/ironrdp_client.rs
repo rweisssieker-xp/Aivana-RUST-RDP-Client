@@ -26,9 +26,66 @@ pub const DEFAULT_RDP_SMOKE_TIMEOUT_SECS: u64 = 30;
 
 type UpgradedFramed = ironrdp_blocking::Framed<RdpTransport>;
 
+enum BaseTransport {
+    Direct(TcpStream),
+    Gateway(crate::rd_gateway::GatewayStream),
+}
+impl BaseTransport {
+    fn connect(profile: &ConnectionProfile) -> Result<Self> {
+        if profile.options.gateway.enabled {
+            let (mut stream, _) = crate::rd_gateway::GatewayStream::connect(
+                profile,
+                &profile.options.gateway,
+                &profile.options.gateway.password,
+            )?;
+            stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+            Ok(Self::Gateway(stream))
+        } else {
+            let addr = lookup_addr(&profile.host, profile.port)?;
+            let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(8))?;
+            stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+            Ok(Self::Direct(stream))
+        }
+    }
+    fn local_addr(&self) -> std::io::Result<std::net::SocketAddr> {
+        match self {
+            Self::Direct(s) => s.local_addr(),
+            Self::Gateway(s) => s.local_addr(),
+        }
+    }
+    fn set_read_timeout(&mut self, t: Option<Duration>) -> std::io::Result<()> {
+        match self {
+            Self::Direct(s) => s.set_read_timeout(t),
+            Self::Gateway(s) => s.set_read_timeout(t),
+        }
+    }
+}
+impl Read for BaseTransport {
+    fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Direct(s) => s.read(b),
+            Self::Gateway(s) => s.read(b),
+        }
+    }
+}
+impl Write for BaseTransport {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Direct(s) => s.write(b),
+            Self::Gateway(s) => s.write(b),
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Direct(s) => s.flush(),
+            Self::Gateway(s) => s.flush(),
+        }
+    }
+}
+
 enum RdpTransport {
-    Tls(rustls::StreamOwned<rustls::ClientConnection, TcpStream>),
-    Plain(TcpStream),
+    Tls(rustls::StreamOwned<rustls::ClientConnection, BaseTransport>),
+    Plain(BaseTransport),
 }
 
 impl Read for RdpTransport {
@@ -141,9 +198,8 @@ fn probe_server_fingerprint_with_config(
     config: connector::Config,
 ) -> Result<String> {
     let server_name = profile.host.clone();
-    let server_addr = lookup_addr(&server_name, profile.port).context("lookup address")?;
-    let tcp_stream =
-        TcpStream::connect_timeout(&server_addr, Duration::from_secs(8)).context("TCP connect")?;
+    let mut tcp_stream = BaseTransport::connect(profile)?;
+    tcp_stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     let client_addr = tcp_stream
         .local_addr()
         .context("get local socket address")?;
@@ -520,20 +576,30 @@ pub fn save_rdp_smoke_failure_report(
 }
 
 fn run_session_inner(runtime: IronRdpRuntime) -> Result<()> {
-    let detection = detect_server_security(&runtime.profile).ok();
+    let mut channels = crate::rdp_channels::Channels::new(
+        &runtime.profile,
+        runtime.events.clone(),
+        runtime.session_id,
+    )?;
+    let detection = if runtime.profile.options.gateway.enabled {
+        None
+    } else {
+        detect_server_security(&runtime.profile).ok()
+    };
     let (connection_result, mut framed) = if detection
         .as_ref()
         .is_some_and(|detection| detection.mode == LegacySecurityMode::StandardRdp)
     {
-        connect_standard(&runtime.profile).context("legacy Standard RDP Security connect")?
+        connect_standard_with_channels(&runtime.profile, Some(&mut channels))
+            .context("legacy Standard RDP Security connect")?
     } else {
         let config = build_config(&runtime.profile);
-        connect(config, runtime.profile.host.clone(), runtime.profile.port).or_else(|err| {
+        connect(config, &runtime.profile, Some(&mut channels)).or_else(|err| {
             if should_try_tls_fallback(&err) {
                 connect(
                     build_tls_config(&runtime.profile),
-                    runtime.profile.host.clone(),
-                    runtime.profile.port,
+                    &runtime.profile,
+                    Some(&mut channels),
                 )
                 .context("legacy TLS graphical-login fallback")
             } else {
@@ -542,6 +608,12 @@ fn run_session_inner(runtime: IronRdpRuntime) -> Result<()> {
         })?
     };
 
+    match framed.get_inner_mut().0 {
+        RdpTransport::Tls(stream) => stream
+            .sock
+            .set_read_timeout(Some(Duration::from_millis(20)))?,
+        RdpTransport::Plain(stream) => stream.set_read_timeout(Some(Duration::from_millis(20)))?,
+    }
     let mut image = DecodedImage::new(
         ironrdp_graphics::image_processing::PixelFormat::RgbA32,
         connection_result.desktop_size.width,
@@ -571,7 +643,13 @@ fn run_session_inner(runtime: IronRdpRuntime) -> Result<()> {
         .ok();
 
     loop {
-        if !drain_input(&runtime.input, &mut active_stage, &mut image, &mut framed)? {
+        if !drain_input(
+            &runtime.input,
+            &mut active_stage,
+            &mut image,
+            &mut framed,
+            &mut channels,
+        )? {
             runtime
                 .events
                 .send(EngineEvent::Disconnected {
@@ -582,6 +660,9 @@ fn run_session_inner(runtime: IronRdpRuntime) -> Result<()> {
             break;
         }
 
+        for frame in channels.pump(&mut active_stage)? {
+            framed.write_all(&frame)?;
+        }
         match framed.read_pdu() {
             Ok((action, payload)) => {
                 stats.pdus += 1;
@@ -591,6 +672,35 @@ fn run_session_inner(runtime: IronRdpRuntime) -> Result<()> {
                     ironrdp_pdu::Action::X224 => stats.x224_pdus += 1,
                 }
                 let outputs = active_stage.process(&mut image, action, &payload)?;
+                let mut regular_outputs = Vec::new();
+                for output in outputs {
+                    if let ActiveStageOutput::DeactivateAll(mut activation) = output {
+                        use ironrdp::connector::Sequence;
+                        set_session_timeout(&mut framed, Duration::from_secs(10))?;
+                        let mut buffer = ironrdp::core::WriteBuf::new();
+                        while !activation.state().is_terminal() {
+                            buffer.clear();
+                            let written = if let Some(hint) = activation.next_pdu_hint() {
+                                let bytes = framed.read_by_hint(hint)?;
+                                activation.step(&bytes, &mut buffer)?
+                            } else {
+                                activation.step_no_input(&mut buffer)?
+                            };
+                            if let Some(size) = written.size() {
+                                framed.write_all(&buffer[..size])?;
+                            }
+                        }
+                        set_session_timeout(&mut framed, Duration::from_millis(20))?;
+                        if let ironrdp::connector::connection_activation::ConnectionActivationState::Finalized { desktop_size, io_channel_id, user_channel_id, enable_server_pointer, pointer_software_rendering } = activation.connection_activation_state() {
+                            image = DecodedImage::new(ironrdp_graphics::image_processing::PixelFormat::RgbA32, desktop_size.width, desktop_size.height);
+                            active_stage.set_fastpath_processor(ironrdp::session::fast_path::ProcessorBuilder {io_channel_id, user_channel_id, enable_server_pointer, pointer_software_rendering}.build());
+                            active_stage.set_enable_server_pointer(enable_server_pointer);
+                        }
+                    } else {
+                        regular_outputs.push(output);
+                    }
+                }
+                let outputs = regular_outputs;
                 let output_stats = process_outputs(
                     runtime.session_id,
                     outputs,
@@ -602,6 +712,9 @@ fn run_session_inner(runtime: IronRdpRuntime) -> Result<()> {
                 stats.graphics_updates += output_stats.graphics_updates;
                 stats.terminations += output_stats.terminations;
                 stats.other_outputs += output_stats.other_outputs;
+                if output_stats.terminations > 0 {
+                    break;
+                }
             }
             Err(e)
                 if matches!(
@@ -640,6 +753,9 @@ fn run_session_inner(runtime: IronRdpRuntime) -> Result<()> {
 }
 
 fn block_unsupported_legacy_standard(profile: &ConnectionProfile) -> Result<()> {
+    if profile.options.gateway.enabled {
+        return Ok(());
+    }
     if let Ok(detection) = detect_server_security(profile) {
         if detection.mode == LegacySecurityMode::StandardRdp {
             anyhow::bail!(
@@ -685,13 +801,13 @@ fn build_config_for_security(
         enable_credssp,
         keyboard_type: KeyboardType::IbmEnhanced,
         keyboard_subtype: 0,
-        keyboard_layout: 0,
+        keyboard_layout: local_keyboard_layout(),
         keyboard_functional_keys_count: 12,
         ime_file_name: String::new(),
         dig_product_id: String::new(),
         desktop_size: connector::DesktopSize {
-            width: 1280,
-            height: 800,
+            width: profile.options.width.clamp(200, 8192) & !1,
+            height: profile.options.height.clamp(200, 8192),
         },
         bitmap: None,
         client_build: 0,
@@ -720,7 +836,7 @@ fn build_config_for_security(
         enable_server_pointer: false,
         request_data: None,
         autologon: false,
-        enable_audio_playback: false,
+        enable_audio_playback: profile.options.audio_playback,
         pointer_software_rendering: true,
         performance_flags: PerformanceFlags::default(),
         desktop_scale_factor: 0,
@@ -732,14 +848,13 @@ fn build_config_for_security(
 
 fn connect(
     config: connector::Config,
-    server_name: String,
-    port: u16,
+    profile: &ConnectionProfile,
+    channels: Option<&mut crate::rdp_channels::Channels>,
 ) -> Result<(ConnectionResult, UpgradedFramed)> {
-    let server_addr = lookup_addr(&server_name, port).context("lookup address")?;
-    let tcp_stream =
-        TcpStream::connect_timeout(&server_addr, Duration::from_secs(8)).context("TCP connect")?;
+    let server_name = profile.host.clone();
+    let mut tcp_stream = BaseTransport::connect(profile)?;
     tcp_stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
+        .set_read_timeout(Some(Duration::from_secs(10)))
         .context("set read timeout")?;
 
     let client_addr = tcp_stream
@@ -748,6 +863,9 @@ fn connect(
     let mut framed = ironrdp_blocking::Framed::new(tcp_stream);
     let mut connector = connector::ClientConnector::new(config, client_addr);
 
+    if let Some(channels) = channels {
+        channels.attach(&mut connector)?;
+    }
     let should_upgrade =
         ironrdp_blocking::connect_begin(&mut framed, &mut connector).context("connection begin")?;
 
@@ -774,11 +892,16 @@ fn connect(
 }
 
 fn connect_standard(profile: &ConnectionProfile) -> Result<(ConnectionResult, UpgradedFramed)> {
-    let server_addr = lookup_addr(&profile.host, profile.port).context("lookup address")?;
-    let tcp_stream =
-        TcpStream::connect_timeout(&server_addr, Duration::from_secs(8)).context("TCP connect")?;
+    connect_standard_with_channels(profile, None)
+}
+
+fn connect_standard_with_channels(
+    profile: &ConnectionProfile,
+    channels: Option<&mut crate::rdp_channels::Channels>,
+) -> Result<(ConnectionResult, UpgradedFramed)> {
+    let mut tcp_stream = BaseTransport::connect(profile)?;
     tcp_stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
+        .set_read_timeout(Some(Duration::from_secs(10)))
         .context("set read timeout")?;
 
     let client_addr = tcp_stream
@@ -790,6 +913,9 @@ fn connect_standard(profile: &ConnectionProfile) -> Result<(ConnectionResult, Up
         client_addr,
     );
 
+    if let Some(channels) = channels {
+        channels.attach(&mut connector)?;
+    }
     let should_upgrade =
         ironrdp_blocking::connect_begin(&mut framed, &mut connector).context("connection begin")?;
     let plain_stream = framed.into_inner_no_leftover();
@@ -816,10 +942,24 @@ fn drain_input(
     active_stage: &mut ActiveStage,
     image: &mut DecodedImage,
     framed: &mut UpgradedFramed,
+    channels: &mut crate::rdp_channels::Channels,
 ) -> Result<bool> {
     loop {
         match input.try_recv() {
             Ok(action) => {
+                match channels.action(&action, active_stage) {
+                    Ok(Some(frame)) => {
+                        if !frame.is_empty() {
+                            framed.write_all(&frame)?;
+                        }
+                        continue;
+                    }
+                    Err(error) => {
+                        channels.report_error(&error);
+                        continue;
+                    }
+                    Ok(None) => {}
+                }
                 let events = input_action_to_fastpath(action);
                 if events.is_empty() {
                     continue;
@@ -930,6 +1070,42 @@ fn input_action_to_fastpath(
     use ironrdp_pdu::input::mouse::{MousePdu, PointerFlags};
 
     match action {
+        InputAction::Key { scan_code, pressed } => {
+            let mut flags = if scan_code & 0x100 != 0 {
+                KeyboardFlags::EXTENDED
+            } else {
+                KeyboardFlags::empty()
+            };
+            if !pressed {
+                flags |= KeyboardFlags::RELEASE;
+            }
+            vec![FastPathInputEvent::KeyboardEvent(flags, scan_code as u8)]
+        }
+        InputAction::PointerButton {
+            x,
+            y,
+            button,
+            pressed,
+        } => {
+            let mut flags = match button {
+                MouseButton::Left => PointerFlags::LEFT_BUTTON,
+                MouseButton::Right => PointerFlags::RIGHT_BUTTON,
+                MouseButton::Middle => PointerFlags::MIDDLE_BUTTON_OR_WHEEL,
+            };
+            if pressed {
+                flags |= PointerFlags::DOWN;
+            }
+            vec![FastPathInputEvent::MouseEvent(MousePdu {
+                flags,
+                number_of_wheel_rotation_units: 0,
+                x_position: x,
+                y_position: y,
+            })]
+        }
+        InputAction::ClipboardFocus { .. }
+        | InputAction::Resize { .. }
+        | InputAction::ClipboardFiles { .. }
+        | InputAction::ClipboardDownload { .. } => vec![],
         InputAction::MovePointer { x, y } => vec![FastPathInputEvent::MouseEvent(MousePdu {
             flags: PointerFlags::MOVE,
             number_of_wheel_rotation_units: 0,
@@ -1457,10 +1633,10 @@ fn lookup_addr(hostname: &str, port: u16) -> Result<std::net::SocketAddr> {
 }
 
 fn tls_upgrade(
-    stream: TcpStream,
+    stream: BaseTransport,
     server_name: String,
 ) -> Result<(
-    rustls::StreamOwned<rustls::ClientConnection, TcpStream>,
+    rustls::StreamOwned<rustls::ClientConnection, BaseTransport>,
     Vec<u8>,
 )> {
     let mut config = rustls::client::ClientConfig::builder()
@@ -1559,5 +1735,26 @@ mod danger {
                 SignatureScheme::ED448,
             ]
         }
+    }
+}
+
+fn local_keyboard_layout() -> u32 {
+    #[cfg(windows)]
+    {
+        unsafe {
+            windows_sys::Win32::UI::Input::KeyboardAndMouse::GetKeyboardLayout(0) as usize as u32
+                & 0xffff
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        0
+    }
+}
+
+fn set_session_timeout(framed: &mut UpgradedFramed, timeout: Duration) -> std::io::Result<()> {
+    match framed.get_inner_mut().0 {
+        RdpTransport::Tls(stream) => stream.sock.set_read_timeout(Some(timeout)),
+        RdpTransport::Plain(stream) => stream.set_read_timeout(Some(timeout)),
     }
 }

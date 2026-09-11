@@ -5,13 +5,20 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0"
+arboard = "3.6"
+cpal = "0.16"
+cap-std = "4"
+
+ironrdp-mstsgu = { version = "0.0.1", features = ["native-tls"] }
+tokio = { version = "1", features = ["rt-multi-thread", "io-util", "time", "net"] }
+csv = "1.4"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6.0"
 eframe = "0.34.2"
 egui_extras = "0.34.2"
 image = { version = "0.25", default-features = false, features = ["png"] }
-ironrdp = { version = "0.14.0", features = ["connector", "session", "graphics"] }
+ironrdp = { version = "0.14.0", features = ["connector", "session", "graphics", "cliprdr", "rdpsnd", "displaycontrol", "dvc", "svc", "rdpdr"] }
 ironrdp-blocking = "0.8.0"
 ironrdp-graphics = "0.7.0"
 ironrdp-pdu = "0.7.0"
@@ -22,9 +29,10 @@ sspi = { version = "0.18.0", features = ["network_client"] }
 tokio-rustls = "0.26.0"
 rustls = "0.23.40"
 uuid = { version = "1.18", features = ["v4", "serde"] }
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_UI_Input_KeyboardAndMouse"] }
 x509-cert = { version = "0.2.5", default-features = false, features = ["std"] }
 
 [patch.crates-io]
 ironrdp-connector = { path = "vendor/ironrdp-connector" }
 ironrdp-pdu = { path = "vendor/ironrdp-pdu" }
+ironrdp-tls = { path = "vendor/ironrdp-tls" }

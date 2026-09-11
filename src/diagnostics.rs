@@ -177,22 +177,31 @@ impl PreflightService for LocalPreflightService {
 
 pub fn classify_error(message: &str) -> DiagnosticClass {
     let lower = message.to_lowercase();
-    if lower.contains("standard rdp security") || lower.contains("negotiation failure") {
-        DiagnosticClass::Protocol
-    } else if lower.contains("dns") || lower.contains("socket address") {
-        DiagnosticClass::Dns
-    } else if lower.contains("tcp") || lower.contains("connect") {
-        DiagnosticClass::Tcp
-    } else if lower.contains("tls") {
-        DiagnosticClass::Tls
-    } else if lower.contains("credssp") || lower.contains("nla") {
-        DiagnosticClass::CredSspNla
-    } else if lower.contains("auth") || lower.contains("password") {
+    // Security failures may be wrapped in generic "connection finalize" text.
+    // Classify the specific cause before transport context to avoid unsafe retries.
+    if lower.contains("logon_failure")
+        || lower.contains("0xc000006d")
+        || lower.contains("account_locked")
+        || lower.contains("password")
+        || lower.contains("authentication")
+    {
         DiagnosticClass::Auth
     } else if lower.contains("certificate") || lower.contains("cert") {
         DiagnosticClass::Certificate
-    } else if lower.contains("timeout") {
+    } else if lower.contains("credssp") || lower.contains("nla") {
+        DiagnosticClass::CredSspNla
+    } else if lower.contains("standard rdp security") || lower.contains("negotiation failure") {
+        DiagnosticClass::Protocol
+    } else if lower.contains("tls") {
+        DiagnosticClass::Tls
+    } else if lower.contains("auth") {
+        DiagnosticClass::Auth
+    } else if lower.contains("dns") || lower.contains("socket address") {
+        DiagnosticClass::Dns
+    } else if lower.contains("timeout") || lower.contains("timed out") {
         DiagnosticClass::Timeout
+    } else if lower.contains("tcp") || lower.contains("connect") {
+        DiagnosticClass::Tcp
     } else {
         DiagnosticClass::Unknown
     }
@@ -217,6 +226,24 @@ pub fn finding(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wrapped_logon_and_certificate_failures_are_not_transport_errors() {
+        assert_eq!(
+            classify_error(
+                "connection finalize: [CredSSP] InvalidToken: STATUS_LOGON_FAILURE [0xc000006d]"
+            ),
+            DiagnosticClass::Auth
+        );
+        assert_eq!(
+            classify_error("connection finalize: invalid certificate"),
+            DiagnosticClass::Certificate
+        );
+        assert_eq!(
+            classify_error("TCP connect timed out"),
+            DiagnosticClass::Timeout
+        );
+    }
 
     #[test]
     fn classifies_common_error_text() {

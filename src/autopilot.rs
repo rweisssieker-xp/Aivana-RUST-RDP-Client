@@ -594,6 +594,25 @@ fn map_button(button: Option<&str>) -> MouseButton {
 
 fn describe_action(action: &InputAction) -> String {
     match action {
+        InputAction::ClipboardFocus { active } => format!("clipboard focus {active}"),
+        InputAction::Key { scan_code, pressed } => format!(
+            "key {scan_code:#x} {}",
+            if *pressed { "down" } else { "up" }
+        ),
+        InputAction::PointerButton {
+            x,
+            y,
+            button,
+            pressed,
+        } => format!(
+            "{button:?} {} at {x},{y}",
+            if *pressed { "down" } else { "up" }
+        ),
+        InputAction::Resize { width, height } => format!("resize desktop to {width}x{height}"),
+        InputAction::ClipboardFiles { paths } => {
+            format!("share {} file(s) via clipboard", paths.len())
+        }
+        InputAction::ClipboardDownload { .. } => "download clipboard files".to_owned(),
         InputAction::MovePointer { x, y } => format!("move pointer to {x},{y}"),
         InputAction::Click { x, y, button } => format!("click {button:?} at {x},{y}"),
         InputAction::DoubleClick { x, y, button } => format!("double-click {button:?} at {x},{y}"),

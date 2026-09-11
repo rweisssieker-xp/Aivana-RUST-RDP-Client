@@ -4,9 +4,15 @@ Native Rust desktop application for RDP operations, diagnostics, incident eviden
 
 The app builds as a single Rust desktop binary with `eframe`/`egui`. There is no external Windows RDP launcher, no WebView shell, and no browser runtime.
 
+## Native workbench
+
+The directory-first workspace combines a light computer directory with a focused dark session view, optional side-by-side comparison and contextual recovery. Native input, clipboard/files, dynamic display and multi-monitor layouts, automatic reconnection, PCM audio/microphone, scoped folder redirection, profile exchange and RD Gateway are implemented.
+
+See [operation, supported protocols and limitations](docs/rdp-workbench.md). These are actual protocol integrations; compatibility with a specific server/device still requires live verification. Gateway currently supports WebSocket/HTTP Basic on target port 3389; clipboard folders require ZIP.
+
 ## Current Capabilities
 
-- Spatial native workspace with live session thumbnails, profile-group navigation, drag-to-reorder tiles and persisted layout (`desktop-layout.json`).
+- Native workspace with equally sized live-preview tiles in an adaptive grid, a compact list for many connections, profile-group navigation and drag-to-reorder. Choose **Groß hervorheben** in a connection menu to give that connection a large preview; **Hervorhebung aufheben** restores equal tiles. Grid/list selection and the highlighted connection persist alongside ordering in `desktop-layout.json`.
 - Focus mode with session switching, fit/actual-size display, fullscreen and collapsible contextual KI/diagnostics.
 - Interrupted sessions reveal diagnostics and a selectable event timeline; disconnected previews are explicitly marked as historical and accept no remote input.
 - Local command palette (`Ctrl+K`) for navigation, profiles and active sessions. Opening a profile does not automatically connect.

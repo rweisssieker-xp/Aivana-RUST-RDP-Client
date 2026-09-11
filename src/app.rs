@@ -42,7 +42,14 @@ use crate::workspace::WorkspaceStore;
 const ACTIVE_GOAL_OBJECTIVE: &str =
     "bau das weiter aus max. usp max gui friendly max ai ki llm usage";
 
+mod capture;
+mod connection_probe;
 mod desktop;
+mod mission_panel;
+mod operations_panel;
+mod session_windows;
+mod integrations_panel;
+mod recordings_panel;
 
 mod tw {
     use eframe::egui::Color32;
@@ -68,6 +75,11 @@ mod tw {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
+    Missions,
+    Operations,
+    SessionWindows,
+    Integrations,
+    Recordings,
     Connections,
     Sessions,
     Approvals,
@@ -122,10 +134,10 @@ pub struct AivanaApp {
     status: String,
     store: Option<ProfileStore>,
     engine: NativeRdpEngine,
+    connection_probe: connection_probe::ProbeCoordinator,
     textures: HashMap<Uuid, TextureHandle>,
     latest_frames: HashMap<Uuid, FrameUpdate>,
     credentials: PersistentCredentialStore,
-    preflight: LocalPreflightService,
     ai: LocalAiProvider,
     timeline: InMemoryTimelineStore,
     workspaces: WorkspaceStore,
@@ -142,6 +154,12 @@ pub struct AivanaApp {
     remote_fullscreen: bool,
     autopilot: AutopilotController,
     desktop: desktop::DesktopState,
+    gui_capture: capture::GuiCapture,
+    missions: mission_panel::MissionState,
+    operations: operations_panel::OperationsState,
+    session_windows: session_windows::SessionWindows,
+    integrations: integrations_panel::IntegrationsState,
+    recordings: recordings_panel::RecordingsState,
 }
 
 impl AivanaApp {
@@ -154,7 +172,7 @@ impl AivanaApp {
 
         let (store, profiles, status) = match ProfileStore::new() {
             Ok(store) => match store.load() {
-                Ok(profiles) => (Some(store), profiles, "Profiles loaded".to_owned()),
+                Ok(profiles) => (Some(store), profiles, "Profile geladen".to_owned()),
                 Err(err) => (
                     Some(store),
                     Vec::new(),
@@ -208,10 +226,10 @@ impl AivanaApp {
             status,
             store,
             engine: NativeRdpEngine::default(),
+            connection_probe: connection_probe::ProbeCoordinator::default(),
             textures: HashMap::new(),
             latest_frames: HashMap::new(),
             credentials,
-            preflight: LocalPreflightService,
             ai: LocalAiProvider,
             timeline,
             workspaces,
@@ -228,6 +246,12 @@ impl AivanaApp {
             remote_fullscreen: false,
             autopilot,
             desktop: desktop::DesktopState::load(),
+            gui_capture: capture::GuiCapture::from_args(),
+            missions: mission_panel::MissionState::default(),
+            operations: operations_panel::OperationsState::default(),
+            session_windows: session_windows::SessionWindows::default(),
+            integrations: integrations_panel::IntegrationsState::default(),
+            recordings: recordings_panel::RecordingsState::default(),
         }
     }
 
@@ -298,6 +322,51 @@ impl AivanaApp {
     }
 
     fn save_draft(&mut self) {
+        if let Err(err) = crate::rd_gateway::validate_host(self.draft.host.trim()) {
+            self.status = format!("Ungültige Rechneradresse: {err}");
+            return;
+        }
+        if self
+            .draft
+            .port
+            .parse::<u16>()
+            .ok()
+            .filter(|port| *port > 0)
+            .is_none()
+        {
+            self.status = "Der Port muss zwischen 1 und 65535 liegen.".to_owned();
+            return;
+        }
+        if let Err(err) = crate::rd_gateway::validate_gateway(
+            &self.draft.options.gateway,
+            self.draft.port.parse().unwrap_or(3389),
+        ) {
+            self.status = format!("Gateway-Einstellungen ungültig: {err}");
+            return;
+        }
+        if !self.draft.options.gateway.use_profile_credentials
+            && !self.draft.options.gateway.password.is_empty()
+        {
+            let gateway = &self.draft.options.gateway;
+            let mut gateway_profile =
+                ConnectionProfile::sample("RD Gateway", &gateway.host, "Gateway", false);
+            gateway_profile.credential_id = gateway.credential_id;
+            let secret = SecretCredential {
+                username: gateway.username.clone(),
+                password: gateway.password.clone(),
+                domain: gateway.domain.clone(),
+            };
+            match self.credentials.save(&mut gateway_profile, secret) {
+                Ok(reference) => self.draft.options.gateway.credential_id = Some(reference.id),
+                Err(err) => {
+                    self.status =
+                        format!("Gateway-Zugang konnte nicht geschützt gespeichert werden: {err}");
+                    return;
+                }
+            }
+        }
+        self.draft.options.gateway.password.clear();
+
         let port = self
             .draft
             .port
@@ -323,71 +392,69 @@ impl AivanaApp {
             domain: self.draft.domain.trim().to_owned(),
         });
 
-        if let Some(id) = self.editing_profile {
-            if let Some(profile) = self.profiles.iter_mut().find(|profile| profile.id == id) {
-                profile.name = self.draft.name.trim().to_owned();
-                profile.host = self.draft.host.trim().to_owned();
-                profile.port = port;
-                profile.username = self.draft.username.trim().to_owned();
-                profile.password.clear();
-                profile.domain = self.draft.domain.trim().to_owned();
-                profile.group = self.draft.group.trim().to_owned();
-                profile.tags = tags;
-                profile.favorite = self.draft.favorite;
-                profile.updated_at = Utc::now();
-                if let Some(secret) = draft_secret {
-                    if let Err(err) = self.credentials.save(profile, secret) {
-                        self.status = format!("Could not save credential: {err}");
-                    }
-                }
-                self.selected_profile = Some(profile.id);
+        let mut profile = self
+            .editing_profile
+            .and_then(|id| self.profiles.iter().find(|p| p.id == id))
+            .cloned()
+            .unwrap_or_else(|| {
+                ConnectionProfile::sample(
+                    self.draft.name.trim(),
+                    self.draft.host.trim(),
+                    self.draft.group.trim(),
+                    self.draft.favorite,
+                )
+            });
+        profile.options = self.draft.options.clone();
+        profile.name = self.draft.name.trim().to_owned();
+        profile.host = self.draft.host.trim().to_owned();
+        profile.port = port;
+        profile.username = self.draft.username.trim().to_owned();
+        profile.domain = self.draft.domain.trim().to_owned();
+        profile.password.clear();
+        profile.group = self.draft.group.trim().to_owned();
+        profile.tags = tags;
+        profile.favorite = self.draft.favorite;
+        profile.updated_at = Utc::now();
+        if let Some(secret) = draft_secret {
+            if let Err(err) = self.credentials.save(&mut profile, secret) {
+                self.status = format!("Zugang konnte nicht geschützt gespeichert werden: {err}");
+                return;
             }
-        } else {
-            let now = Utc::now();
-            let mut profile = ConnectionProfile {
-                id: Uuid::new_v4(),
-                workspace_id: None,
-                name: self.draft.name.trim().to_owned(),
-                host: self.draft.host.trim().to_owned(),
-                port,
-                username: self.draft.username.trim().to_owned(),
-                credential_id: None,
-                password: String::new(),
-                domain: self.draft.domain.trim().to_owned(),
-                protocol: Protocol::Rdp,
-                group: self.draft.group.trim().to_owned(),
-                tags,
-                favorite: self.draft.favorite,
-                created_at: now,
-                updated_at: now,
-            };
-            if let Some(secret) = draft_secret {
-                if let Err(err) = self.credentials.save(&mut profile, secret) {
-                    self.status = format!("Could not save credential: {err}");
-                }
-            }
-            self.selected_profile = Some(profile.id);
-            self.profiles.push(profile);
         }
-
-        let saved_profile = self.selected_profile;
-        self.save_profiles();
-        if let Some(profile_id) = saved_profile {
-            self.load_profile_into_editor(profile_id);
-            self.status = "Profile saved".to_owned();
+        let id = profile.id;
+        let mut profiles = self.profiles.clone();
+        if let Some(existing) = profiles.iter_mut().find(|p| p.id == id) {
+            *existing = profile;
         } else {
-            self.start_new_profile();
+            profiles.push(profile);
         }
+        let result = self
+            .store
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Profilspeicher nicht verfügbar"))
+            .and_then(|store| store.save(&profiles));
+        if let Err(err) = result {
+            self.status = format!("Profil konnte nicht gespeichert werden: {err}");
+            return;
+        }
+        self.profiles = profiles;
+        self.selected_profile = Some(id);
+        self.load_profile_into_editor(id);
+        self.status = "Profil gespeichert".to_owned();
     }
 
     fn connect_selected(&mut self) {
-        let Some(mut profile) = self.selected_profile().cloned() else {
-            self.status = "Select a profile first".to_owned();
-            return;
-        };
+        self.begin_certificate_probe(connection_probe::ProbeIntent::Connect);
+    }
 
+    fn connect_after_probe(
+        &mut self,
+        profile: ConnectionProfile,
+        probe: Result<String, String>,
+        report: Option<crate::models::PreflightReport>,
+    ) {
         let mut legacy_standard_rdp = false;
-        let fingerprint = match probe_server_fingerprint(&profile) {
+        let fingerprint = match probe {
             Ok(fingerprint) => fingerprint,
             Err(err) if is_standard_rdp_security_error(&format!("{err:#}")) => {
                 legacy_standard_rdp = true;
@@ -429,15 +496,10 @@ impl AivanaApp {
             }
         }
 
-        if let Some(credential_id) = profile.credential_id {
-            if let Ok(Some(secret)) = self.credentials.get(credential_id) {
-                profile.username = secret.username;
-                profile.password = secret.password;
-                profile.domain = secret.domain;
-            }
-        }
-
-        let report = self.preflight.run(&profile);
+        let Some(report) = report else {
+            self.status = "Vorprüfung fehlt; Verbindung bleibt blockiert.".into();
+            return;
+        };
         self.ai_diagnosis = format_ai_explanation(&self.ai.explain_failure(&report));
         self.diagnostics = report.findings.clone();
 
@@ -470,63 +532,12 @@ impl AivanaApp {
     }
 
     fn trust_selected_certificate(&mut self) {
-        let Some(profile) = self.selected_profile().cloned() else {
-            self.status = "Select a profile first".to_owned();
-            return;
-        };
-        let (fingerprint, source) = match probe_server_fingerprint(&profile) {
-            Ok(fingerprint) => (fingerprint, "RDP TLS probe"),
-            Err(err) if is_standard_rdp_security_error(&format!("{err:#}")) => {
-                self.block_standard_rdp_security(&profile, &format!("{err:#}"));
-                return;
-            }
-            Err(err) => {
-                self.status = format!("Certificate probe failed: {err}");
-                self.certificate_notice =
-                    "Trust blockiert: kein echtes TLS-Zertifikat vom RDP-Server erhalten."
-                        .to_owned();
-                return;
-            }
-        };
-        let identity = self
-            .certificates
-            .trust(&profile.host, profile.port, &fingerprint);
-        self.certificate_notice = format!(
-            "Trusted {}:{} fingerprint {} ({source})",
-            identity.host, identity.port, identity.fingerprint
-        );
-        self.status = "Certificate trusted locally".to_owned();
+        self.begin_certificate_probe(connection_probe::ProbeIntent::Trust);
     }
 
     fn reject_selected_certificate(&mut self) {
-        let Some(profile) = self.selected_profile().cloned() else {
-            self.status = "Select a profile first".to_owned();
-            return;
-        };
-        let fingerprint = match probe_server_fingerprint(&profile) {
-            Ok(fingerprint) => fingerprint,
-            Err(err) if is_standard_rdp_security_error(&format!("{err:#}")) => {
-                self.block_standard_rdp_security(&profile, &format!("{err:#}"));
-                return;
-            }
-            Err(err) => {
-                self.status = format!("Certificate probe failed: {err}");
-                self.certificate_notice =
-                    "Reject blockiert: kein echtes TLS-Zertifikat vom RDP-Server erhalten."
-                        .to_owned();
-                return;
-            }
-        };
-        let identity = self
-            .certificates
-            .reject(&profile.host, profile.port, &fingerprint);
-        self.certificate_notice = format!(
-            "Rejected {}:{} fingerprint {}",
-            identity.host, identity.port, identity.fingerprint
-        );
-        self.status = "Certificate rejected locally".to_owned();
+        self.begin_certificate_probe(connection_probe::ProbeIntent::Reject);
     }
-
     fn block_standard_rdp_security(&mut self, profile: &ConnectionProfile, detail: &str) {
         self.status = format!("{} uses unsupported Standard RDP Security", profile.host);
         self.certificate_notice = format!(
@@ -618,12 +629,7 @@ impl AivanaApp {
             .sessions
             .iter()
             .find(|session| session.id == session_id)
-            .is_some_and(|session| {
-                matches!(
-                    session.status,
-                    SessionStatus::Disconnected | SessionStatus::Failed
-                )
-            })
+            .is_some_and(|session| session.status != SessionStatus::Connected)
         {
             self.autopilot.status = AutopilotStatus::Failed;
             self.computer_use_status =
@@ -988,6 +994,9 @@ impl AivanaApp {
 impl eframe::App for AivanaApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.gui_capture.tick(&ctx);
+        self.poll_certificate_probe();
+        self.engine.release_inputs_except(self.remote_input_owner(ui));
         let mut received_frame = false;
 
         for session in &mut self.sessions {
@@ -1038,9 +1047,15 @@ impl eframe::App for AivanaApp {
             }
         }
 
+        self.poll_missions();
+        self.poll_operations();
+        self.poll_integrations();
+        self.poll_recordings();
         self.process_autopilot();
 
         self.desktop_shell(ui);
+        self.detached_sessions(&ctx);
+        self.engine.release_inputs_except(self.remote_input_owner(ui));
 
         if received_frame {
             ctx.request_repaint();
@@ -1073,25 +1088,25 @@ impl AivanaApp {
                 egui::TextEdit::singleline(&mut self.search)
                     .hint_text("Search name, host, group, tag"),
             );
-            if action_button(ui, "New", 88.0, ActionTone::Neutral).clicked() {
+            if action_button(ui, "Neu", 88.0, ActionTone::Neutral).clicked() {
                 self.start_new_profile();
             }
-            if action_button(ui, "Edit", 88.0, ActionTone::Neutral).clicked() {
+            if action_button(ui, "Bearbeiten", 88.0, ActionTone::Neutral).clicked() {
                 self.edit_selected_profile();
             }
-            if action_button(ui, "Connect", 108.0, ActionTone::Primary).clicked() {
+            if action_button(ui, "Verbinden", 108.0, ActionTone::Primary).clicked() {
                 self.connect_selected();
             }
-            if action_button(ui, "Trust Cert", 122.0, ActionTone::Primary).clicked() {
+            if action_button(ui, "Zertifikat vertrauen", 122.0, ActionTone::Primary).clicked() {
                 self.trust_selected_certificate();
             }
-            if action_button(ui, "Reject Cert", 126.0, ActionTone::Danger).clicked() {
+            if action_button(ui, "Zertifikat ablehnen", 126.0, ActionTone::Danger).clicked() {
                 self.reject_selected_certificate();
             }
-            if action_button(ui, "Test Cred", 112.0, ActionTone::Neutral).clicked() {
+            if action_button(ui, "Zugang prüfen", 112.0, ActionTone::Neutral).clicked() {
                 self.test_selected_credential();
             }
-            if action_button(ui, "Delete Cred", 124.0, ActionTone::Danger).clicked() {
+            if action_button(ui, "Zugang löschen", 124.0, ActionTone::Danger).clicked() {
                 self.delete_selected_credential();
             }
         });
@@ -1110,7 +1125,7 @@ impl AivanaApp {
 
     fn profile_table(&mut self, ui: &mut Ui) {
         panel(ui, |ui| {
-            ui.heading("Profiles");
+            ui.heading("Profile");
             ui.add_space(8.0);
 
             let rows = self
@@ -1171,7 +1186,7 @@ impl AivanaApp {
                     painter.text(
                         pos2(rect.right() - 14.0, rect.top() + 14.0),
                         egui::Align2::RIGHT_TOP,
-                        "Selected",
+                        "Ausgewählt",
                         FontId::proportional(14.0),
                         tw::BLUE_700,
                     );
@@ -1187,9 +1202,9 @@ impl AivanaApp {
     fn profile_editor(&mut self, ui: &mut Ui) {
         panel(ui, |ui| {
             ui.heading(if self.editing_profile.is_some() {
-                "Edit Profile"
+                "Profil bearbeiten"
             } else {
-                "New Profile"
+                "Neues Profil"
             });
             ui.label(
                 RichText::new(self.credential_status_label())
@@ -1200,21 +1215,22 @@ impl AivanaApp {
             let draft = &mut self.draft;
             ui.columns(2, |columns| {
                 text_field(&mut columns[0], "Name", &mut draft.name);
-                text_field(&mut columns[1], "Host", &mut draft.host);
+                text_field(&mut columns[1], "Rechneradresse", &mut draft.host);
             });
             ui.columns(2, |columns| {
                 text_field(&mut columns[0], "Port", &mut draft.port);
-                text_field(&mut columns[1], "Username", &mut draft.username);
+                text_field(&mut columns[1], "Benutzername", &mut draft.username);
             });
             ui.columns(2, |columns| {
-                text_field(&mut columns[0], "Domain", &mut draft.domain);
-                text_field(&mut columns[1], "Group", &mut draft.group);
+                text_field(&mut columns[0], "Domäne", &mut draft.domain);
+                text_field(&mut columns[1], "Gruppe", &mut draft.group);
             });
-            password_field(ui, "Password", &mut draft.password);
-            text_field(ui, "Tags", &mut draft.tags);
-            ui.checkbox(&mut draft.favorite, "Favorite");
+            password_field(ui, "Passwort", &mut draft.password);
+            text_field(ui, "Schlagwörter", &mut draft.tags);
+            ui.checkbox(&mut draft.favorite, "Favorit");
+            self.workbench_profile_options(ui);
             ui.add_space(12.0);
-            if action_button(ui, "Save Profile", 132.0, ActionTone::Primary).clicked() {
+            if action_button(ui, "Profil speichern", 132.0, ActionTone::Primary).clicked() {
                 self.save_draft();
             }
         });
@@ -1546,7 +1562,12 @@ impl AivanaApp {
     }
 
     fn settings_view(&mut self, ui: &mut Ui) {
-        page_header(ui, "Settings", "Runtime and integration status.");
+        page_header(
+            ui,
+            "Einstellungen",
+            "Darstellung, Verbindungen und KI-Unterstützung.",
+        );
+        self.workbench_display_settings(ui);
         panel(ui, |ui| {
             ui.heading("Rust migration status");
             ui.label("UI runtime: native eframe/egui");
@@ -2566,7 +2587,22 @@ impl AivanaApp {
         if response.clicked() && ui.is_enabled() {
             response.request_focus();
         }
-        let input_enabled = ui.is_enabled() && !self.desktop.palette;
+        let input_enabled = ui.is_enabled()
+            && !self.desktop.palette
+            && self.sessions.iter().any(|session| {
+                session.id == session_id && session.status == SessionStatus::Connected
+            });
+        ui.memory_mut(|memory| {
+            memory.set_focus_lock_filter(
+                response.id,
+                egui::EventFilter {
+                    tab: true,
+                    horizontal_arrows: true,
+                    vertical_arrows: true,
+                    escape: true,
+                },
+            )
+        });
         let painter = ui.painter_at(rect);
         painter.rect(
             rect,
@@ -2585,8 +2621,8 @@ impl AivanaApp {
                 remote_image_rect(rect.shrink(2.0), source.size(), self.remote_view_mode);
             let _ = self.engine.resize(
                 session_id,
-                image_rect.width().round().clamp(320.0, 3840.0) as u16,
-                image_rect.height().round().clamp(200.0, 2160.0) as u16,
+                rect.shrink(2.0).width().round().clamp(320.0, 3840.0) as u16,
+                rect.shrink(2.0).height().round().clamp(200.0, 2160.0) as u16,
             );
             painter.image(
                 texture.id(),
@@ -2605,95 +2641,164 @@ impl AivanaApp {
                 tw::SLATE_300,
             );
 
-            if input_enabled && response.hovered() {
-                if let Some(pointer_pos) = ui.ctx().pointer_latest_pos() {
-                    if image_rect.contains(pointer_pos) {
-                        let (x, y) = viewport_to_remote(pointer_pos, image_rect, source, frame);
+            let events = ui.input(|input| input.events.clone());
+            let focused = input_enabled
+                && response.has_focus()
+                && ui.input(|input| input.focused)
+                && self.selected_session == Some(session_id);
+            if focused {
+                self.engine.set_clipboard_focus(Some(session_id));
+            }
+            let held_pointer = self.engine.pointer_is_held(session_id);
+            if !focused && !held_pointer {
+                self.engine.release_inputs(session_id);
+            }
+            let raw_keys = events
+                .iter()
+                .any(|event| matches!(event, egui::Event::Key { pressed: true, .. }));
+            for event in events {
+                match event {
+                    egui::Event::PointerButton {
+                        pos,
+                        button,
+                        pressed,
+                        ..
+                    } => {
+                        let accepts = input_enabled
+                            && self.selected_session == Some(session_id)
+                            && ((response.hovered() && image_rect.contains(pos))
+                                || (!pressed && held_pointer));
+                        if accepts {
+                            if pressed {
+                                response.request_focus();
+                            }
+                            let button = match button {
+                                egui::PointerButton::Primary => MouseButton::Left,
+                                egui::PointerButton::Secondary => MouseButton::Right,
+                                egui::PointerButton::Middle => MouseButton::Middle,
+                                _ => continue,
+                            };
+                            let (x, y) = viewport_to_remote(pos, image_rect, source, frame);
+                            let _ = self.engine.send_input(
+                                session_id,
+                                InputAction::PointerButton {
+                                    x,
+                                    y,
+                                    button,
+                                    pressed,
+                                },
+                            );
+                        }
+                    }
+                    egui::Event::PointerMoved(pos)
+                        if input_enabled
+                            && self.selected_session == Some(session_id)
+                            && ((response.hovered() && image_rect.contains(pos))
+                                || self.engine.pointer_is_held(session_id)) =>
+                    {
+                        let (x, y) = viewport_to_remote(pos, image_rect, source, frame);
                         let _ = self
                             .engine
                             .send_input(session_id, InputAction::MovePointer { x, y });
                     }
+                    egui::Event::Key {
+                        key,
+                        physical_key,
+                        pressed,
+                        modifiers,
+                        ..
+                    } if focused => {
+                        for (scan_code, down) in remote_modifier_keys(modifiers) {
+                            if self.engine.key_is_held(session_id, scan_code) != down {
+                                let _ = self.engine.send_input(
+                                    session_id,
+                                    InputAction::Key {
+                                        scan_code,
+                                        pressed: down,
+                                    },
+                                );
+                            }
+                        }
+                        if let Some(scan_code) = remote_scan_code(physical_key.unwrap_or(key)) {
+                            let _ = self
+                                .engine
+                                .send_input(session_id, InputAction::Key { scan_code, pressed });
+                        }
+                    }
+                    egui::Event::Copy | egui::Event::Cut | egui::Event::Paste(_) if focused => {
+                        // egui-winit replaces Ctrl+C/X/V key-down with these semantic events.
+                        for (scan_code, pressed) in
+                            remote_modifier_keys(ui.input(|input| input.modifiers))
+                        {
+                            if self.engine.key_is_held(session_id, scan_code) != pressed {
+                                let _ = self.engine.send_input(
+                                    session_id,
+                                    InputAction::Key { scan_code, pressed },
+                                );
+                            }
+                        }
+                        let scan_code = match event {
+                            egui::Event::Copy => 0x2e,
+                            egui::Event::Cut => 0x2d,
+                            _ => 0x2f,
+                        };
+                        let _ = self.engine.send_input(
+                            session_id,
+                            InputAction::Key {
+                                scan_code,
+                                pressed: true,
+                            },
+                        );
+                    }
+                    egui::Event::Text(text) if focused && !raw_keys => {
+                        let _ = self
+                            .engine
+                            .send_input(session_id, InputAction::TypeText { text });
+                    }
+                    egui::Event::Ime(egui::ImeEvent::Commit(text)) if focused => {
+                        let _ = self
+                            .engine
+                            .send_input(session_id, InputAction::TypeText { text });
+                    }
+                    egui::Event::MouseWheel { unit, delta, .. }
+                        if focused && response.hovered() =>
+                    {
+                        if let Some(pos) = ui.ctx().pointer_latest_pos() {
+                            let scale = match unit {
+                                egui::MouseWheelUnit::Line => 120.0,
+                                egui::MouseWheelUnit::Page => 360.0,
+                                egui::MouseWheelUnit::Point => 3.0,
+                            };
+                            let (x, y) = viewport_to_remote(pos, image_rect, source, frame);
+                            let delta = (delta.y * scale).round().clamp(-255.0, 255.0) as i16;
+                            if delta != 0 {
+                                let _ = self
+                                    .engine
+                                    .send_input(session_id, InputAction::Scroll { x, y, delta });
+                            }
+                        }
+                    }
+                    egui::Event::WindowFocused(false) | egui::Event::PointerGone => {
+                        self.engine.release_inputs(session_id)
+                    }
+                    _ => {}
                 }
             }
-
-            if input_enabled && response.clicked_by(egui::PointerButton::Primary) {
-                if let Some(pos) = response.interact_pointer_pos() {
-                    let (x, y) = viewport_to_remote(pos, image_rect, source, frame);
-                    let _ = self.engine.send_input(
-                        session_id,
-                        InputAction::Click {
-                            x,
-                            y,
-                            button: MouseButton::Left,
-                        },
-                    );
+            if focused {
+                for (scan_code, pressed) in remote_modifier_keys(ui.input(|input| input.modifiers))
+                {
+                    if self.engine.key_is_held(session_id, scan_code) != pressed {
+                        let _ = self
+                            .engine
+                            .send_input(session_id, InputAction::Key { scan_code, pressed });
+                    }
                 }
-            }
-            if input_enabled && response.clicked_by(egui::PointerButton::Secondary) {
-                if let Some(pos) = response.interact_pointer_pos() {
-                    let (x, y) = viewport_to_remote(pos, image_rect, source, frame);
-                    let _ = self.engine.send_input(
-                        session_id,
-                        InputAction::Click {
-                            x,
-                            y,
-                            button: MouseButton::Right,
-                        },
-                    );
-                }
-            }
-
-            let scroll_delta = ui.input(|input| input.smooth_scroll_delta.y);
-            if input_enabled && response.hovered() && scroll_delta.abs() > f32::EPSILON {
-                if let Some(pos) = ui.ctx().pointer_latest_pos() {
-                    let (x, y) = viewport_to_remote(pos, image_rect, source, frame);
-                    let _ = self.engine.send_input(
-                        session_id,
-                        InputAction::Scroll {
-                            x,
-                            y,
-                            delta: scroll_delta.clamp(i16::MIN as f32, i16::MAX as f32) as i16,
-                        },
-                    );
-                }
-            }
-
-            let typed = ui.input(|input| {
-                input
-                    .events
-                    .iter()
-                    .filter_map(|event| match event {
-                        egui::Event::Text(text) => Some(text.clone()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("")
-            });
-            if input_enabled && response.has_focus() && !typed.is_empty() {
-                let _ = self
-                    .engine
-                    .send_input(session_id, InputAction::TypeText { text: typed });
-            }
-            let hotkeys = ui.input(|input| {
-                input
-                    .events
-                    .iter()
-                    .filter_map(|event| match event {
-                        egui::Event::Key {
-                            key,
-                            pressed: true,
-                            modifiers,
-                            ..
-                        } => key_event_to_hotkey(*key, *modifiers),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-            });
-            if input_enabled && response.has_focus() {
-                for keys in hotkeys {
-                    let _ = self
-                        .engine
-                        .send_input(session_id, InputAction::Hotkey { keys });
+                for (scan_code, pressed) in native_extra_keys() {
+                    if self.engine.key_is_held(session_id, scan_code) != pressed {
+                        let _ = self
+                            .engine
+                            .send_input(session_id, InputAction::Key { scan_code, pressed });
+                    }
                 }
             }
         } else {
@@ -2755,13 +2860,14 @@ fn configure_style(ctx: &Context) {
     style.visuals.window_fill = tw::WHITE;
     style.visuals.extreme_bg_color = tw::WHITE;
     style.visuals.faint_bg_color = tw::SLATE_50;
-    style.visuals.selection.bg_fill = tw::BLUE_600;
+    style.visuals.selection.bg_fill = Color32::from_rgb(0, 108, 123);
     style.visuals.selection.stroke = Stroke::new(1.0, tw::WHITE);
     style.visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, tw::SLATE_800);
     style.visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, tw::SLATE_800);
     style.visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, tw::SLATE_950);
     style.visuals.widgets.active.fg_stroke = Stroke::new(1.0, tw::SLATE_950);
     style.visuals.widgets.inactive.bg_fill = tw::SLATE_50;
+    style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, tw::SLATE_300);
     style.visuals.widgets.hovered.bg_fill = tw::BLUE_50;
     style.visuals.widgets.active.bg_fill = tw::BLUE_100;
     style.text_styles.insert(
@@ -3051,6 +3157,25 @@ fn format_ai_explanation(explanation: &AiExplanation) -> String {
 
 fn input_action_label(action: &InputAction) -> String {
     match action {
+        InputAction::ClipboardFocus { active } => format!("clipboard focus {active}"),
+        InputAction::Key { scan_code, pressed } => format!(
+            "key {scan_code:#x} {}",
+            if *pressed { "down" } else { "up" }
+        ),
+        InputAction::PointerButton {
+            x,
+            y,
+            button,
+            pressed,
+        } => format!(
+            "{button:?} {} at {x},{y}",
+            if *pressed { "down" } else { "up" }
+        ),
+        InputAction::Resize { width, height } => format!("resize desktop to {width}x{height}"),
+        InputAction::ClipboardFiles { paths } => {
+            format!("share {} file(s) via clipboard", paths.len())
+        }
+        InputAction::ClipboardDownload { .. } => "download clipboard files".to_owned(),
         InputAction::MovePointer { x, y } => format!("move pointer to {x},{y}"),
         InputAction::Click { x, y, button } => format!("click {button:?} at {x},{y}"),
         InputAction::DoubleClick { x, y, button } => {
@@ -10642,6 +10767,138 @@ fn is_standard_rdp_security_error(message: &str) -> bool {
     lower.contains("standard rdp security") || lower.contains("server only supports standard rdp")
 }
 
+fn remote_modifier_keys(modifiers: egui::Modifiers) -> Vec<(u16, bool)> {
+    // egui exposes aggregate modifiers. Do not mistake Windows `command` (Ctrl) for Win.
+    let mut keys = vec![
+        (0x1d, modifiers.ctrl),
+        (0x2a, modifiers.shift),
+        (0x38, modifiers.alt),
+    ];
+    if !cfg!(windows) {
+        keys.push((0x15b, modifiers.mac_cmd));
+    }
+    keys
+}
+
+#[cfg(windows)]
+fn native_extra_keys() -> Vec<(u16, bool)> {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, VK_CAPITAL, VK_CONTROL, VK_LWIN, VK_NUMLOCK, VK_RWIN, VK_SCROLL,
+        VK_SNAPSHOT,
+    };
+    let mut keys = vec![
+        (VK_LWIN, 0x15b),
+        (VK_RWIN, 0x15c),
+        (VK_CAPITAL, 0x3a),
+        (VK_NUMLOCK, 0x45),
+        (VK_SCROLL, 0x46),
+        (VK_SNAPSHOT, 0x137),
+    ]
+    .into_iter()
+    .map(|(key, scan_code)| {
+        // Read physical state only while the RDP canvas has foreground keyboard focus.
+        (scan_code, unsafe { GetAsyncKeyState(i32::from(key)) } < 0)
+    })
+    .collect::<Vec<_>>();
+    if unsafe { GetAsyncKeyState(i32::from(VK_CONTROL)) } < 0 {
+        // An empty local clipboard makes egui-winit omit Paste entirely. Remote Ctrl+V
+        // must still work (e.g. files copied on the remote machine).
+        keys.extend(
+            [(0x43, 0x2e), (0x58, 0x2d), (0x56, 0x2f)]
+                .into_iter()
+                .map(|(key, code)| (code, unsafe { GetAsyncKeyState(key) } < 0)),
+        );
+    }
+    keys
+}
+
+#[cfg(not(windows))]
+fn native_extra_keys() -> Vec<(u16, bool)> {
+    Vec::new()
+}
+
+fn remote_scan_code(key: egui::Key) -> Option<u16> {
+    use egui::Key::*;
+    Some(match key {
+        Escape => 0x01,
+        Num1 => 0x02,
+        Num2 => 0x03,
+        Num3 => 0x04,
+        Num4 => 0x05,
+        Num5 => 0x06,
+        Num6 => 0x07,
+        Num7 => 0x08,
+        Num8 => 0x09,
+        Num9 => 0x0a,
+        Num0 => 0x0b,
+        Minus => 0x0c,
+        Equals | Plus => 0x0d,
+        Backspace => 0x0e,
+        Tab => 0x0f,
+        Q => 0x10,
+        W => 0x11,
+        E => 0x12,
+        R => 0x13,
+        T => 0x14,
+        Y => 0x15,
+        U => 0x16,
+        I => 0x17,
+        O => 0x18,
+        P => 0x19,
+        OpenBracket => 0x1a,
+        CloseBracket => 0x1b,
+        Enter => 0x1c,
+        A => 0x1e,
+        S => 0x1f,
+        D => 0x20,
+        F => 0x21,
+        G => 0x22,
+        H => 0x23,
+        J => 0x24,
+        K => 0x25,
+        L => 0x26,
+        Semicolon | Colon => 0x27,
+        Quote => 0x28,
+        Backtick => 0x29,
+        Backslash | Pipe => 0x2b,
+        Z => 0x2c,
+        X => 0x2d,
+        C => 0x2e,
+        V => 0x2f,
+        B => 0x30,
+        N => 0x31,
+        M => 0x32,
+        Comma => 0x33,
+        Period => 0x34,
+        Slash | Questionmark => 0x35,
+        Space => 0x39,
+        F1 => 0x3b,
+        F2 => 0x3c,
+        F3 => 0x3d,
+        F4 => 0x3e,
+        F5 => 0x3f,
+        F6 => 0x40,
+        F7 => 0x41,
+        F8 => 0x42,
+        F9 => 0x43,
+        F10 => 0x44,
+        F11 => 0x57,
+        F12 => 0x58,
+        Home => 0x147,
+        ArrowUp => 0x148,
+        PageUp => 0x149,
+        ArrowLeft => 0x14b,
+        ArrowRight => 0x14d,
+        End => 0x14f,
+        ArrowDown => 0x150,
+        PageDown => 0x151,
+        Insert => 0x152,
+        Delete => 0x153,
+        _ => return None,
+    })
+}
+
+#[allow(dead_code)]
 fn key_event_to_hotkey(key: egui::Key, modifiers: egui::Modifiers) -> Option<Vec<String>> {
     let mut keys = Vec::new();
     if modifiers.ctrl {
@@ -10681,6 +10938,27 @@ fn key_event_to_hotkey(key: egui::Key, modifiers: egui::Modifiers) -> Option<Vec
 mod tests {
     use super::*;
     use crate::autopilot::AutopilotSettings;
+
+    #[test]
+    fn remote_keyboard_maps_navigation_and_editing_keys() {
+        assert_eq!(remote_scan_code(egui::Key::Backspace), Some(0x0e));
+        assert_eq!(remote_scan_code(egui::Key::Delete), Some(0x153));
+        assert_eq!(remote_scan_code(egui::Key::ArrowLeft), Some(0x14b));
+        assert_eq!(remote_scan_code(egui::Key::A), Some(0x1e));
+        assert_eq!(remote_scan_code(egui::Key::F12), Some(0x58));
+    }
+
+    #[test]
+    fn remote_control_does_not_also_press_windows_key() {
+        let modifiers = egui::Modifiers {
+            ctrl: true,
+            command: true,
+            ..Default::default()
+        };
+        let keys = remote_modifier_keys(modifiers);
+        assert!(keys.contains(&(0x1d, true)));
+        assert!(!keys.contains(&(0x15b, true)));
+    }
 
     #[test]
     fn batched_plan_uses_highest_policy_decision() {

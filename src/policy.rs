@@ -9,7 +9,10 @@ impl PolicyEngine {
             InputAction::Screenshot | InputAction::Verify { .. } | InputAction::Wait { .. } => {
                 RiskLevel::ReadOnly
             }
-            InputAction::MovePointer { .. } | InputAction::Scroll { .. } => RiskLevel::LowRisk,
+            InputAction::MovePointer { .. }
+            | InputAction::Scroll { .. }
+            | InputAction::Resize { .. }
+            | InputAction::ClipboardFocus { .. } => RiskLevel::LowRisk,
             InputAction::TypeText { text } if contains_blocked_intent(text) => {
                 RiskLevel::Destructive
             }
@@ -19,6 +22,10 @@ impl PolicyEngine {
                 RiskLevel::ElevatedRisk
             }
             InputAction::Click { .. }
+            | InputAction::ClipboardFiles { .. }
+            | InputAction::ClipboardDownload { .. }
+            | InputAction::Key { .. }
+            | InputAction::PointerButton { .. }
             | InputAction::DoubleClick { .. }
             | InputAction::Hotkey { .. }
             | InputAction::TypeText { .. } => RiskLevel::ElevatedRisk,
