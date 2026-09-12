@@ -13,6 +13,7 @@ pub struct ProfileOptions {
     pub monitors: Vec<MonitorLayout>,
     pub shared_folders: Vec<SharedFolder>,
     pub gateway: crate::rd_gateway::GatewayOptions,
+    pub remote_app: crate::remoteapp::RemoteAppOptions,
 }
 impl Default for ProfileOptions {
     fn default() -> Self {
@@ -27,6 +28,7 @@ impl Default for ProfileOptions {
             monitors: Vec::new(),
             shared_folders: Vec::new(),
             gateway: Default::default(),
+            remote_app: Default::default(),
         }
     }
 }

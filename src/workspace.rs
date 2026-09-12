@@ -65,7 +65,7 @@ impl WorkspaceStore {
             Workspace {
                 id,
                 name: "Default Workspace".to_owned(),
-                notes: "Local-first Aivana workspace".to_owned(),
+                notes: "Local-first Relayne workspace".to_owned(),
                 created_at: now,
                 updated_at: now,
             },

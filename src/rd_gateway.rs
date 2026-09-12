@@ -1,5 +1,4 @@
-//! Native MS-TSGU transport. The published IronRDP gateway supports WebSocket /
-//! HTTP Basic authentication and resource port 3389; unsupported variants fail closed.
+//! Native MS-TSGU WebSocket transport with explicit Basic or NTLM extended authentication.
 use crate::models::ConnectionProfile;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -8,10 +7,35 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+type InteractionBus = (
+    std::sync::mpsc::SyncSender<ironrdp_mstsgu::GatewayInteraction>,
+    std::sync::Mutex<std::sync::mpsc::Receiver<ironrdp_mstsgu::GatewayInteraction>>,
+);
+static INTERACTIONS: std::sync::OnceLock<InteractionBus> = std::sync::OnceLock::new();
+
+/// Called only by the GUI. Headless consumers do not silently enable prompts.
+pub fn register_interaction_ui() {
+    INTERACTIONS.get_or_init(|| {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(8);
+        (sender, std::sync::Mutex::new(receiver))
+    });
+}
+pub fn interaction_sender()
+-> Option<std::sync::mpsc::SyncSender<ironrdp_mstsgu::GatewayInteraction>> {
+    INTERACTIONS.get().map(|bus| bus.0.clone())
+}
+pub fn poll_interaction() -> Option<ironrdp_mstsgu::GatewayInteraction> {
+    INTERACTIONS.get()?.1.lock().ok()?.try_recv().ok()
+}
+
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct GatewayOptions {
     pub enabled: bool,
+    /// NTLM extended authentication; false retains explicit HTTP Basic compatibility.
+    pub ntlm: bool,
+    /// Gateway-provider-issued PAA cookie. Requested per connection, never persisted.
+    pub paa: bool,
     pub host: String,
     pub port: u16,
     pub username: String,
@@ -25,6 +49,8 @@ impl Default for GatewayOptions {
     fn default() -> Self {
         Self {
             enabled: false,
+            ntlm: true,
+            paa: false,
             host: String::new(),
             port: 443,
             username: String::new(),
@@ -85,8 +111,8 @@ pub fn validate_gateway(options: &GatewayOptions, target_port: u16) -> Result<()
             "Diese RD-Gateway-Version unterstützt keine IPv6-Gateway-Adresse; bitte DNS-Namen verwenden"
         );
     }
-    if target_port != 3389 {
-        bail!("Diese RD-Gateway-Version unterstützt nur RDP-Zielport 3389");
+    if target_port == 0 {
+        bail!("Zielport muss zwischen 1 und 65535 liegen");
     }
     Ok(())
 }
@@ -104,6 +130,23 @@ impl GatewayStream {
         profile: &ConnectionProfile,
         options: &GatewayOptions,
         password: &str,
+    ) -> Result<(Self, SocketAddr)> {
+        Self::connect_with_messages(profile, options, password, None)
+    }
+    pub fn connect_with_messages(
+        profile: &ConnectionProfile,
+        options: &GatewayOptions,
+        password: &str,
+        messages: Option<std::sync::mpsc::SyncSender<String>>,
+    ) -> Result<(Self, SocketAddr)> {
+        Self::connect_interactive(profile, options, password, messages, None)
+    }
+    pub fn connect_interactive(
+        profile: &ConnectionProfile,
+        options: &GatewayOptions,
+        password: &str,
+        messages: Option<std::sync::mpsc::SyncSender<String>>,
+        interactions: Option<std::sync::mpsc::SyncSender<ironrdp_mstsgu::GatewayInteraction>>,
     ) -> Result<(Self, SocketAddr)> {
         validate_gateway(options, profile.port)?;
         validate_host(&profile.host)?;
@@ -129,10 +172,15 @@ impl GatewayStream {
         } else {
             format!("{domain}\\{username}")
         };
-        if user.is_empty() || password.is_empty() {
+        if !options.paa && (user.is_empty() || password.is_empty()) {
             bail!("RD Gateway benötigt Benutzername und Kennwort");
         }
         let target = ironrdp_mstsgu::GwConnectTarget {
+            ntlm: options.ntlm,
+            paa: options.paa,
+            interactions,
+            target_port: profile.port,
+            messages,
             gw_endpoint: format!("{}:{}", options.host, options.port),
             gw_user: user,
             gw_pass: password.to_owned(),
@@ -143,9 +191,9 @@ impl GatewayStream {
             .enable_all()
             .build()?;
         let (client, local_addr) = runtime.block_on(async {
-            tokio::time::timeout(Duration::from_secs(30), ironrdp_mstsgu::GwClient::connect(&target, "Aivana" )).await
+            tokio::time::timeout(Duration::from_secs(120), ironrdp_mstsgu::GwClient::connect(&target, "Relayne" )).await
         }).context("RD-Gateway-Verbindungszeit überschritten")?
-            .map_err(|_| anyhow::anyhow!("RD-Gateway-Verbindung fehlgeschlagen. Gateway-Zertifikat, WebSocket-Unterstützung und HTTP-Basic-Anmeldung prüfen; NTLM/MFA und Zustimmungsmeldungen werden von dieser Version nicht unterstützt."))?;
+            .map_err(|error| anyhow::anyhow!("RD-Gateway-Verbindung fehlgeschlagen ({error}). Gateway-Zertifikat, WebSocket-Unterstützung und Authentifizierungsmodus prüfen. NTLM-MFA am zweiten Faktor bestätigen; PAA benötigt einen vom Gateway-Anbieter ausgestellten Cookie. Keine automatische Wiederholung."))?;
         Ok((
             Self {
                 client,
@@ -231,7 +279,8 @@ mod tests {
             ..Default::default()
         };
         assert!(validate_gateway(&options, 3389).is_ok());
-        assert!(validate_gateway(&options, 3390).is_err());
+        assert!(validate_gateway(&options, 3390).is_ok());
+        assert!(validate_gateway(&options, 0).is_err());
         assert!(validate_gateway(&GatewayOptions { port: 0, ..options }, 3389).is_err());
     }
 }

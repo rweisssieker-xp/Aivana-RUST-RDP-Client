@@ -40,6 +40,8 @@ pub struct Keyframe {
     pub file: String,
     pub at: DateTime<Utc>,
     pub note: String,
+    #[serde(default)]
+    pub ocr: String,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Recording {
@@ -100,7 +102,24 @@ impl Recorder {
                             if recording.frames.len() >= MAX_FRAMES {
                                 bail!("Limit von 600 Schlüsselbildern erreicht");
                             }
-                            let png = masked_png(&frame, &recording.masks)?;
+                            let screen = crate::vision::recognize(&frame).context(
+                                "Aufnahme gestoppt: automatische OCR-Schwärzung fehlgeschlagen",
+                            )?;
+                            let (mut masks, mut clean) = crate::vision::redact(&frame, &screen)?;
+                            masks.extend_from_slice(&recording.masks);
+                            clean.words.retain(|w| {
+                                !recording.masks.iter().any(|m| {
+                                    let b = w.bounds;
+                                    let x = b.x as f32 / frame.width as f32;
+                                    let y = b.y as f32 / frame.height as f32;
+                                    let right = (u32::from(b.x) + u32::from(b.w)) as f32
+                                        / frame.width as f32;
+                                    let bottom = (u32::from(b.y) + u32::from(b.h)) as f32
+                                        / frame.height as f32;
+                                    x < m.x + m.w && right > m.x && y < m.y + m.h && bottom > m.y
+                                })
+                            });
+                            let png = masked_png(&frame, &masks)?;
                             bytes += png.len() as u64;
                             if bytes > MAX_BYTES {
                                 bail!("Aufzeichnungslimit von 128 MiB erreicht");
@@ -111,6 +130,7 @@ impl Recorder {
                                 file,
                                 at: frame.captured_at,
                                 note: redact_secret_text(&note),
+                                ocr: clean.text(),
                             });
                             write_protected(
                                 &dir.join("index.dpapi"),
@@ -190,6 +210,11 @@ impl Drop for Recorder {
     }
 }
 fn write_protected(path: &Path, bytes: &[u8]) -> Result<()> {
+    if path.file_name() == Some(std::ffi::OsStr::new("index.dpapi"))
+        && bytes.len() > 4 * 1024 * 1024
+    {
+        bail!("Aufzeichnungsindex-Limit erreicht; Aufnahme gestoppt");
+    }
     #[cfg(not(windows))]
     {
         let _ = (path, bytes);
@@ -336,6 +361,7 @@ mod tests {
                 file: "../secret".into(),
                 at: Utc::now(),
                 note: String::new(),
+                ocr: String::new(),
             }],
             masks: vec![],
         };

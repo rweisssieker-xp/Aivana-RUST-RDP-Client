@@ -266,7 +266,7 @@ fn ssh_options() -> Vec<String> {
     .map(str::to_owned)
     .collect()
 }
-fn winrm(spec: &mut CommandSpec, endpoint: &Endpoint, body: &str) {
+pub(crate) fn winrm(spec: &mut CommandSpec, endpoint: &Endpoint, body: &str) {
     spec.program = "powershell.exe".into();
     spec.args = ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "-"]
         .into_iter()

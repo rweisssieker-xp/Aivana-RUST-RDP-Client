@@ -97,6 +97,13 @@ impl Default for OperationsState {
     }
 }
 impl AivanaApp {
+    pub(super) fn operations_select_profile(&mut self, profile: &ConnectionProfile) {
+        self.operations.host = profile.host.clone();
+        self.operations.user = profile.username.clone();
+        self.operations.port = profile.port;
+        self.operations.mode = 0;
+        self.operations.reviewed = false;
+    }
     pub(super) fn poll_operations(&mut self) {
         self.operations.queue.poll();
         if let Some(rx) = &self.operations.local_pending {

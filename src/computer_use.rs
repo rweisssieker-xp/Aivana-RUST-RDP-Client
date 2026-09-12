@@ -117,7 +117,7 @@ impl<P: AiProvider> ComputerUseAgent<P> {
             action: action.action.clone(),
             actions: vec![action.action.clone()],
             reason,
-            expected_result: "Aivana verifies the next framebuffer after execution.".to_owned(),
+            expected_result: "Relayne verifies the next framebuffer after execution.".to_owned(),
             risk: action.risk,
             status: ApprovalStatus::Pending,
             created_at: chrono::Utc::now(),

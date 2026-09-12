@@ -146,7 +146,7 @@ impl AivanaApp {
         }
         top.horizontal(|ui| {
             ui.label(
-                RichText::new("Aivana")
+                RichText::new("Relayne")
                     .size(25.0)
                     .strong()
                     .color(if focused {
@@ -244,6 +244,13 @@ impl AivanaApp {
                     self.desktop_overview(&mut body);
                 }
             }
+        } else if self.view == View::Terminal {
+            body.heading("SSH-Terminal");
+            if let Some(terminal) = self.terminal.as_mut() {
+                terminal_panel::show(&mut body, terminal);
+            } else {
+                body.label("SSH-Profil auswählen und Verbinden starten.");
+            }
         } else {
             ScrollArea::vertical()
                 .auto_shrink([false, false])
@@ -254,6 +261,18 @@ impl AivanaApp {
                     View::Integrations => self.integrations_view(ui),
                     View::Recordings => self.recordings_view(ui),
                     View::Teaching => self.teaching_view(ui),
+                    View::Team => self.team_view(ui),
+                    View::Vision => self.vision_view(ui),
+                    View::Intelligence => self.intelligence_view(ui),
+                    View::Insights => self.insights_view(ui),
+                    View::Execution => self.execution_view(ui),
+                    View::ChangeHistory => self.change_history_view(ui),
+                    View::TestLab => self.test_lab_view(ui),
+                    View::Workflow => self.workflow_with_proof_view(ui),
+                    View::Incident => self.incident_view(ui),
+                    View::Promotion => self.promotion_view(ui),
+                    View::Recovery => self.recovery_view(ui),
+                    View::Terminal => {}
                     View::Connections => self.connections_view(ui),
                     View::Approvals => self.approvals_view(ui),
                     View::Workspaces => self.workspaces_view(ui),
@@ -324,6 +343,18 @@ impl AivanaApp {
             (View::Integrations, "Inventar & Vault"),
             (View::Recordings, "Aufzeichnungen"),
             (View::Teaching, "Vormachen & Lernen"),
+            (View::Team, "Team"),
+            (View::Vision, "Bildschirm verstehen"),
+            (View::Intelligence, "Planen & Lernen"),
+            (View::Recovery, "Recovery Agent"),
+            (View::Insights, "Ursachen & Lösungen"),
+            (View::Execution, "Prüfen & Ausführen"),
+            (View::Promotion, "Klon → Produktion"),
+            (View::ChangeHistory, "Änderungen & Rückkehr"),
+            (View::TestLab, "Isoliertes Testlabor"),
+            (View::Workflow, "Aufträge & Pakete"),
+            (View::Incident, "Störung rekonstruieren"),
+            (View::Terminal, "SSH-Terminal"),
             (View::Connections, "Verbindungen"),
             (View::Approvals, "Freigaben"),
             (View::Workspaces, "Abläufe & Wissen"),
@@ -1052,6 +1083,18 @@ impl AivanaApp {
                         ("Inventar & Vault", View::Integrations),
                         ("Aufzeichnungen", View::Recordings),
                         ("Vormachen & Lernen", View::Teaching),
+                        ("Team", View::Team),
+                        ("Bildschirm verstehen", View::Vision),
+                        ("Planen & Lernen", View::Intelligence),
+                        ("Recovery Agent", View::Recovery),
+                        ("Ursachen & Lösungen", View::Insights),
+                        ("Prüfen & Ausführen", View::Execution),
+                        ("Klon → Produktion", View::Promotion),
+                        ("Änderungen & Rückkehr", View::ChangeHistory),
+                        ("Isoliertes Testlabor", View::TestLab),
+                        ("Aufträge & Pakete", View::Workflow),
+                        ("Störung rekonstruieren", View::Incident),
+                        ("SSH-Terminal", View::Terminal),
                         ("Arbeitsbereich", View::Sessions),
                         ("Verbindungen", View::Connections),
                         ("Freigaben", View::Approvals),
@@ -1411,6 +1454,18 @@ mod tests {
                 View::Integrations,
                 View::Recordings,
                 View::Teaching,
+                View::Team,
+                View::Vision,
+                View::Intelligence,
+                View::Insights,
+                View::Execution,
+                View::ChangeHistory,
+                View::TestLab,
+                View::Workflow,
+                View::Incident,
+                View::Promotion,
+                View::Recovery,
+                View::Terminal,
             ] {
                 app.view = view;
                 let out = render(&mut app, &ctx, egui::vec2(width, 1000.0), vec![]);
@@ -1418,5 +1473,19 @@ mod tests {
                 assert!(app.sessions.is_empty());
             }
         }
+    }
+    #[test]
+    fn invalid_ssh_endpoint_is_rejected_before_starting_terminal() {
+        let ctx = Context::default();
+        let mut app = fixture(&ctx);
+        app.sessions.clear();
+        app.profiles[0].protocol = Protocol::Ssh;
+        app.profiles[0].port = 2222;
+        app.profiles[0].host = "invalid host".into();
+        app.selected_profile = Some(app.profiles[0].id);
+        app.connect_selected();
+        assert!(app.terminal.is_none());
+        assert!(app.sessions.is_empty());
+        assert!(app.status.contains("Ungültiger Host"));
     }
 }

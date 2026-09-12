@@ -1,0 +1,11 @@
+# Bound lab receipts
+
+`execute_bound_test` records an immutable, CurrentUser DPAPI protected pending request before starting PowerShell Direct. It contains the lab/VM identity, exact service operation and HTTP health probe, production plan SHA256 binding, unique attempt ID and start time. Credentials are passed only through the child process stdin and are never included in the pending request or receipt.
+
+The Hyper-V adapter checks VM ownership and private switch topology. The script compares the bound request to its actual inputs, hashes the exact request bytes, executes the existing guest service/HTTP adapter and persists the resulting proof. Rust accepts only a matching saved journal and request hash, then writes `test-labs/<lab UUID>/receipts/<attempt UUID>.dpapi` with create-new semantics and a durable flush. Incomplete attempts retain their pending request and cannot become successful receipts.
+
+Promotion uses `load_receipt("<lab UUID>/<attempt UUID>")`, never deserialized browser evidence. Loading validates canonical identifiers, owned journal, path ancestry without reparse points, bounded protected files, pending request agreement and the receipt hash. Cleanup retains journals and receipts so evidence remains available after the disposable VM is removed. The caller must separately check production plan binding and its chosen evidence age limit before every mutation.
+
+A passed receipt requires a real Running/Stopped transition to the requested state and a configured HTTP probe whose response status and body criterion actually passed. A no-op is not promotion evidence. Failed checks may record restoration; they never authorize promotion. Completion timestamps must fall within four minutes of the recorded request. The hash detects corruption; DPAPI establishes the Windows user protection boundary, not protection against malicious code already executing as that user.
+
+The Windows script fixtures exercise the actual embedded script with fake VM/service commands and a real loopback HTTP server: changed/healthy, failed health with restoration, and no-op rejection. They also reject binding changes and invalid completion times. They never invoke real Hyper-V mutation commands.

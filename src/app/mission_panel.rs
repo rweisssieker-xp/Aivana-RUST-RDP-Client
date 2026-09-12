@@ -60,7 +60,7 @@ impl Default for MissionState {
     }
 }
 impl AivanaApp {
-    fn save_missions(&mut self) -> bool {
+    pub(super) fn save_missions(&mut self) -> bool {
         if self.missions.error.is_some() {
             return false;
         }

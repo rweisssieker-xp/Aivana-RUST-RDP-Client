@@ -1,0 +1,316 @@
+{
+  "schemaVersion": 1,
+  "status": "passed",
+  "generatedAt": "2026-09-12T05:15:37.217Z",
+  "goal": "Find disruptive AI-central SaaS opportunities for Relayne, a native Rust RDP and SSH operations workbench with guarded AI execution, clone rehearsal, signed repair packages, recovery evidence, teaching from demonstrations and a team backend. Turn these capabilities into recurring revenue by reducing expert effort and time to verified incident recovery for IT operations teams and MSPs. Identify differentiated product bets beyond capabilities already implemented; treat buyer demand, pricing and multi-tenant readiness as unvalidated hypotheses.",
+  "evidence": {
+    "basis": "project-context-assumption",
+    "signalCount": 0,
+    "claimBoundary": "No customer or behavioral signals were imported. The opportunities are repository-aware assumptions, not claims about demand, churn, or willingness to pay."
+  },
+  "project": {
+    "stacks": [],
+    "packageManager": null,
+    "commands": []
+  },
+  "opportunityCards": [
+    {
+      "id": "outcome-agent",
+      "title": "Outcome Agent",
+      "status": "hypothesis",
+      "focus": "Find disruptive AI-central SaaS opportunities for Relayne, a native Rust RDP and SSH operations workbench with guarded AI execution, clone rehearsal, signed repair packages, recovery evidence, teaching from demonstrations and a team backend. Turn these capabilities into recurring revenue by reducing expert effort and time to verified incident recovery for IT operations teams and MSPs. Identify differentiated product bets beyond capabilities already implemented; treat buyer demand, pricing and multi-tenant readiness as unvalidated hypotheses.",
+      "aiCentrality": "AI performs the core interpretation, prediction, synthesis, or bounded action; it is not a decorative text feature.",
+      "interactionReplaced": "Replace a repeated multi-step workflow with a bounded agent that prepares an explainable, reversible result.",
+      "disruptiveOutcome": "Users complete the outcome without opening a feature screen.",
+      "successMetrics": [
+        "agent completion",
+        "edit rate",
+        "undo rate"
+      ],
+      "moat": "Product-specific workflow context, feedback, and verified completion outcomes.",
+      "firstExperiment": {
+        "featureFlag": "fm-outcome-agent",
+        "cohort": "internal → opted-in test tenants → measured expansion",
+        "duration": "two weeks or 20 qualified outcome attempts",
+        "guardrails": [
+          "no cross-tenant data access",
+          "human review before consequential action",
+          "undo or compensating action where mutation is possible",
+          "bounded model cost"
+        ],
+        "killCondition": "Stop when agent completion does not improve against the recorded baseline without a guardrail breach."
+      },
+      "score": {
+        "userImpact": 24,
+        "differentiation": 20,
+        "aiLeverage": 18,
+        "evidence": 5,
+        "feasibility": 14,
+        "trustFit": 9,
+        "total": 90
+      },
+      "evidenceBasis": "project-context-assumption"
+    },
+    {
+      "id": "predictive-workflow",
+      "title": "Predictive Workflow",
+      "status": "hypothesis",
+      "focus": "Find disruptive AI-central SaaS opportunities for Relayne, a native Rust RDP and SSH operations workbench with guarded AI execution, clone rehearsal, signed repair packages, recovery evidence, teaching from demonstrations and a team backend. Turn these capabilities into recurring revenue by reducing expert effort and time to verified incident recovery for IT operations teams and MSPs. Identify differentiated product bets beyond capabilities already implemented; treat buyer demand, pricing and multi-tenant readiness as unvalidated hypotheses.",
+      "aiCentrality": "AI performs the core interpretation, prediction, synthesis, or bounded action; it is not a decorative text feature.",
+      "interactionReplaced": "Detect a likely risk, next step, or missing decision before the user searches for it.",
+      "disruptiveOutcome": "The product moves from a passive record system to proactive guidance.",
+      "successMetrics": [
+        "accepted recommendation rate",
+        "prevented delay",
+        "false-positive rate"
+      ],
+      "moat": "Historical workflow patterns linked to a specific customer context.",
+      "firstExperiment": {
+        "featureFlag": "fm-predictive-workflow",
+        "cohort": "internal → opted-in test tenants → measured expansion",
+        "duration": "two weeks or 20 qualified outcome attempts",
+        "guardrails": [
+          "no cross-tenant data access",
+          "human review before consequential action",
+          "undo or compensating action where mutation is possible",
+          "bounded model cost"
+        ],
+        "killCondition": "Stop when accepted recommendation rate does not improve against the recorded baseline without a guardrail breach."
+      },
+      "score": {
+        "userImpact": 23,
+        "differentiation": 19,
+        "aiLeverage": 17,
+        "evidence": 5,
+        "feasibility": 14,
+        "trustFit": 8,
+        "total": 86
+      },
+      "evidenceBasis": "project-context-assumption"
+    },
+    {
+      "id": "company-memory",
+      "title": "Company Memory",
+      "status": "hypothesis",
+      "focus": "Find disruptive AI-central SaaS opportunities for Relayne, a native Rust RDP and SSH operations workbench with guarded AI execution, clone rehearsal, signed repair packages, recovery evidence, teaching from demonstrations and a team backend. Turn these capabilities into recurring revenue by reducing expert effort and time to verified incident recovery for IT operations teams and MSPs. Identify differentiated product bets beyond capabilities already implemented; treat buyer demand, pricing and multi-tenant readiness as unvalidated hypotheses.",
+      "aiCentrality": "AI performs the core interpretation, prediction, synthesis, or bounded action; it is not a decorative text feature.",
+      "interactionReplaced": "Provide a cited, permission-aware account memory of decisions, commitments, risks, and unresolved work.",
+      "disruptiveOutcome": "Teams ask for an answer instead of manually reconstructing history.",
+      "successMetrics": [
+        "time to context",
+        "citation-open rate",
+        "correction rate"
+      ],
+      "moat": "Tenant-scoped decision and outcome history with provenance.",
+      "firstExperiment": {
+        "featureFlag": "fm-company-memory",
+        "cohort": "internal → opted-in test tenants → measured expansion",
+        "duration": "two weeks or 20 qualified outcome attempts",
+        "guardrails": [
+          "no cross-tenant data access",
+          "human review before consequential action",
+          "undo or compensating action where mutation is possible",
+          "bounded model cost"
+        ],
+        "killCondition": "Stop when time to context does not improve against the recorded baseline without a guardrail breach."
+      },
+      "score": {
+        "userImpact": 21,
+        "differentiation": 20,
+        "aiLeverage": 15,
+        "evidence": 5,
+        "feasibility": 13,
+        "trustFit": 9,
+        "total": 83
+      },
+      "evidenceBasis": "project-context-assumption"
+    },
+    {
+      "id": "simulation",
+      "title": "Decision Simulator",
+      "status": "hypothesis",
+      "focus": "Find disruptive AI-central SaaS opportunities for Relayne, a native Rust RDP and SSH operations workbench with guarded AI execution, clone rehearsal, signed repair packages, recovery evidence, teaching from demonstrations and a team backend. Turn these capabilities into recurring revenue by reducing expert effort and time to verified incident recovery for IT operations teams and MSPs. Identify differentiated product bets beyond capabilities already implemented; treat buyer demand, pricing and multi-tenant readiness as unvalidated hypotheses.",
+      "aiCentrality": "AI performs the core interpretation, prediction, synthesis, or bounded action; it is not a decorative text feature.",
+      "interactionReplaced": "Compare reversible product, capacity, pricing, or workflow scenarios with explicit assumptions.",
+      "disruptiveOutcome": "Users decide from trade-offs rather than a single opaque recommendation.",
+      "successMetrics": [
+        "decision time",
+        "scenario adoption",
+        "assumption corrections"
+      ],
+      "moat": "Customer-specific operating data and retained decision outcomes.",
+      "firstExperiment": {
+        "featureFlag": "fm-simulation",
+        "cohort": "internal → opted-in test tenants → measured expansion",
+        "duration": "two weeks or 20 qualified outcome attempts",
+        "guardrails": [
+          "no cross-tenant data access",
+          "human review before consequential action",
+          "undo or compensating action where mutation is possible",
+          "bounded model cost"
+        ],
+        "killCondition": "Stop when decision time does not improve against the recorded baseline without a guardrail breach."
+      },
+      "score": {
+        "userImpact": 20,
+        "differentiation": 19,
+        "aiLeverage": 18,
+        "evidence": 5,
+        "feasibility": 13,
+        "trustFit": 8,
+        "total": 83
+      },
+      "evidenceBasis": "project-context-assumption"
+    },
+    {
+      "id": "multimodal-intake",
+      "title": "Multimodal Intake",
+      "status": "hypothesis",
+      "focus": "Find disruptive AI-central SaaS opportunities for Relayne, a native Rust RDP and SSH operations workbench with guarded AI execution, clone rehearsal, signed repair packages, recovery evidence, teaching from demonstrations and a team backend. Turn these capabilities into recurring revenue by reducing expert effort and time to verified incident recovery for IT operations teams and MSPs. Identify differentiated product bets beyond capabilities already implemented; treat buyer demand, pricing and multi-tenant readiness as unvalidated hypotheses.",
+      "aiCentrality": "AI performs the core interpretation, prediction, synthesis, or bounded action; it is not a decorative text feature.",
+      "interactionReplaced": "Turn an email, screenshot, PDF, or voice note into a reviewed structured work item.",
+      "disruptiveOutcome": "Users provide natural evidence instead of completing a rigid form.",
+      "successMetrics": [
+        "intake completion",
+        "correction rate",
+        "time saved"
+      ],
+      "moat": "Domain schema plus correction feedback from real intake outcomes.",
+      "firstExperiment": {
+        "featureFlag": "fm-multimodal-intake",
+        "cohort": "internal → opted-in test tenants → measured expansion",
+        "duration": "two weeks or 20 qualified outcome attempts",
+        "guardrails": [
+          "no cross-tenant data access",
+          "human review before consequential action",
+          "undo or compensating action where mutation is possible",
+          "bounded model cost"
+        ],
+        "killCondition": "Stop when intake completion does not improve against the recorded baseline without a guardrail breach."
+      },
+      "score": {
+        "userImpact": 22,
+        "differentiation": 18,
+        "aiLeverage": 16,
+        "evidence": 5,
+        "feasibility": 14,
+        "trustFit": 7,
+        "total": 82
+      },
+      "evidenceBasis": "project-context-assumption"
+    },
+    {
+      "id": "autonomous-qa",
+      "title": "Autonomous QA Triage",
+      "status": "hypothesis",
+      "focus": "Find disruptive AI-central SaaS opportunities for Relayne, a native Rust RDP and SSH operations workbench with guarded AI execution, clone rehearsal, signed repair packages, recovery evidence, teaching from demonstrations and a team backend. Turn these capabilities into recurring revenue by reducing expert effort and time to verified incident recovery for IT operations teams and MSPs. Identify differentiated product bets beyond capabilities already implemented; treat buyer demand, pricing and multi-tenant readiness as unvalidated hypotheses.",
+      "aiCentrality": "AI performs the core interpretation, prediction, synthesis, or bounded action; it is not a decorative text feature.",
+      "interactionReplaced": "Collect safe local evidence, group failures, and propose a reproducible, non-destructive next step.",
+      "disruptiveOutcome": "Teams receive evidence-linked defect priorities rather than a raw error queue.",
+      "successMetrics": [
+        "reproduction rate",
+        "triage time",
+        "escaped-defect rate"
+      ],
+      "moat": "Repository, release, and verified test evidence.",
+      "firstExperiment": {
+        "featureFlag": "fm-autonomous-qa",
+        "cohort": "internal → opted-in test tenants → measured expansion",
+        "duration": "two weeks or 20 qualified outcome attempts",
+        "guardrails": [
+          "no cross-tenant data access",
+          "human review before consequential action",
+          "undo or compensating action where mutation is possible",
+          "bounded model cost"
+        ],
+        "killCondition": "Stop when reproduction rate does not improve against the recorded baseline without a guardrail breach."
+      },
+      "score": {
+        "userImpact": 19,
+        "differentiation": 18,
+        "aiLeverage": 17,
+        "evidence": 5,
+        "feasibility": 13,
+        "trustFit": 7,
+        "total": 79
+      },
+      "evidenceBasis": "project-context-assumption"
+    }
+  ],
+  "saasOperatingPlan": {
+    "activationMap": {
+      "ahaMoment": "first independently completed customer outcome",
+      "instrument": [
+        "activation_started",
+        "first_value_completed",
+        "time_to_first_value",
+        "correction_or_undo"
+      ],
+      "decision": "Compare first-value completion and time against the baseline by cohort."
+    },
+    "churnRadar": {
+      "rule": "Rank only explicit, privacy-approved product signals such as declining core-action frequency, unresolved failures, and missing first value.",
+      "output": "risk hypotheses with evidence references; never a claim that an account will churn.",
+      "action": "Prepare a reviewed next-best-action draft, never contact customers automatically."
+    },
+    "pricingLab": {
+      "rule": "Test packaging and value metrics with qualified buyers or opted-in cohorts; do not change billing automatically.",
+      "metrics": [
+        "value-metric comprehension",
+        "conversion intent",
+        "retention intent"
+      ],
+      "guardrail": "No customer-facing price or entitlement change without explicit approval."
+    },
+    "featureToRevenueTrace": {
+      "rule": "Link each experiment to one activation, retention, conversion, or expansion hypothesis and its evidence—not asserted revenue.",
+      "fields": [
+        "feature flag",
+        "target segment",
+        "value metric",
+        "baseline",
+        "result",
+        "decision"
+      ]
+    },
+    "tenantSafetyGate": {
+      "checks": [
+        "tenant-scoped retrieval",
+        "role and permission check",
+        "redacted logs",
+        "export boundary",
+        "audit receipt"
+      ],
+      "rule": "Hold if the tenant boundary, permission path, or audit evidence is missing."
+    },
+    "integrationHealth": {
+      "checks": [
+        "webhook signature and retry policy",
+        "API version compatibility",
+        "OAuth scope minimization",
+        "rate-limit and failure evidence"
+      ],
+      "rule": "Report a gap instead of invoking external integrations without an explicit adapter."
+    },
+    "releaseCohorts": {
+      "stages": [
+        "internal",
+        "opted-in test tenants",
+        "measured expansion"
+      ],
+      "metrics": [
+        "feature outcome",
+        "guardrail result",
+        "support burden",
+        "rollback rate"
+      ],
+      "killSwitch": "Disable the feature flag and preserve the evidence record when a guardrail breaches."
+    }
+  },
+  "recommendedNextStep": {
+    "opportunity": "outcome-agent",
+    "action": "Record a baseline, implement the smallest feature-flagged thin slice, then evaluate the stated cohort and guardrails before expansion."
+  },
+  "artifactPath": ".codex-orchestrator/product/saas-ai-opportunity-engine-latest.json",
+  "errors": []
+}

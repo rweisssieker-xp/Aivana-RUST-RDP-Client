@@ -2,29 +2,51 @@ mod ai;
 mod app;
 mod autopilot;
 mod certificate;
+mod change_history;
 mod computer_use;
 mod connection_options;
 mod diagnostics;
+mod equivalence;
+mod execution;
+mod incident;
 mod integrations;
+mod intelligence;
+#[cfg(test)]
+mod intelligence_tests;
 mod ironrdp_client;
 mod legacy_rdp;
 mod memory;
 mod mission;
 mod models;
+#[cfg(windows)]
+mod native_remoteapp;
 mod operations;
+mod package_trust;
 mod policy;
 mod profile_exchange;
+mod promotion;
 mod rd_gateway;
 mod rdp_audio_input;
 mod rdp_audio_output;
 mod rdp_channels;
 mod rdp_drives;
+mod recommendations;
 mod recording;
+mod recovery;
+mod remoteapp;
 mod runbook;
 mod security;
 mod services;
 mod teaching;
+mod team_client;
+mod team_server;
+mod telemetry;
+mod terminal;
+mod test_lab;
 mod timeline;
+mod transferable;
+mod vision;
+mod workflow;
 mod workspace;
 
 use app::AivanaApp;
@@ -34,7 +56,7 @@ fn install_rustls_crypto_provider() {
 }
 
 fn build_cli_help() -> &'static str {
-    r#"Aivana Rust RDP Client
+    r#"Relayne
 
 Usage:
   cargo run                       Launch the GUI
@@ -610,7 +632,7 @@ fn main() -> eframe::Result<()> {
     };
 
     eframe::run_native(
-        "Aivana Rust RDP Client",
+        "Relayne",
         options,
         Box::new(|cc| Ok(Box::new(AivanaApp::new(cc)))),
     )

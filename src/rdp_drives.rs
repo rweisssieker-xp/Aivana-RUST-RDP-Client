@@ -799,7 +799,7 @@ impl RdpdrBackend for DriveBackend {
                                 0x2 | if s.read_only { 0x80000 } else { 0 },
                             ),
                             max_component_name_len: 255,
-                            file_system_name: "Aivana".into(),
+                            file_system_name: "Relayne".into(),
                         }
                         .into(),
                     ),

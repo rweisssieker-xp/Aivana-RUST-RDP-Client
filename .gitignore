@@ -1,5 +1,6 @@
 # Rust build artifacts
 /target/
+/vendor/ironrdp-mstsgu/target/
 
 # Editor state
 .idea/

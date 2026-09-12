@@ -378,7 +378,7 @@ impl Channels {
                 .with_events(self.events.clone(), self.session);
             let drives = backend.announced_drives();
             connector.attach_static_channel(
-                ironrdp::rdpdr::Rdpdr::new(Box::new(backend), "Aivana".into())
+                ironrdp::rdpdr::Rdpdr::new(Box::new(backend), "Relayne".into())
                     .with_drives(Some(drives)),
             );
         }

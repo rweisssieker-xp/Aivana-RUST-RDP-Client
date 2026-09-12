@@ -268,7 +268,7 @@ fn fetch_login(_command: Command, _cancel: Arc<AtomicBool>) -> Result<SecretCred
 #[cfg(windows)]
 fn fetch_login(mut command: Command, cancel: Arc<AtomicBool>) -> Result<SecretCredential, String> {
     if std::env::var_os("BW_SESSION").is_none_or(|value| value.is_empty()) {
-        return Err("BW_SESSION fehlt. Bitwarden extern entsperren und Aivana mit geerbter Sitzung starten.".into());
+        return Err("BW_SESSION fehlt. Bitwarden extern entsperren und Relayne mit geerbter Sitzung starten.".into());
     }
     let mut child = command.spawn().map_err(|_| {
         "bw.exe konnte nicht gestartet werden. Offizielle Bitwarden CLI im PATH erforderlich."

@@ -48,7 +48,7 @@ impl PolicyEngine {
     #[allow(dead_code)]
     pub fn deny_reason(&self, action: &InputAction) -> Option<String> {
         (self.decision_for(action) == PolicyDecision::Deny)
-            .then(|| "Action is blocked by Aivana safety policy.".to_owned())
+            .then(|| "Action is blocked by Relayne safety policy.".to_owned())
     }
 
     #[allow(dead_code)]

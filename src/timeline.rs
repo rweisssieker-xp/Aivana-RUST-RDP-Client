@@ -148,7 +148,7 @@ impl TimelineStore for InMemoryTimelineStore {
     }
 
     fn export_incident_markdown(&self, session_id: Uuid) -> String {
-        let mut out = format!("# Aivana Incident Report\n\nSession: `{session_id}`\n\n");
+        let mut out = format!("# Relayne Incident Report\n\nSession: `{session_id}`\n\n");
         for event in self.events_for_session(session_id) {
             out.push_str(&format!(
                 "- {} [{:?}] {}\n",

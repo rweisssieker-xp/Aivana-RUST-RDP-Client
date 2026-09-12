@@ -1,5 +1,23 @@
 # Final scoped Mission Control review
 
+## Final verdict after the last scoped fix
+
+The remaining modified-pointer finding is resolved. The guarded PointerButton/Click/DoubleClick/Scroll arm now emits only a placeholder while modifiers are held and clears pending click/double-click state. Modifier transitions also clear pending gesture state. No open important finding remains from this review's scoped fixes; the finding sections below are retained as historical records.
+
+The protocol UI saves the selected RDP/SSH protocol. `connect_selected` routes SSH profiles into the operations panel, copies host/user/port, resets review approval and returns before the RDP probe. VNC reports its missing backend and also returns. SSH execution remains a separately reviewed OpenSSH command using keys/agent, not an interactive SSH terminal or profile-password login. RDP live compatibility, gateway/MFA behavior, native viewport focus, Entra/WinRM authentication and SFTP transfer acceptance remain environment-dependent and were not live-tested here. The root worker reports eight teaching tests passed; this reviewer did not independently execute them or the full suite.
+
+## Latest follow-up review
+
+The subsequent scoped pass confirms the three teaching findings below are fixed: modifier-aware keyboard capture, timestamped manual observations and paired-double-click recognition, and atomic teaching persistence. Mission creation/import now retain persistence failures. Their earlier descriptions below remain as review history, not open findings.
+
+**One remaining P2:** `src/teaching.rs:229-284` records pointer clicks without consulting `held_modifiers`. Ctrl+click or Shift+click therefore still becomes a placeholder followed by an ordinary click, dropping selection/range semantics. Suppress modified pointer gestures into the manual-placeholder path and clear pending click/double-click state, or deliberately support the modifier combination. This is the mouse counterpart of the corrected modified-navigation defect.
+
+The new paused handoff mapping builds and validates all endpoint/protocol/user/domain/route matches before mutation, requires one distinct local profile per target, and then updates outcome, evidence and pilot references together. No mapping correctness blocker was found for structurally valid loaded/imported missions.
+
+The Entra command reads its explicit token from the environment, passes no token in arguments/output, uses a generic catch diagnostic, requests 501 devices to detect an exceeded 500-device limit, and presents Windows DisplayNames as unverified target candidates. These are static checks: installed Graph-module versions, permissions, pagination behavior and live tenant acceptance were not tested or browsed.
+
+SFTP transfer modes preserve endpoint/path validation and build flags from booleans only. Resume (-a) explicitly warns that an existing destination must equal the source prefix because SFTP does not validate that content; recursive (-R), overwrite and partial-file effects remain deliberate reviewed inputs. Local listing is asynchronous and capped at 500 entries; remote listing is historical, timestamped and tied to host/user/port/path. No critical command-construction regression found. A slow local/UNC directory lookup has no cancellation/deadline and can leave that browser's pending slot occupied, although it does not block the UI or start remote work. Actual SFTP/Graph behavior remains live-acceptance work.
+
 Reviewed 2026-09-11. Scope: the six prior mission findings, three recording/integration findings, teaching module and manual-input integration, and detached-session ownership. Static inspection only; no implementation edits, authentication, live remote input, or test execution. References identify the pre-format source reviewed.
 
 ## Remaining findings

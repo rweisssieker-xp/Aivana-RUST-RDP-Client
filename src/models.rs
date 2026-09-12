@@ -2,8 +2,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub enum Protocol {
+    #[default]
     Rdp,
     Ssh,
     Vnc,
@@ -136,6 +137,7 @@ impl Default for PerformanceMetrics {
 
 #[derive(Clone, Debug, Default)]
 pub struct DraftProfile {
+    pub protocol: Protocol,
     pub name: String,
     pub host: String,
     pub port: String,
@@ -262,6 +264,10 @@ pub enum MouseButton {
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub enum EngineEvent {
+    GatewayMessage {
+        session_id: Uuid,
+        message: String,
+    },
     StatusChanged {
         session_id: Uuid,
         status: SessionStatus,
@@ -592,6 +598,7 @@ pub struct CertificateIdentity {
 impl From<&ConnectionProfile> for DraftProfile {
     fn from(profile: &ConnectionProfile) -> Self {
         Self {
+            protocol: profile.protocol.clone(),
             name: profile.name.clone(),
             host: profile.host.clone(),
             port: profile.port.to_string(),

@@ -346,7 +346,7 @@ impl AutopilotProvider for OpenAiComputerUseProvider {
                     {
                         "type": "input_text",
                         "text": format!(
-                            "Goal: {}\nYou are controlling a remote Windows desktop through Aivana RDP. Avoid destructive or security-sensitive actions. Return the next computer action only when it advances the goal.",
+                            "Goal: {}\nYou are controlling a remote Windows desktop through Relayne RDP. Avoid destructive or security-sensitive actions. Return the next computer action only when it advances the goal.",
                             redact_secret_text(request.goal)
                         )
                     },

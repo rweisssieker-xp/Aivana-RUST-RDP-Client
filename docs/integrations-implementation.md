@@ -30,11 +30,12 @@ App hooks: `mod integrations` in main; `mod integrations_panel`, a default
 
 - Requires the official standalone `bw.exe` on PATH and an externally unlocked
   `BW_SESSION` inherited by the app. No automatic login, vault enumeration, shell,
-  session-token command argument or secret display is used. Entra live discovery
-  and KeePassXC integration are explicitly not implemented.
+  session-token command argument or secret display is used. KeePassXC integration
+  is not implemented. Entra discovery is a separate explicit Graph PowerShell job
+  using AIVANA_GRAPH_ACCESS_TOKEN; see docs/mission-control.md for prerequisites.
 - A user selects a target profile, supplies a validated UUID, acknowledges login
   assignment/replacement, and clicks the deliberate fetch-and-store button.
-  Target profile ID is captured before spawning. Cancellation drops the private
+  Target profile ID, endpoint identity and revision are captured before spawning. Cancellation drops the private
   receiver, so later worker results cannot update credentials.
 - A dedicated worker launches `bw get item UUID --nointeraction`, discards stderr,
   bounds stdout to 256 KiB, applies a 45-second timeout and kills the direct child
@@ -46,11 +47,11 @@ App hooks: `mod integrations` in main; `mod integrations_panel`, a default
 - The UI coordinator passes the returned secret directly to the existing
   PersistentCredentialStore (DPAPI on Windows), adopts the vault username and
   preserves the selected profile's domain. No secret goes to generic job outputs,
-  previews, audit logs, credential exports or widgets. A removed target discards
-  the result. Profile persistence failure after credential storage is reported
-  explicitly without updating the in-memory profile; the two stores are not a
-  transaction. Existing CredentialStore internals can retain a changed credential
-  in memory if their own persistence fails; this feature does not modify that API.
+  previews, audit logs, credential exports or widgets. A removed or changed target
+  discards the result. A fresh credential record is created before linking the
+  saved profile; failure leaves the old linked credential intact. The coordinator
+  attempts cleanup of the unlinked new record. Credential saves now atomically
+  replace their file and roll back in-memory changes when persistence fails.
 - Rust String allocations and the existing credential-store serializer are not
   guaranteed to be zeroized. This implementation does not claim locked memory,
   memory-forensics resistance or CLI descendant-process termination.

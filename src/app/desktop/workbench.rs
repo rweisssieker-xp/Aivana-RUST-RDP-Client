@@ -74,7 +74,7 @@ impl AivanaApp {
             }
         }
         let gateway = &mut profile.options.gateway;
-        if gateway.enabled && !gateway.use_profile_credentials {
+        if gateway.enabled && !gateway.paa && !gateway.use_profile_credentials {
             let id = gateway.credential_id.ok_or_else(|| {
                 anyhow::anyhow!("Gateway-Zugangsdaten fehlen. Bitte im Profil speichern.")
             })?;
@@ -184,6 +184,9 @@ impl AivanaApp {
             let gateway = &mut options.gateway;
             ui.checkbox(&mut gateway.enabled, "Über RD Gateway verbinden");
             ui.add_enabled_ui(gateway.enabled, |ui| {
+                ui.checkbox(&mut gateway.ntlm, "NTLM (SSPI_NTLM); deaktiviert: Basic über TLS");
+                ui.checkbox(&mut gateway.paa, "PAA: Anbieter-Cookie bei jeder Verbindung eingeben");
+                ui.small("PAA hat Vorrang vor NTLM/Basic. Nur einen vom Gateway-Anbieter ausgestellten PAA-Cookie verwenden. Allgemeine OAuth-Token und OTP-Codes werden nicht unterstützt. Gateway-Einwilligungen werden zur Bestätigung angezeigt; externe MFA wird bis zu 120 Sekunden abgewartet.");
                 text_field(ui, "Gateway-Rechner", &mut gateway.host);
                 ui.add(
                     egui::DragValue::new(&mut gateway.port)
@@ -206,6 +209,14 @@ impl AivanaApp {
             });
         });
         ui.label(RichText::new("Änderungen werden mit dem Profil gespeichert und beim nächsten Verbindungsaufbau angewendet.").small().color(MUTED));
+        ui.collapsing("RemoteApp · eingebettetes Windows-Control", |ui| {
+            ui.small("Die Sitzung läuft im integrierten Windows-Control; RemoteApps können eigene Programmfenster öffnen. Benutzerdefinierte Arbeitsverzeichnisse sind dabei noch nicht unterstützt.");
+            text_field(ui, "Veröffentlichtes Programm (z. B. ||Calculator)", &mut options.remote_app.program);
+            text_field(ui, "Anzeigename", &mut options.remote_app.name);
+            text_field(ui, "Argumente", &mut options.remote_app.arguments);
+            text_field(ui, "Arbeitsverzeichnis", &mut options.remote_app.working_directory);
+            ui.small("Mit dem Profil speichern. Start unter Verbindungen; Anmeldung im Windows-RDP-Client.");
+        });
     }
 
     pub(super) fn workbench_session_strip(&mut self, ui: &mut Ui) {

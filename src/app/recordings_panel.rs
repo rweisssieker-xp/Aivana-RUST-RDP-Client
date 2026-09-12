@@ -77,7 +77,7 @@ impl AivanaApp {
     }
     pub(super) fn recordings_view(&mut self, ui: &mut Ui) {
         ui.heading("Lokale Aufzeichnungen");
-        ui.label("Verschlüsselte Schlüsselbilder mit Zeitmarken und Suchnotizen. Höchstens ein verändertes Bild pro Sekunde, 600 Bilder / 128 MiB je Aufzeichnung. Kein Video oder Audio.");
+        ui.label("Verschlüsselte Schlüsselbilder mit Zeitmarken und Suchnotizen. Höchstens ein verändertes Bild pro Sekunde, 600 Bilder / 128 MiB je Aufzeichnung. Lokale Windows OCR schwärzt erkannte Geheimnisfelder vor Speicherung und ergänzt den Suchindex. OCR-Fehler stoppen die Aufnahme. Erkennung ist keine Garantie für vollständige Geheimniserkennung; ergänzen Sie manuelle Masken. Kein Video oder Audio.");
         if !self.recordings.refreshed {
             self.refresh_recordings();
         }
@@ -195,7 +195,7 @@ impl AivanaApp {
         ui.horizontal_wrapped(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.recordings.query)
-                    .hint_text("Titel oder Bildnotiz suchen"),
+                    .hint_text("Bildinhalt, Titel oder Notiz suchen"),
             );
             if ui.button("Archiv aktualisieren").clicked() {
                 self.refresh_recordings();
@@ -205,9 +205,9 @@ impl AivanaApp {
         let catalog = self.recordings.catalog.clone();
         for r in &catalog {
             if r.title.to_lowercase().contains(&query)
-                || r.frames
-                    .iter()
-                    .any(|f| f.note.to_lowercase().contains(&query))
+                || r.frames.iter().any(|f| {
+                    f.note.to_lowercase().contains(&query) || f.ocr.to_lowercase().contains(&query)
+                })
             {
                 if ui
                     .selectable_label(
@@ -227,7 +227,14 @@ impl AivanaApp {
                     .clicked()
                 {
                     self.recordings.selected = Some(r.id);
-                    self.recordings.frame = 0;
+                    self.recordings.frame = r
+                        .frames
+                        .iter()
+                        .position(|f| {
+                            f.ocr.to_lowercase().contains(&query)
+                                || f.note.to_lowercase().contains(&query)
+                        })
+                        .unwrap_or(0);
                 }
             }
         }
@@ -264,6 +271,9 @@ impl AivanaApp {
                 }
                 let frame = &r.frames[self.recordings.frame];
                 ui.label(format!("{} · {}", frame.at, frame.note));
+                ui.collapsing("Erkannter Bildinhalt (bereinigt)", |ui| {
+                    ui.label(&frame.ocr);
+                });
                 if let Some(texture) = &self.recordings.texture {
                     ui.add(
                         egui::Image::new(texture)

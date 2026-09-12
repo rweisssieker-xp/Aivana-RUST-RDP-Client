@@ -1,10 +1,26 @@
-# Aivana Rust RDP Client
+# Relayne
+
+Native Windows-Arbeitsumgebung für RDP, SSH, geprüfte Remote-Aufträge und gemeinsames Betriebswissen. Neuer Produktname; bestehende Aivana-Profile und DPAPI-Zugänge bleiben unter ihrem bisherigen Speicherpfad nutzbar.
+
+Neu: Der [Recovery Agent](docs/relayne-recovery-agent.md) verbindet Störungsbeschreibung und geprüften KI-Dienstvorschlag mit Klon-Generalprobe, Produktionsfreigabe und fallbezogenem Ergebnisnachweis. Aufruf über **Recovery Agent**; die Übernahme eines Vorschlags startet keine Verbindung.
+
+Aktueller Ausbau: [signierte Reparaturpakete, automatische Klonvergleiche, erweiterte Wiederherstellung, Icon-Prozeduren, RemoteApp, Gateway-Interaktion und Unternehmensidentitäten](docs/relayne-expanded-usps.md). Die Übersicht beschreibt den ausführbaren Umfang und die weiterhin nötige Infrastrukturabnahme. Die [vorherigen Erweiterungen](docs/relayne-next-usps.md) bleiben als Entwicklungsstand dokumentiert.
+
+Für Windows-Dienstaufträge verbindet [Klon → Produktion](docs/relayne-promotion.md) jetzt die Generalprobe mit der Produktionsvorbereitung: gespeicherte Nachweise binden Dienst, HTTP-Prüfung, VM und Produktionsziele, gelten höchstens eine Stunde und werden vor jeder Änderung erneut geprüft. Produktionsfreigabe und Wiederherstellung verwenden den vorhandenen Ausführungsablauf.
+
+Die sechs erweiterten Arbeitsabläufe sind integriert: [übertragbares Vormachen und geprüfte Gesamtabläufe](docs/relayne-transferable.md), [Ausführung mit echten Testzielen und Funktionsprüfung](docs/relayne-execution.md), [Telemetrie und automatisch gelernte Lösungen](docs/relayne-insights.md) sowie [gemeinsame Live-Bilder, Annotationen und Steuerungsfreigaben](docs/relayne-collaboration.md). [Aktueller Umfang und Abnahme](docs/relayne-six-usps.md).
+
+Start: `cargo run --bin relayne` oder `target/debug/relayne.exe`. Separater Team-Dienst: `cargo run --bin relayne_team -- --help`.
+
+Neu: [KI-Planung und geprüfte Reparaturen](docs/relayne-intelligence.md), [Team-Backend](docs/relayne-team.md), [lokale OCR und semantisches Vormachen](docs/relayne-vision.md), [Monitorfenster](docs/relayne-monitor-windows.md), [SSH, Gateway und RemoteApp](docs/relayne-protocols.md). Den aktuellen Implementierungs- und Abnahmestand dokumentiert [Relayne-Abnahme](docs/relayne-acceptance.md).
 
 Native Rust desktop application for RDP operations, diagnostics, incident evidence, and guarded KI Computer Use.
 
 The app builds as a single Rust desktop binary with `eframe`/`egui`. There is no external Windows RDP launcher, no WebView shell, and no browser runtime.
 
 ## Native workbench
+
+Mission Control adds persistent multi-host tasks with pilot approval, actual WinRM/SSH jobs, searchable evidence and comparisons, demonstration recording with single-step replay, SFTP transfers, AD/Entra inventory, Bitwarden integration, detached session windows and protected keyframe recordings. See [implemented capabilities and remaining limits](docs/mission-control.md). Remote jobs require their documented local tools and server access; no connections start automatically.
 
 The directory-first workspace combines a light computer directory with a focused dark session view, optional side-by-side comparison and contextual recovery. Native input, clipboard/files, dynamic display and multi-monitor layouts, automatic reconnection, PCM audio/microphone, scoped folder redirection, profile exchange and RD Gateway are implemented.
 
@@ -66,7 +82,7 @@ cargo build
 cargo run
 ```
 
-OpenAI Computer Use is optional. Select `OpenAI CUA` in the app and provide `OPENAI_API_KEY` in the process environment to use the hosted Responses API provider; otherwise Aivana stays local-first.
+OpenAI Computer Use is optional. Select `OpenAI CUA` in the app and provide `OPENAI_API_KEY` in the process environment to use the hosted Responses API provider; otherwise Relayne stays local-first.
 
 For the built-in operator command reference, run:
 

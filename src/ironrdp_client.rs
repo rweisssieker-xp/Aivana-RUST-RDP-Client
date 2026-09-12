@@ -32,11 +32,23 @@ enum BaseTransport {
 }
 impl BaseTransport {
     fn connect(profile: &ConnectionProfile) -> Result<Self> {
+        Self::connect_with_messages(profile, None)
+    }
+    fn connect_with_messages(
+        profile: &ConnectionProfile,
+        messages: Option<std::sync::mpsc::SyncSender<String>>,
+    ) -> Result<Self> {
         if profile.options.gateway.enabled {
-            let (mut stream, _) = crate::rd_gateway::GatewayStream::connect(
+            // Only runtime sessions supply the service-message channel. Probes remain headless.
+            let interactions = messages
+                .as_ref()
+                .and_then(|_| crate::rd_gateway::interaction_sender());
+            let (mut stream, _) = crate::rd_gateway::GatewayStream::connect_interactive(
                 profile,
                 &profile.options.gateway,
                 &profile.options.gateway.password,
+                messages,
+                interactions,
             )?;
             stream.set_write_timeout(Some(Duration::from_secs(5)))?;
             Ok(Self::Gateway(stream))
@@ -460,6 +472,7 @@ pub fn rdp_smoke_test(profile: ConnectionProfile, timeout_secs: u64) -> Result<R
 
     while Instant::now() < deadline {
         match receiver.recv_timeout(Duration::from_millis(500)) {
+            Ok(EngineEvent::GatewayMessage { .. }) => {}
             Ok(EngineEvent::StatusChanged { status, .. }) => {
                 saw_connected |= status == crate::models::SessionStatus::Connected;
             }
@@ -576,6 +589,27 @@ pub fn save_rdp_smoke_failure_report(
 }
 
 fn run_session_inner(runtime: IronRdpRuntime) -> Result<()> {
+    let gateway_messages = if runtime.profile.options.gateway.enabled {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<String>(8);
+        let events = runtime.events.clone();
+        let session_id = runtime.session_id;
+        std::thread::spawn(move || {
+            while let Ok(message) = rx.recv() {
+                if events
+                    .send(EngineEvent::GatewayMessage {
+                        session_id,
+                        message,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        Some(tx)
+    } else {
+        None
+    };
     let mut channels = crate::rdp_channels::Channels::new(
         &runtime.profile,
         runtime.events.clone(),
@@ -594,12 +628,19 @@ fn run_session_inner(runtime: IronRdpRuntime) -> Result<()> {
             .context("legacy Standard RDP Security connect")?
     } else {
         let config = build_config(&runtime.profile);
-        connect(config, &runtime.profile, Some(&mut channels)).or_else(|err| {
+        connect(
+            config,
+            &runtime.profile,
+            Some(&mut channels),
+            gateway_messages.clone(),
+        )
+        .or_else(|err| {
             if should_try_tls_fallback(&err) {
                 connect(
                     build_tls_config(&runtime.profile),
                     &runtime.profile,
                     Some(&mut channels),
+                    gateway_messages.clone(),
                 )
                 .context("legacy TLS graphical-login fallback")
             } else {
@@ -654,7 +695,7 @@ fn run_session_inner(runtime: IronRdpRuntime) -> Result<()> {
                 .events
                 .send(EngineEvent::Disconnected {
                     session_id: runtime.session_id,
-                    reason: "Input channel closed by Aivana".to_owned(),
+                    reason: "Input channel closed by Relayne".to_owned(),
                 })
                 .ok();
             break;
@@ -850,9 +891,10 @@ fn connect(
     config: connector::Config,
     profile: &ConnectionProfile,
     channels: Option<&mut crate::rdp_channels::Channels>,
+    gateway_messages: Option<std::sync::mpsc::SyncSender<String>>,
 ) -> Result<(ConnectionResult, UpgradedFramed)> {
     let server_name = profile.host.clone();
-    let mut tcp_stream = BaseTransport::connect(profile)?;
+    let mut tcp_stream = BaseTransport::connect_with_messages(profile, gateway_messages)?;
     tcp_stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .context("set read timeout")?;
@@ -1584,6 +1626,7 @@ AIVANA_RDP_TEST_PORT=3390
 
         while std::time::Instant::now() < deadline {
             match receiver.recv_timeout(std::time::Duration::from_millis(500)) {
+                Ok(EngineEvent::GatewayMessage { .. }) => {}
                 Ok(EngineEvent::StatusChanged { status, .. }) => {
                     println!("session status: {}", status.label());
                     saw_connected |= status == crate::models::SessionStatus::Connected;

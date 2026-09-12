@@ -1,6 +1,30 @@
 //! Optional native renderer capture for repeatable visual verification.
 use super::*;
 
+pub(super) fn initial_view() -> View {
+    let args: Vec<String> = std::env::args().collect();
+    if !args.iter().any(|a| a == "--gui-capture") {
+        return View::Missions;
+    }
+    match args
+        .windows(2)
+        .find(|w| w[0] == "--gui-capture-view")
+        .map(|w| w[1].as_str())
+    {
+        Some("execution") => View::Execution,
+        Some("promotion") => View::Promotion,
+        Some("recovery") => View::Recovery,
+        Some("changes") => View::ChangeHistory,
+        Some("lab") => View::TestLab,
+        Some("workflow") => View::Workflow,
+        Some("incident") => View::Incident,
+        Some("insights") => View::Insights,
+        Some("teaching") => View::Teaching,
+        Some("team") => View::Team,
+        _ => View::Missions,
+    }
+}
+
 #[derive(Default)]
 pub(super) struct GuiCapture {
     path: Option<std::path::PathBuf>,

@@ -572,7 +572,7 @@ impl NativeRdpEngine {
                     self.schedule_retry(session);
                 }
             }
-            EngineEvent::Diagnostic { .. } => {}
+            EngineEvent::Diagnostic { .. } | EngineEvent::GatewayMessage { .. } => {}
             EngineEvent::Disconnected { reason, .. } => {
                 crate::rdp_audio_input::stop_session(session.id);
                 session.status = SessionStatus::Disconnected;

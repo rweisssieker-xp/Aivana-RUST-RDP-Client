@@ -14,4 +14,4 @@ Unit coverage: target session isolation, action count bound, plaintext and clipb
 
 Modifier-held navigation is retained as one opaque placeholder, never simplified into a different plain navigation action. Matching consecutive pointer-button pairs within 350 ms coalesce into a double-click; differing or late pairs remain separate steps. Saving atomically replaces the previous encrypted procedure.
 
-Validation: `cargo test teaching::tests --no-default-features` passed all seven tests on Windows, including Shift+Tab and paired double-click regression coverage. No live remote actions were executed during development.
+Validation: eight teaching tests pass on Windows, including Shift+Tab, modifier-click/scroll and timestamped paired double-click regression coverage. No live remote actions were executed during development. Modifier-held pointer actions stay opaque and clear pending click pairs.

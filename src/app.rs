@@ -43,14 +43,30 @@ const ACTIVE_GOAL_OBJECTIVE: &str =
     "bau das weiter aus max. usp max gui friendly max ai ki llm usage";
 
 mod capture;
+mod change_history_panel;
+mod collaboration_capture;
+mod collaboration_panel;
 mod connection_probe;
 mod desktop;
+mod execution_panel;
+mod incident_panel;
+mod insights_panel;
 mod integrations_panel;
+mod intelligence_panel;
 mod mission_panel;
 mod operations_panel;
+mod promotion_panel;
+mod protocol_panel;
 mod recordings_panel;
+mod recovery_panel;
 mod session_windows;
 mod teaching_panel;
+mod team_panel;
+mod terminal_panel;
+mod test_lab_panel;
+mod vision_panel;
+mod workflow_ocr;
+mod workflow_panel;
 
 mod tw {
     use eframe::egui::Color32;
@@ -82,6 +98,18 @@ enum View {
     Integrations,
     Recordings,
     Teaching,
+    Team,
+    Terminal,
+    Vision,
+    Intelligence,
+    Insights,
+    Execution,
+    ChangeHistory,
+    TestLab,
+    Workflow,
+    Incident,
+    Promotion,
+    Recovery,
     Connections,
     Sessions,
     Approvals,
@@ -125,6 +153,7 @@ pub struct KiPreferencesSaveReport {
 }
 
 pub struct AivanaApp {
+    protocols: protocol_panel::ProtocolState,
     profiles: Vec<ConnectionProfile>,
     sessions: Vec<RemoteSession>,
     session_sources: HashMap<Uuid, crate::mission::Target>,
@@ -164,10 +193,25 @@ pub struct AivanaApp {
     integrations: integrations_panel::IntegrationsState,
     recordings: recordings_panel::RecordingsState,
     teaching: teaching_panel::TeachingState,
+    team: team_panel::TeamState,
+    terminal: Option<crate::terminal::Terminal>,
+    vision: vision_panel::VisionState,
+    intelligence: intelligence_panel::IntelligenceState,
+    insights: insights_panel::InsightsState,
+    execution: execution_panel::ExecutionState,
+    change_history: change_history_panel::ChangeHistoryState,
+    test_lab: test_lab_panel::TestLabState,
+    workflow: workflow_panel::WorkflowState,
+    incident: incident_panel::IncidentState,
+    promotion: promotion_panel::PromotionState,
+    recovery: recovery_panel::RecoveryState,
+    workflow_ocr: workflow_ocr::WorkflowOcrState,
+    collaboration_capture: collaboration_capture::CaptureState,
 }
 
 impl AivanaApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        crate::rd_gateway::register_interaction_ui();
         Self::from_context(&cc.egui_ctx)
     }
 
@@ -219,12 +263,13 @@ impl AivanaApp {
         }
 
         Self {
+            protocols: protocol_panel::ProtocolState::default(),
             profiles,
             sessions: Vec::new(),
             session_sources: HashMap::new(),
             selected_profile,
             selected_session: None,
-            view: View::Missions,
+            view: capture::initial_view(),
             search: String::new(),
             draft: initial_draft,
             editing_profile: selected_profile,
@@ -258,6 +303,20 @@ impl AivanaApp {
             integrations: integrations_panel::IntegrationsState::default(),
             recordings: recordings_panel::RecordingsState::default(),
             teaching: teaching_panel::TeachingState::default(),
+            team: team_panel::TeamState::default(),
+            terminal: None,
+            vision: vision_panel::VisionState::default(),
+            intelligence: intelligence_panel::IntelligenceState::default(),
+            insights: insights_panel::InsightsState::default(),
+            execution: execution_panel::ExecutionState::default(),
+            change_history: change_history_panel::ChangeHistoryState::default(),
+            test_lab: test_lab_panel::TestLabState::default(),
+            workflow: workflow_panel::WorkflowState::default(),
+            incident: incident_panel::IncidentState::default(),
+            promotion: promotion_panel::PromotionState::default(),
+            recovery: recovery_panel::RecoveryState::default(),
+            workflow_ocr: workflow_ocr::WorkflowOcrState::default(),
+            collaboration_capture: collaboration_capture::CaptureState::default(),
         }
     }
 
@@ -411,6 +470,7 @@ impl AivanaApp {
                 )
             });
         profile.options = self.draft.options.clone();
+        profile.protocol = self.draft.protocol.clone();
         profile.name = self.draft.name.trim().to_owned();
         profile.host = self.draft.host.trim().to_owned();
         profile.port = port;
@@ -450,6 +510,31 @@ impl AivanaApp {
     }
 
     fn connect_selected(&mut self) {
+        if let Some(profile) = self.selected_profile().cloned() {
+            if profile.protocol == Protocol::Ssh {
+                let result = crate::operations::Endpoint::new(
+                    &profile.host,
+                    &profile.username,
+                    profile.port,
+                )
+                .and_then(|endpoint| {
+                    crate::terminal::Terminal::connect(&endpoint).map_err(|e| e.to_string())
+                });
+                match result {
+                    Ok(terminal) => {
+                        self.terminal = Some(terminal);
+                        self.view = View::Terminal;
+                        self.status = format!("SSH-Terminal: {}", profile.name);
+                    }
+                    Err(error) => self.status = error,
+                }
+                return;
+            }
+            if profile.protocol == Protocol::Vnc {
+                self.status="VNC-Profile können verwaltet werden; ein VNC-Verbindungsbackend ist nicht implementiert.".into();
+                return;
+            }
+        }
         self.begin_certificate_probe(connection_probe::ProbeIntent::Connect);
     }
 
@@ -477,13 +562,13 @@ impl AivanaApp {
                     detail: err.to_string(),
                     fix: "RDP-Server muss TLS/NLA anbieten oder ein unterstuetzter Backendpfad muss ergaenzt werden.".to_owned(),
                 }];
-                self.ai_diagnosis = "RDP ist erreichbar, aber der TLS-/Certificate-Probe ist fehlgeschlagen. Aivana blockiert den Connect, damit kein unsicherer Fallback als Trust-Entscheidung gespeichert wird.".to_owned();
+                self.ai_diagnosis = "RDP ist erreichbar, aber der TLS-/Certificate-Probe ist fehlgeschlagen. Relayne blockiert den Connect, damit kein unsicherer Fallback als Trust-Entscheidung gespeichert wird.".to_owned();
                 return;
             }
         };
         if legacy_standard_rdp {
             self.certificate_notice = format!(
-                "{}:{} nutzt Standard RDP Security ohne TLS-Zertifikat. Aivana versucht den nativen Legacy-Backendpfad.",
+                "{}:{} nutzt Standard RDP Security ohne TLS-Zertifikat. Relayne versucht den nativen Legacy-Backendpfad.",
                 profile.host, profile.port
             );
         } else {
@@ -523,7 +608,7 @@ impl AivanaApp {
                 self.memory.record_known_issue(
                     &profile.host,
                     profile.workspace_id,
-                    "Session started; host evidence available in Aivana timeline.",
+                    "Session started; host evidence available in Relayne timeline.",
                 );
                 self.selected_session = Some(session.id);
                 self.sessions.push(session);
@@ -560,7 +645,7 @@ impl AivanaApp {
             fix: "Auf dem Server TLS/NLA fuer RDP aktivieren oder einen zusaetzlichen Standard-RDP-Security-Backendpfad implementieren.".to_owned(),
         }];
         self.ai_diagnosis = format!(
-            "Root Cause: {} ist per Netzwerk erreichbar, bietet aber nur altes Standard RDP Security an. Aivana nutzt kein mstsc und das aktuelle native IronRDP-Backend kann diesen Modus nicht oeffnen. Fix: TLS/NLA auf dem Host aktivieren oder Backend erweitern.",
+            "Root Cause: {} ist per Netzwerk erreichbar, bietet aber nur altes Standard RDP Security an. Relayne nutzt kein mstsc und das aktuelle native IronRDP-Backend kann diesen Modus nicht oeffnen. Fix: TLS/NLA auf dem Host aktivieren oder Backend erweitern.",
             profile.host
         );
     }
@@ -754,7 +839,7 @@ impl AivanaApp {
             );
             approval.actions = actions.clone();
             approval.expected_result =
-                "Aivana executes the approved batch in order and verifies the next framebuffer."
+                "Relayne executes the approved batch in order and verifies the next framebuffer."
                     .to_owned();
             self.approvals.push(approval);
             self.autopilot.status = AutopilotStatus::WaitingForApproval;
@@ -1000,6 +1085,10 @@ impl AivanaApp {
 }
 
 impl eframe::App for AivanaApp {
+    fn on_exit(&mut self) {
+        // Tear down apartment-bound child controls while the native UI still exists.
+        self.protocols = protocol_panel::ProtocolState::default();
+    }
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.gui_capture.tick(&ctx);
@@ -1011,6 +1100,10 @@ impl eframe::App for AivanaApp {
         for session in &mut self.sessions {
             self.engine.tick(session);
             for event in self.engine.poll_events(session.id) {
+                if let EngineEvent::GatewayMessage { message, .. } = &event {
+                    self.status = format!("Gateway · {}: {}", session.title, message);
+                    continue;
+                }
                 let (kind, message) = timeline_message(&event);
                 self.timeline
                     .append_event(session.id, None, kind, message.clone());
@@ -1063,21 +1156,28 @@ impl eframe::App for AivanaApp {
         if !ui.input(|i| i.focused || i.raw.viewports.values().any(|v| v.focused == Some(true))) {
             self.teaching.teacher.stop();
             self.teaching.cancel_approval();
+            self.teaching
+                .cancel_run("Fensterfokus verloren; Gesamtablauf angehalten");
         }
         self.poll_teaching();
-        for (session, action, at) in self.engine.take_manual_inputs() {
-            let size = self
-                .latest_frames
-                .get(&session)
-                .map(|f| (f.width, f.height));
-            self.teaching.observe_at(session, &action, size, at);
-        }
+        self.poll_team();
+        self.poll_vision();
+        self.poll_intelligence();
+        self.poll_insights();
+        self.poll_execution();
+        self.poll_change_history();
+        self.poll_test_lab();
+        self.poll_workflow(&ctx);
+        self.poll_workflow_ocr();
+        self.poll_promotion();
+        let _ = self.engine.take_manual_inputs();
         self.engine
             .set_manual_capture(self.teaching.teacher.is_recording());
         self.process_autopilot();
 
         self.desktop_shell(ui);
         self.detached_sessions(&ctx);
+        self.protocol_windows(&ctx, _frame);
         self.engine
             .release_inputs_except(self.remote_input_owner(ui));
 
@@ -1237,6 +1337,21 @@ impl AivanaApp {
             );
             ui.add_space(8.0);
             let draft = &mut self.draft;
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Protokoll");
+                let previous = draft.protocol.clone();
+                ui.selectable_value(&mut draft.protocol, Protocol::Rdp, "RDP");
+                ui.selectable_value(&mut draft.protocol, Protocol::Ssh, "SSH / SFTP");
+                if previous != draft.protocol {
+                    draft.port = draft.protocol.default_port().to_string();
+                    if draft.protocol == Protocol::Ssh {
+                        draft.options.gateway.enabled = false;
+                    }
+                }
+            });
+            if draft.protocol == Protocol::Ssh {
+                ui.label("SSH/SFTP verwendet OpenSSH-Schlüssel oder Agent. Das gespeicherte Profilpasswort wird dabei nicht an OpenSSH übergeben.");
+            }
             ui.columns(2, |columns| {
                 text_field(&mut columns[0], "Name", &mut draft.name);
                 text_field(&mut columns[1], "Rechneradresse", &mut draft.host);
@@ -1249,13 +1364,27 @@ impl AivanaApp {
                 text_field(&mut columns[0], "Domäne", &mut draft.domain);
                 text_field(&mut columns[1], "Gruppe", &mut draft.group);
             });
-            password_field(ui, "Passwort", &mut draft.password);
+            if draft.protocol == Protocol::Rdp {
+                password_field(ui, "Passwort", &mut draft.password);
+            }
             text_field(ui, "Schlagwörter", &mut draft.tags);
             ui.checkbox(&mut draft.favorite, "Favorit");
-            self.workbench_profile_options(ui);
+            if self.draft.protocol == Protocol::Rdp {
+                self.workbench_profile_options(ui);
+            }
             ui.add_space(12.0);
             if action_button(ui, "Profil speichern", 132.0, ActionTone::Primary).clicked() {
                 self.save_draft();
+            }
+            if let Some(profile) = self.selected_profile().cloned().filter(|p| {
+                p.protocol == Protocol::Rdp && !p.options.remote_app.program.trim().is_empty()
+            }) {
+                if ui
+                    .button("RemoteApp mit eingebettetem Windows-Control öffnen")
+                    .clicked()
+                {
+                    self.protocols.launch = Some(profile);
+                }
             }
         });
     }
@@ -2604,6 +2733,15 @@ impl AivanaApp {
     }
 
     fn remote_canvas(&mut self, ui: &mut Ui, session_id: Uuid) {
+        self.remote_canvas_region(ui, session_id, None);
+    }
+
+    fn remote_canvas_region(
+        &mut self,
+        ui: &mut Ui,
+        session_id: Uuid,
+        region: Option<RemoteFrameSource>,
+    ) {
         let width = ui.available_width().max(1.0);
         let height = ui.available_height().max(1.0);
         let desired_size = Vec2::new(width, height);
@@ -2640,14 +2778,16 @@ impl AivanaApp {
             self.textures.get(&session_id),
             self.latest_frames.get(&session_id),
         ) {
-            let source = remote_frame_source(frame);
+            let source = region.unwrap_or_else(|| remote_frame_source(frame));
             let image_rect =
                 remote_image_rect(rect.shrink(2.0), source.size(), self.remote_view_mode);
-            let _ = self.engine.resize(
-                session_id,
-                rect.shrink(2.0).width().round().clamp(320.0, 3840.0) as u16,
-                rect.shrink(2.0).height().round().clamp(200.0, 2160.0) as u16,
-            );
+            if region.is_none() {
+                let _ = self.engine.resize(
+                    session_id,
+                    rect.shrink(2.0).width().round().clamp(320.0, 3840.0) as u16,
+                    rect.shrink(2.0).height().round().clamp(200.0, 2160.0) as u16,
+                );
+            }
             painter.image(
                 texture.id(),
                 image_rect,
@@ -2674,7 +2814,7 @@ impl AivanaApp {
                 self.engine.set_clipboard_focus(Some(session_id));
             }
             let held_pointer = self.engine.pointer_is_held(session_id);
-            if !focused && !held_pointer {
+            if !focused && !held_pointer && ui.input(|i| i.focused) {
                 self.engine.release_inputs(session_id);
             }
             let raw_keys = events
@@ -2703,7 +2843,10 @@ impl AivanaApp {
                                 _ => continue,
                             };
                             let (x, y) = viewport_to_remote(pos, image_rect, source, frame);
-                            let _ = self.engine.send_manual_input(
+                            let _ = teaching_panel::send_teaching_manual_input(
+                                &mut self.engine,
+                                &mut self.teaching,
+                                frame,
                                 session_id,
                                 InputAction::PointerButton {
                                     x,
@@ -2721,9 +2864,13 @@ impl AivanaApp {
                                 || self.engine.pointer_is_held(session_id)) =>
                     {
                         let (x, y) = viewport_to_remote(pos, image_rect, source, frame);
-                        let _ = self
-                            .engine
-                            .send_manual_input(session_id, InputAction::MovePointer { x, y });
+                        let _ = teaching_panel::send_teaching_manual_input(
+                            &mut self.engine,
+                            &mut self.teaching,
+                            frame,
+                            session_id,
+                            InputAction::MovePointer { x, y },
+                        );
                     }
                     egui::Event::Key {
                         key,
@@ -2734,7 +2881,10 @@ impl AivanaApp {
                     } if focused => {
                         for (scan_code, down) in remote_modifier_keys(modifiers) {
                             if self.engine.key_is_held(session_id, scan_code) != down {
-                                let _ = self.engine.send_manual_input(
+                                let _ = teaching_panel::send_teaching_manual_input(
+                                    &mut self.engine,
+                                    &mut self.teaching,
+                                    frame,
                                     session_id,
                                     InputAction::Key {
                                         scan_code,
@@ -2744,7 +2894,10 @@ impl AivanaApp {
                             }
                         }
                         if let Some(scan_code) = remote_scan_code(physical_key.unwrap_or(key)) {
-                            let _ = self.engine.send_manual_input(
+                            let _ = teaching_panel::send_teaching_manual_input(
+                                &mut self.engine,
+                                &mut self.teaching,
+                                frame,
                                 session_id,
                                 InputAction::Key { scan_code, pressed },
                             );
@@ -2756,7 +2909,10 @@ impl AivanaApp {
                             remote_modifier_keys(ui.input(|input| input.modifiers))
                         {
                             if self.engine.key_is_held(session_id, scan_code) != pressed {
-                                let _ = self.engine.send_manual_input(
+                                let _ = teaching_panel::send_teaching_manual_input(
+                                    &mut self.engine,
+                                    &mut self.teaching,
+                                    frame,
                                     session_id,
                                     InputAction::Key { scan_code, pressed },
                                 );
@@ -2767,7 +2923,10 @@ impl AivanaApp {
                             egui::Event::Cut => 0x2d,
                             _ => 0x2f,
                         };
-                        let _ = self.engine.send_manual_input(
+                        let _ = teaching_panel::send_teaching_manual_input(
+                            &mut self.engine,
+                            &mut self.teaching,
+                            frame,
                             session_id,
                             InputAction::Key {
                                 scan_code,
@@ -2776,14 +2935,22 @@ impl AivanaApp {
                         );
                     }
                     egui::Event::Text(text) if focused && !raw_keys => {
-                        let _ = self
-                            .engine
-                            .send_manual_input(session_id, InputAction::TypeText { text });
+                        let _ = teaching_panel::send_teaching_manual_input(
+                            &mut self.engine,
+                            &mut self.teaching,
+                            frame,
+                            session_id,
+                            InputAction::TypeText { text },
+                        );
                     }
                     egui::Event::Ime(egui::ImeEvent::Commit(text)) if focused => {
-                        let _ = self
-                            .engine
-                            .send_manual_input(session_id, InputAction::TypeText { text });
+                        let _ = teaching_panel::send_teaching_manual_input(
+                            &mut self.engine,
+                            &mut self.teaching,
+                            frame,
+                            session_id,
+                            InputAction::TypeText { text },
+                        );
                     }
                     egui::Event::MouseWheel { unit, delta, .. }
                         if focused && response.hovered() =>
@@ -2797,14 +2964,17 @@ impl AivanaApp {
                             let (x, y) = viewport_to_remote(pos, image_rect, source, frame);
                             let delta = (delta.y * scale).round().clamp(-255.0, 255.0) as i16;
                             if delta != 0 {
-                                let _ = self.engine.send_manual_input(
+                                let _ = teaching_panel::send_teaching_manual_input(
+                                    &mut self.engine,
+                                    &mut self.teaching,
+                                    frame,
                                     session_id,
                                     InputAction::Scroll { x, y, delta },
                                 );
                             }
                         }
                     }
-                    egui::Event::WindowFocused(false) | egui::Event::PointerGone => {
+                    egui::Event::PointerGone if ui.input(|i| i.focused) => {
                         self.engine.release_inputs(session_id)
                     }
                     _ => {}
@@ -2814,16 +2984,24 @@ impl AivanaApp {
                 for (scan_code, pressed) in remote_modifier_keys(ui.input(|input| input.modifiers))
                 {
                     if self.engine.key_is_held(session_id, scan_code) != pressed {
-                        let _ = self
-                            .engine
-                            .send_manual_input(session_id, InputAction::Key { scan_code, pressed });
+                        let _ = teaching_panel::send_teaching_manual_input(
+                            &mut self.engine,
+                            &mut self.teaching,
+                            frame,
+                            session_id,
+                            InputAction::Key { scan_code, pressed },
+                        );
                     }
                 }
                 for (scan_code, pressed) in native_extra_keys() {
                     if self.engine.key_is_held(session_id, scan_code) != pressed {
-                        let _ = self
-                            .engine
-                            .send_manual_input(session_id, InputAction::Key { scan_code, pressed });
+                        let _ = teaching_panel::send_teaching_manual_input(
+                            &mut self.engine,
+                            &mut self.teaching,
+                            frame,
+                            session_id,
+                            InputAction::Key { scan_code, pressed },
+                        );
                     }
                 }
             }
@@ -3135,13 +3313,19 @@ fn viewport_to_remote(
         f32::from(source.left) + (pos.x - image_rect.left()) / image_rect.width() * source.size().x;
     let y =
         f32::from(source.top) + (pos.y - image_rect.top()) / image_rect.height() * source.size().y;
-    let x = x.clamp(0.0, f32::from(frame.width.saturating_sub(1))) as u16;
-    let y = y.clamp(0.0, f32::from(frame.height.saturating_sub(1))) as u16;
+    let max_x = source.right.min(frame.width).saturating_sub(1);
+    let max_y = source.bottom.min(frame.height).saturating_sub(1);
+    let x = x.clamp(f32::from(source.left.min(max_x)), f32::from(max_x)) as u16;
+    let y = y.clamp(f32::from(source.top.min(max_y)), f32::from(max_y)) as u16;
     (x, y)
 }
 
 fn timeline_message(event: &EngineEvent) -> (SessionEventKind, String) {
     match event {
+        EngineEvent::GatewayMessage { .. } => (
+            SessionEventKind::Diagnostic,
+            "Gateway-Hinweis (nicht protokolliert)".into(),
+        ),
         EngineEvent::StatusChanged { status, .. } => (
             SessionEventKind::ConnectionStage,
             format!("Session status changed to {}", status.label()),
@@ -3268,7 +3452,7 @@ struct KiVerificationReport {
 impl KiVerificationReport {
     fn to_markdown(&self) -> String {
         format!(
-            "# Aivana KI Verification\n\n- OpenAI key: {}\n- RDP smoke env: {}\n- Preferences: {}\n- Active sessions: {}\n\n{}\n\nNext: {}\n",
+            "# Relayne KI Verification\n\n- OpenAI key: {}\n- RDP smoke env: {}\n- Preferences: {}\n- Active sessions: {}\n\n{}\n\nNext: {}\n",
             if self.openai_key_set {
                 "ready"
             } else {
@@ -3580,7 +3764,7 @@ fn save_ki_evidence_bundle_report_to_dir(
 ) -> anyhow::Result<std::path::PathBuf> {
     std::fs::create_dir_all(dir)?;
     let markdown = format!(
-        "# Aivana KI Evidence Bundle\n\n- Bundle: `{}`\n- Created: {}\n- Provider: {}\n- Model: {}\n- Goal: {}\n- Readiness score: {}%\n- Missing requirements: {}\n\n## RDP Preflight Evidence\n{}\n\n## RDP Smoke Evidence\n{}\n\n## Live Gate Evidence\n{}\n\n## AI Brief Pack\n{}\n\n## Next Step\n{}\n",
+        "# Relayne KI Evidence Bundle\n\n- Bundle: `{}`\n- Created: {}\n- Provider: {}\n- Model: {}\n- Goal: {}\n- Readiness score: {}%\n- Missing requirements: {}\n\n## RDP Preflight Evidence\n{}\n\n## RDP Smoke Evidence\n{}\n\n## Live Gate Evidence\n{}\n\n## AI Brief Pack\n{}\n\n## Next Step\n{}\n",
         report.bundle_id,
         report.created_at,
         redact_secret_text(&report.provider),
@@ -3646,7 +3830,7 @@ pub struct CompletionAuditReport {
 impl CompletionAuditReport {
     fn to_markdown(&self) -> String {
         let mut out = String::new();
-        let _ = writeln!(out, "# Aivana KI Goal Audit");
+        let _ = writeln!(out, "# Relayne KI Goal Audit");
         let _ = writeln!(out);
         let _ = writeln!(out, "- Audit: `{}`", self.audit_id);
         let _ = writeln!(out, "- Created: {}", self.generated_at);
@@ -4257,7 +4441,7 @@ pub fn build_next_live_gate_summary(report: &CompletionAuditReport) -> String {
         .filter(|item| item.blocking)
         .collect::<Vec<_>>();
     let mut out = String::new();
-    let _ = writeln!(out, "# Aivana Next Live Gate");
+    let _ = writeln!(out, "# Relayne Next Live Gate");
     let _ = writeln!(out);
     let _ = writeln!(
         out,
@@ -4345,7 +4529,7 @@ pub fn build_live_gate_operator_brief(
     doctor: &LiveGateDoctorReport,
 ) -> String {
     let mut out = String::new();
-    let _ = writeln!(out, "# Aivana Live Gate Operator Brief");
+    let _ = writeln!(out, "# Relayne Live Gate Operator Brief");
     let _ = writeln!(out);
     let _ = writeln!(out, "- Objective: {}", redact_secret_text(&audit.objective));
     let _ = writeln!(out, "- Achieved: {}", doctor.achieved);
@@ -4451,7 +4635,7 @@ pub fn build_rdp_proof_prompt(
         .filter(|items| !items.is_empty())
         .unwrap_or_else(|| "none".to_owned());
     let mut out = String::new();
-    let _ = writeln!(out, "# Aivana RDP Proof Prompt");
+    let _ = writeln!(out, "# Relayne RDP Proof Prompt");
     let _ = writeln!(out);
     let _ = writeln!(
         out,
@@ -4579,7 +4763,7 @@ pub fn build_rdp_proof_recovery_plan(
         .unwrap_or_default();
 
     let mut out = String::new();
-    let _ = writeln!(out, "# Aivana RDP Proof Recovery Plan");
+    let _ = writeln!(out, "# Relayne RDP Proof Recovery Plan");
     let _ = writeln!(out);
     let _ = writeln!(out, "## Current Status");
     let _ = writeln!(out, "- Objective: {}", redact_secret_text(&audit.objective));
@@ -4934,7 +5118,7 @@ pub fn build_rdp_env_fill_guide() -> String {
         doctor.next_command.as_str()
     };
     let mut out = String::new();
-    let _ = writeln!(out, "# Aivana RDP Env Fill Guide");
+    let _ = writeln!(out, "# Relayne RDP Env Fill Guide");
     let _ = writeln!(out);
     let _ = writeln!(
         out,
@@ -5036,7 +5220,7 @@ pub fn save_rdp_env_fill_guide() -> anyhow::Result<std::path::PathBuf> {
 
 pub fn build_rdp_live_gate_env_template() -> String {
     redact_secret_text(
-        "# Aivana live RDP verification environment\n\
+        "# Relayne live RDP verification environment\n\
 AIVANA_RDP_TEST_HOST=<host>\n\
 AIVANA_RDP_TEST_USER=<user>\n\
 AIVANA_RDP_TEST_PASSWORD=<password>\n\
@@ -5064,7 +5248,7 @@ pub fn save_rdp_live_gate_env_template_to(path: &Path) -> anyhow::Result<std::pa
 
 pub fn build_command_index() -> serde_json::Value {
     serde_json::json!({
-        "app": "Aivana Rust RDP Client",
+        "app": "Relayne",
         "schema": "aivana.command-index.v1",
         "live_gate_requirement": "Completion stays false until rdp-proof-check confirms env-file validation, fresh matching preflight/smoke host-port evidence, connected=true, framebuffer, and input probe.",
         "goal_evidence_matrix": "Use --goal-evidence-matrix for a machine-readable requirement-to-artifact checklist before claiming completion.",
@@ -6147,11 +6331,11 @@ pub fn build_operator_llm_review_prompt(
     runbook: &str,
 ) -> String {
     let mut out = String::new();
-    let _ = writeln!(out, "# Aivana Operator Handoff LLM Review Prompt");
+    let _ = writeln!(out, "# Relayne Operator Handoff LLM Review Prompt");
     let _ = writeln!(out);
     let _ = writeln!(
         out,
-        "Review the attached Aivana operator handoff pack. Treat completion as false unless every blocking gate in completion-audit.json is resolved by direct evidence."
+        "Review the attached Relayne operator handoff pack. Treat completion as false unless every blocking gate in completion-audit.json is resolved by direct evidence."
     );
     let _ = writeln!(out);
     let _ = writeln!(out, "## Context");
@@ -6225,7 +6409,7 @@ pub fn build_live_gate_llm_plan(
     runbook: &str,
 ) -> String {
     let mut out = String::new();
-    let _ = writeln!(out, "# Aivana Live Gate LLM Plan");
+    let _ = writeln!(out, "# Relayne Live Gate LLM Plan");
     let _ = writeln!(out);
     let _ = writeln!(
         out,
@@ -6322,7 +6506,7 @@ pub fn build_gui_operator_actions(audit: &CompletionAuditReport) -> String {
         .map(|item| item.evidence.as_str())
         .unwrap_or("No blocking gate evidence remains.");
     let mut out = String::new();
-    let _ = writeln!(out, "# Aivana GUI Operator Actions");
+    let _ = writeln!(out, "# Relayne GUI Operator Actions");
     let _ = writeln!(out);
     let _ = writeln!(out, "- Objective: {}", redact_secret_text(&audit.objective));
     let _ = writeln!(out, "- Achieved: {}", audit.achieved);
@@ -6930,7 +7114,7 @@ fn save_operator_handoff_pack_to_dir_with_args(
         build_llm_action_contract(audit, &live_gate_doctor, &rdp_proof_check, args);
     let rdp_env_fill_guide = build_rdp_env_fill_guide();
     let summary = format!(
-        "# Aivana Operator Handoff Pack\n\n- Objective: {}\n- Achieved: {}\n- Readiness score: {}%\n- Blocking gates: {}\n\n## Early LLM Triage\nInspect `verification-snapshot.json` first, then `llm-action-contract.json`; reject proxy evidence unless the contract success signals are met.\n\n## Next Gate\n{}\n",
+        "# Relayne Operator Handoff Pack\n\n- Objective: {}\n- Achieved: {}\n- Readiness score: {}%\n- Blocking gates: {}\n\n## Early LLM Triage\nInspect `verification-snapshot.json` first, then `llm-action-contract.json`; reject proxy evidence unless the contract success signals are met.\n\n## Next Gate\n{}\n",
         redact_secret_text(&audit.objective),
         audit.achieved,
         readiness.readiness_score,
@@ -9791,7 +9975,7 @@ fn validate_rdp_proof_recovery_plan_mentions_failed_check_actions(
         pack_path,
         "rdp-proof-recovery-plan.md",
         &[
-            "Aivana RDP Proof Recovery Plan",
+            "Relayne RDP Proof Recovery Plan",
             "Failed Proof Checks",
             "Recovery Commands",
             "rdp-proof-check.ok == true",
@@ -9857,7 +10041,7 @@ fn validate_rdp_proof_prompt_mentions_direct_evidence(
         pack_path,
         "rdp-proof-prompt.md",
         &[
-            "Aivana RDP Proof Prompt",
+            "Relayne RDP Proof Prompt",
             "summary.md",
             "Early LLM Triage",
             "llm-action-contract.json",
@@ -10374,7 +10558,7 @@ fn build_ai_action_brief(
 
 fn build_runbook_llm_brief(runbooks: &[crate::models::Runbook], host: &str) -> String {
     let mut out = String::new();
-    let _ = writeln!(out, "# Aivana Runbook LLM Brief");
+    let _ = writeln!(out, "# Relayne Runbook LLM Brief");
     let _ = writeln!(out);
     let _ = writeln!(
         out,
@@ -10440,7 +10624,7 @@ fn build_cua_request_brief(autopilot: &AutopilotController, has_frame: bool) -> 
         "framebuffer missing"
     };
     let mut out = String::new();
-    let _ = writeln!(out, "# Aivana OpenAI CUA Request Brief");
+    let _ = writeln!(out, "# Relayne OpenAI CUA Request Brief");
     let _ = writeln!(out);
     let _ = writeln!(out, "- Provider: {}", autopilot.settings.provider.label());
     let _ = writeln!(
@@ -10481,7 +10665,7 @@ fn build_prompt_library_brief(
         "no active session; ask for evidence first"
     };
     let mut out = String::new();
-    let _ = writeln!(out, "# Aivana Prompt Library");
+    let _ = writeln!(out, "# Relayne Prompt Library");
     let _ = writeln!(out);
     let _ = writeln!(out, "Host: {}", redact_secret_text(host));
     let _ = writeln!(out, "Context: {session_context}");
@@ -10507,7 +10691,7 @@ fn build_prompt_library_brief(
         ),
         (
             "Runbook Selection",
-            "Choose the safest Aivana runbook. Explain required approvals and evidence to capture before mutation.",
+            "Choose the safest Relayne runbook. Explain required approvals and evidence to capture before mutation.",
         ),
         (
             "Ticket Draft",
@@ -10541,7 +10725,7 @@ fn build_llm_handoff_prompt(
     autopilot_steps: &[crate::autopilot::AutopilotStep],
 ) -> String {
     let mut out = String::new();
-    let _ = writeln!(out, "# Aivana LLM Handoff");
+    let _ = writeln!(out, "# Relayne LLM Handoff");
     let _ = writeln!(out);
     let _ = writeln!(
         out,
@@ -11076,7 +11260,7 @@ mod tests {
             &autopilot_steps,
         );
 
-        assert!(prompt.contains("Aivana LLM Handoff"));
+        assert!(prompt.contains("Relayne LLM Handoff"));
         assert!(prompt.contains("Authentication failed"));
         assert!(prompt.contains("password=[REDACTED]"));
         assert!(prompt.contains("token=[REDACTED]"));
@@ -11529,7 +11713,7 @@ mod tests {
         let path = dir.join("plan.md");
         std::fs::write(
             &path,
-            "# Aivana RDP Proof Recovery Plan\n\n## Failed Proof Checks\n- `smoke_connected`\n- `input_probe_present`\n\n## Recovery Commands\n1. `cargo run -- --rdp-smoke-test --password=hunter2`\n2. `cargo run -- --rdp-proof-check --rdp-env-file .\\rdp-live.env`\n\n## Acceptance Criteria\n- `rdp-proof-check.ok == true`\n\n## Final Verification\n1. `cargo run -- --goal-evidence-check --rdp-env-file .\\rdp-live.env`\n",
+            "# Relayne RDP Proof Recovery Plan\n\n## Failed Proof Checks\n- `smoke_connected`\n- `input_probe_present`\n\n## Recovery Commands\n1. `cargo run -- --rdp-smoke-test --password=hunter2`\n2. `cargo run -- --rdp-proof-check --rdp-env-file .\\rdp-live.env`\n\n## Acceptance Criteria\n- `rdp-proof-check.ok == true`\n\n## Final Verification\n1. `cargo run -- --goal-evidence-check --rdp-env-file .\\rdp-live.env`\n",
         )
         .expect("wrote recovery plan");
 
@@ -11733,7 +11917,7 @@ mod tests {
         let manifest = std::fs::read_to_string(saved.join("manifest.json")).unwrap();
         let _ = std::fs::remove_dir_all(saved);
 
-        assert!(markdown.contains("Aivana KI Evidence Bundle"));
+        assert!(markdown.contains("Relayne KI Evidence Bundle"));
         assert!(markdown.contains("password=[REDACTED]"));
         assert!(markdown.contains("token=[REDACTED]"));
         assert!(markdown.contains("secret=[REDACTED]"));
@@ -12163,7 +12347,7 @@ mod tests {
                 .iter()
                 .any(|item| item.requirement.contains("OpenAI CUA") && item.blocking)
         );
-        assert!(markdown.contains("Aivana KI Goal Audit"));
+        assert!(markdown.contains("Relayne KI Goal Audit"));
         assert!(markdown.contains("Prompt-to-Artifact Checklist"));
         assert!(markdown.contains("Live Gate Runbook"));
         assert!(markdown.contains("next: Set OPENAI_API_KEY"));
@@ -12291,7 +12475,7 @@ mod tests {
 
         let summary = build_next_live_gate_summary(&report);
 
-        assert!(summary.contains("Aivana Next Live Gate"));
+        assert!(summary.contains("Relayne Next Live Gate"));
         assert!(summary.contains("Blocking gates: 1"));
         assert!(summary.contains("First Blocking Gate"));
         assert!(summary.contains("Missing RDP Environment"));
@@ -12514,7 +12698,7 @@ mod tests {
 
         let prompt = build_rdp_proof_prompt(&audit, &doctor, &snapshot);
 
-        assert!(prompt.contains("Aivana RDP Proof Prompt"));
+        assert!(prompt.contains("Relayne RDP Proof Prompt"));
         assert!(prompt.contains("summary.md"));
         assert!(prompt.contains("Early LLM Triage"));
         assert!(prompt.contains("verification-snapshot.json"));
@@ -12572,7 +12756,7 @@ mod tests {
 
         let plan = build_rdp_proof_recovery_plan(&audit, &doctor, &proof_check);
 
-        assert!(plan.contains("Aivana RDP Proof Recovery Plan"));
+        assert!(plan.contains("Relayne RDP Proof Recovery Plan"));
         assert!(plan.contains("Proof ok: false"));
         assert!(plan.contains("Failed Proof Checks"));
         assert!(plan.contains("smoke_connected"));
@@ -12765,7 +12949,7 @@ mod tests {
 
         let plan = build_live_gate_llm_plan(&audit, &doctor, &runbook);
 
-        assert!(plan.contains("Aivana Live Gate LLM Plan"));
+        assert!(plan.contains("Relayne Live Gate LLM Plan"));
         assert!(plan.contains("summary.md"));
         assert!(plan.contains("Early LLM Triage"));
         assert!(plan.contains("verification-snapshot.json"));
@@ -12818,7 +13002,7 @@ mod tests {
         let markdown = std::fs::read_to_string(&path).expect("read operator brief");
         let _ = std::fs::remove_file(path);
 
-        assert!(markdown.contains("Aivana Live Gate Operator Brief"));
+        assert!(markdown.contains("Relayne Live Gate Operator Brief"));
         assert!(markdown.contains("Operator stage"));
         assert!(markdown.contains("Acceptance criteria"));
         assert!(markdown.contains("Next command"));
@@ -12860,7 +13044,7 @@ mod tests {
         let markdown = std::fs::read_to_string(&path).expect("read summary");
         let _ = std::fs::remove_file(path);
 
-        assert!(markdown.contains("Aivana Next Live Gate"));
+        assert!(markdown.contains("Relayne Next Live Gate"));
         assert!(markdown.contains("cargo run -- --completion-audit"));
         assert!(markdown.contains("password=[REDACTED]"));
         assert!(!markdown.contains("hunter2"));
@@ -12900,7 +13084,7 @@ mod tests {
     fn rdp_env_fill_guide_explains_safe_local_values() {
         let guide = build_rdp_env_fill_guide();
 
-        assert!(guide.contains("Aivana RDP Env Fill Guide"));
+        assert!(guide.contains("Relayne RDP Env Fill Guide"));
         assert!(guide.contains("rdp-live.env"));
         assert!(guide.contains("Do not put real credentials"));
         assert!(guide.contains("AIVANA_RDP_TEST_HOST"));
@@ -12949,7 +13133,7 @@ mod tests {
         let markdown = std::fs::read_to_string(&path).expect("read GUI actions");
         let _ = std::fs::remove_file(path);
 
-        assert!(markdown.contains("Aivana GUI Operator Actions"));
+        assert!(markdown.contains("Relayne GUI Operator Actions"));
         assert!(markdown.contains("RDP env source line"));
         assert!(markdown.contains(".\\rdp-live.env"));
         assert!(markdown.contains("Copy Next Gate JSON"));
@@ -13403,7 +13587,7 @@ mod tests {
                 .any(|role| role.file == "gui-operator-actions.md"
                     && role.inspect_when.contains("app UI"))
         );
-        assert!(summary.contains("Aivana Operator Handoff Pack"));
+        assert!(summary.contains("Relayne Operator Handoff Pack"));
         assert!(summary.contains("Early LLM Triage"));
         assert!(summary.contains("verification-snapshot.json"));
         assert!(summary.contains("llm-action-contract.json"));
@@ -13457,7 +13641,7 @@ mod tests {
         assert!(rdp_proof_check.contains("failed_check_actions"));
         assert!(rdp_proof_check.contains("input_probe_present"));
         assert!(rdp_proof_check.contains("framebuffer_present"));
-        assert!(rdp_proof_recovery_plan.contains("Aivana RDP Proof Recovery Plan"));
+        assert!(rdp_proof_recovery_plan.contains("Relayne RDP Proof Recovery Plan"));
         assert!(rdp_proof_recovery_plan.contains("Recovery Commands"));
         assert!(rdp_proof_recovery_plan.contains("rdp-proof-check.ok == true"));
         assert!(live_gate_doctor.contains("aivana.live-gate-doctor.v1"));
@@ -13465,13 +13649,13 @@ mod tests {
         assert!(live_gate_doctor.contains("\"checks\""));
         assert!(live_gate_doctor.contains("\"rdp_proof_check\""));
         assert!(live_gate_doctor.contains("\"rdp_proof_recovery_plan_command\""));
-        assert!(live_gate_operator_brief.contains("Aivana Live Gate Operator Brief"));
+        assert!(live_gate_operator_brief.contains("Relayne Live Gate Operator Brief"));
         assert!(live_gate_operator_brief.contains("Operator stage"));
         assert!(live_gate_operator_brief.contains("Acceptance criteria"));
         assert!(live_gate_operator_brief.contains("Next command after success"));
         assert!(next_live_gate_json.contains("\"blocking_gates\""));
         assert!(next_live_gate_json.contains("--rdp-smoke-test"));
-        assert!(next_live_gate.contains("Aivana Next Live Gate"));
+        assert!(next_live_gate.contains("Relayne Next Live Gate"));
         assert!(next_live_gate.contains("cargo run -- --rdp-preflight"));
         assert!(next_live_gate.contains("password=[REDACTED]"));
         assert!(live_gate_sequence.contains("cargo run -- --rdp-env-fill-guide"));
@@ -13510,7 +13694,7 @@ mod tests {
         assert!(manifest.contains("llm-live-gate-plan.md"));
         assert!(manifest.contains("llm-action-contract.json"));
         assert!(runbook.contains("password=[REDACTED]"));
-        assert!(gui_actions.contains("Aivana GUI Operator Actions"));
+        assert!(gui_actions.contains("Relayne GUI Operator Actions"));
         assert!(gui_actions.contains("Copy Next Gate JSON"));
         assert!(gui_actions.contains("Copy Command Index JSON"));
         assert!(gui_actions.contains("Copy Verification Snapshot JSON"));
@@ -13541,12 +13725,12 @@ mod tests {
         assert!(gui_actions.contains("Export LLM Action Contract"));
         assert!(gui_actions.contains("AIVANA_RDP_TEST_HOST"));
         assert!(env_template.contains("AIVANA_RDP_TEST_PASSWORD=[REDACTED]"));
-        assert!(env_fill_guide.contains("Aivana RDP Env Fill Guide"));
+        assert!(env_fill_guide.contains("Relayne RDP Env Fill Guide"));
         assert!(env_fill_guide.contains("Do not put real credentials"));
         assert!(env_fill_guide.contains("rdp-live.env"));
         assert!(readiness_json.contains("token=[REDACTED]"));
         assert!(audit_json.contains("secret=[REDACTED]"));
-        assert!(llm_prompt.contains("Aivana Operator Handoff LLM Review Prompt"));
+        assert!(llm_prompt.contains("Relayne Operator Handoff LLM Review Prompt"));
         assert!(llm_prompt.contains("Do not treat a command"));
         assert!(llm_prompt.contains("summary.md"));
         assert!(llm_prompt.contains("Early LLM Triage"));
@@ -13565,13 +13749,13 @@ mod tests {
         assert!(llm_prompt.contains("live-gate-sequence.txt"));
         assert!(llm_prompt.contains("gui-operator-actions.md"));
         assert!(llm_prompt.contains("llm-review-prompt.md"));
-        assert!(rdp_proof_prompt.contains("Aivana RDP Proof Prompt"));
+        assert!(rdp_proof_prompt.contains("Relayne RDP Proof Prompt"));
         assert!(rdp_proof_prompt.contains("connected=true"));
         assert!(rdp_proof_prompt.contains("Framebuffer evidence"));
         assert!(rdp_proof_prompt.contains("Input probe evidence"));
         assert!(rdp_proof_prompt.contains("Reject proxy evidence"));
         assert!(llm_prompt.contains("password=[REDACTED]"));
-        assert!(llm_live_gate_plan.contains("Aivana Live Gate LLM Plan"));
+        assert!(llm_live_gate_plan.contains("Relayne Live Gate LLM Plan"));
         assert!(llm_live_gate_plan.contains("verification-snapshot.json"));
         assert!(llm_live_gate_plan.contains("operator-handoff-risk-summary.json"));
         assert!(llm_live_gate_plan.contains("llm-action-contract.json"));
@@ -13832,7 +14016,7 @@ mod tests {
         save_operator_handoff_pack_to_dir(&pack, &readiness, &audit).expect("saved operator pack");
         std::fs::write(
             pack.join("summary.md"),
-            "# Aivana Operator Handoff Pack\n\n## Next Gate\nRun smoke test.\n",
+            "# Relayne Operator Handoff Pack\n\n## Next Gate\nRun smoke test.\n",
         )
         .expect("corrupted summary");
 
@@ -14960,7 +15144,7 @@ mod tests {
         std::fs::write(
             pack.join("rdp-proof-recovery-plan.md"),
             format!(
-                "# Aivana RDP Proof Recovery Plan\n\n## Failed Proof Checks\n{failed_checks}\n\n## Recovery Commands\n1. `cargo run -- --stale --password=hunter2`\n\n## Acceptance Criteria\n- `rdp-proof-check.ok == true`.\n- connected=true\n- framebuffer\n- input-probe\n\n## Rejection Rule\nDo not accept manifests as proof.\n"
+                "# Relayne RDP Proof Recovery Plan\n\n## Failed Proof Checks\n{failed_checks}\n\n## Recovery Commands\n1. `cargo run -- --stale --password=hunter2`\n\n## Acceptance Criteria\n- `rdp-proof-check.ok == true`.\n- connected=true\n- framebuffer\n- input-probe\n\n## Rejection Rule\nDo not accept manifests as proof.\n"
             ),
         )
         .expect("corrupted recovery plan");
@@ -15030,7 +15214,7 @@ mod tests {
         .expect("corrupted live gate doctor");
         std::fs::write(
             pack.join("live-gate-operator-brief.md"),
-            "# Aivana Live Gate Operator Brief\n\n- Operator stage: stale-stage\n- Next command: `cargo run -- --rdp-smoke-test --password=hunter2`\n- RDP proof recovery plan command: `cargo run -- --bad-recovery --password=hunter2`\n",
+            "# Relayne Live Gate Operator Brief\n\n- Operator stage: stale-stage\n- Next command: `cargo run -- --rdp-smoke-test --password=hunter2`\n- RDP proof recovery plan command: `cargo run -- --bad-recovery --password=hunter2`\n",
         )
         .expect("corrupted operator brief");
 
@@ -15097,12 +15281,12 @@ mod tests {
         save_operator_handoff_pack_to_dir(&pack, &readiness, &audit).expect("saved operator pack");
         std::fs::write(
             pack.join("llm-live-gate-plan.md"),
-            "# Aivana Live Gate LLM Plan\n\n- verification-snapshot.json\n- operator-handoff-risk-summary.json\n- rdp-proof-check.json\n- rdp-proof-recovery-plan.md\n- live-gate-doctor.json\n- live-gate-operator-brief.md\n- live-gate-sequence.txt\n- Reject proxy evidence\n- connected=true\n- password=hunter2\n",
+            "# Relayne Live Gate LLM Plan\n\n- verification-snapshot.json\n- operator-handoff-risk-summary.json\n- rdp-proof-check.json\n- rdp-proof-recovery-plan.md\n- live-gate-doctor.json\n- live-gate-operator-brief.md\n- live-gate-sequence.txt\n- Reject proxy evidence\n- connected=true\n- password=hunter2\n",
         )
         .expect("corrupted llm plan");
         std::fs::write(
             pack.join("llm-review-prompt.md"),
-            "# Aivana Operator Handoff LLM Review Prompt\n\n- verification-snapshot.json\n- operator-handoff-risk-summary.json\n- rdp-proof-check.json\n- rdp-proof-recovery-plan.md\n- live-gate-doctor.json\n- live-gate-operator-brief.md\n- live-gate-sequence.txt\n- Do not treat a command as proof\n- password=hunter2\n",
+            "# Relayne Operator Handoff LLM Review Prompt\n\n- verification-snapshot.json\n- operator-handoff-risk-summary.json\n- rdp-proof-check.json\n- rdp-proof-recovery-plan.md\n- live-gate-doctor.json\n- live-gate-operator-brief.md\n- live-gate-sequence.txt\n- Do not treat a command as proof\n- password=hunter2\n",
         )
         .expect("corrupted llm review prompt");
 
@@ -15206,7 +15390,7 @@ mod tests {
         save_operator_handoff_pack_to_dir(&pack, &readiness, &audit).expect("saved operator pack");
         std::fs::write(
             pack.join("rdp-proof-prompt.md"),
-            "# Aivana RDP Proof Prompt\n\n- connected=true\n- Framebuffer evidence\n- Input probe evidence\n- Reject proxy evidence\n- --rdp-smoke-test\n- --verification-snapshot\n- password=hunter2\n",
+            "# Relayne RDP Proof Prompt\n\n- connected=true\n- Framebuffer evidence\n- Input probe evidence\n- Reject proxy evidence\n- --rdp-smoke-test\n- --verification-snapshot\n- password=hunter2\n",
         )
         .expect("corrupted rdp proof prompt");
 
@@ -16686,7 +16870,7 @@ mod tests {
         save_operator_handoff_pack_to_dir(&pack, &readiness, &audit).expect("saved operator pack");
         std::fs::write(
             pack.join("gui-operator-actions.md"),
-            "# Aivana GUI Operator Actions\n\nNo env-source instruction. password=hunter2\n",
+            "# Relayne GUI Operator Actions\n\nNo env-source instruction. password=hunter2\n",
         )
         .expect("corrupted gui actions");
 
@@ -17096,7 +17280,7 @@ mod tests {
 
         let brief = build_runbook_llm_brief(runbooks.list_runbooks(), "server password=hunter2");
 
-        assert!(brief.contains("Aivana Runbook LLM Brief"));
+        assert!(brief.contains("Relayne Runbook LLM Brief"));
         assert!(brief.contains("selected runbook"));
         assert!(brief.contains("Screenshot erfassen"));
         assert!(brief.contains("password=[REDACTED]"));
@@ -17110,7 +17294,7 @@ mod tests {
         let library =
             build_prompt_library_brief("host", "Action password=hunter2", &autopilot, false);
 
-        assert!(library.contains("Aivana Prompt Library"));
+        assert!(library.contains("Relayne Prompt Library"));
         assert!(library.contains("Diagnosis"));
         assert!(library.contains("Runbook Selection"));
         assert!(library.contains("Ticket Draft"));
@@ -17141,7 +17325,7 @@ mod tests {
 
         let brief = build_cua_request_brief(&autopilot, false);
 
-        assert!(brief.contains("Aivana OpenAI CUA Request Brief"));
+        assert!(brief.contains("Relayne OpenAI CUA Request Brief"));
         assert!(brief.contains("framebuffer missing"));
         assert!(brief.contains("token=[REDACTED]"));
         assert!(brief.contains("Do not include credentials"));
@@ -17196,7 +17380,7 @@ mod tests {
         assert!(report.redacted);
         assert!(report.files.iter().any(|file| file == "action-brief.md"));
         assert!(action.contains("headless operator context"));
-        assert!(prompt.contains("Aivana Prompt Library"));
+        assert!(prompt.contains("Relayne Prompt Library"));
         assert!(manifest.contains("aivana-ai-brief-pack"));
         assert!(!action.contains("hunter2"));
         assert!(!prompt.contains("token=abc"));

@@ -2,8 +2,22 @@
 name = "aivana_rust_rdp_client"
 version = "0.1.0"
 edition = "2024"
+default-run = "relayne"
+
+[[bin]]
+name = "relayne"
+path = "src/main.rs"
 
 [dependencies]
+tiny_http = "0.12"
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"
+ring = "0.17.14"
+raw-window-handle = "0.6"
+flate2 = "1.1.9"
+portable-pty = "0.9"
+vt100 = "0.16"
+windows = { version = "0.61", features = ["Foundation", "Foundation_Collections", "Globalization", "Graphics_Imaging", "Media_Ocr", "Storage_Streams", "Win32_System_WinRT", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
 anyhow = "1.0"
 arboard = "3.6"
 cpal = "0.16"
@@ -33,6 +47,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 x509-cert = { version = "0.2.5", default-features = false, features = ["std"] }
 
 [patch.crates-io]
+ironrdp-mstsgu = { path = "vendor/ironrdp-mstsgu" }
 ironrdp-connector = { path = "vendor/ironrdp-connector" }
 ironrdp-pdu = { path = "vendor/ironrdp-pdu" }
 ironrdp-tls = { path = "vendor/ironrdp-tls" }

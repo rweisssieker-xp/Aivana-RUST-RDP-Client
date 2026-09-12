@@ -212,7 +212,7 @@ impl AivanaApp {
             }
             ui.separator();
             ui.strong("Bitwarden → lokaler Credential Store");
-            ui.label("Offizielle bw.exe im PATH und extern entsperrtes Vault erforderlich. Aivana muss BW_SESSION erben. Abgerufen wird ausschließlich die angegebene Eintrag-ID; keine Vault-Auflistung. Der nächste Schritt übernimmt Login und Passwort in den lokalen DPAPI-Speicher.");
+            ui.label("Offizielle bw.exe im PATH und extern entsperrtes Vault erforderlich. Relayne muss BW_SESSION erben. Abgerufen wird ausschließlich die angegebene Eintrag-ID; keine Vault-Auflistung. Der nächste Schritt übernimmt Login und Passwort in den lokalen DPAPI-Speicher.");
             ui.add_enabled_ui(self.integrations.vault.is_none(), |ui| {
                 ui.horizontal(|ui| { ui.label("Eintrag-ID"); ui.text_edit_singleline(&mut self.integrations.vault_item); });
                 let selected = self.profiles.iter().find(|p| Some(p.id) == self.integrations.vault_target);

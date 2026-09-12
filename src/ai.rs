@@ -153,7 +153,7 @@ impl AiProvider for LocalAiProvider {
 
     fn write_incident_report(&self, events: &[String]) -> IncidentDraft {
         IncidentDraft {
-            title: "Aivana RDP Incident".to_owned(),
+            title: "Relayne RDP Incident".to_owned(),
             root_cause: events
                 .iter()
                 .find(|event| event.to_lowercase().contains("error"))
