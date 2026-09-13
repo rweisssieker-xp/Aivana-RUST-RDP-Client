@@ -1,5 +1,21 @@
 # Relayne – Implementierung und Abnahme, 11. September 2026
 
+## 2026-09-13 — Distribution / Auslieferung / Distribution / Distribuzione
+
+[Mehrsprachiger Auslieferungsstand und Prüfergebnisse / Multilingual distribution status and verification / État multilingue et vérification / Stato multilingue e verifica](distribution/README.md)
+
+455 Anwendungstests + 16 Teamtests bestanden, 0 Fehler, 5 ignoriert. Beide Programme gebaut. Keine Live-Verbindungen; das Paket bleibt ausdrücklich eine unsignierte Entwicklungsauslieferung. Die vollständige Übersetzung der älteren Fachansichten und Dokumente steht weiterhin aus.
+
+## Aktualisierung vom 12. September 2026
+
+**Arbeitsmodus: ausschließlich Entwicklung.** Die neue [vergleichende Ursachenanalyse](relayne-differential-diagnosis.md) wird lokal mit Simulationen, bewachten Adapter-Ersatzimplementierungen und Loopback-HTTP geprüft. Externe Abnahme ist derzeit nicht vorgesehen und blockiert die weitere Entwicklung nicht. Vorhandene RDP-Hosts werden nicht verwendet.
+
+Der vollständige, ungefilterte Offline-Gesamtlauf besteht mit **443 Anwendungstests und 16 Team-Tests**, ohne Fehler; fünf bestehende Live-/Installationsprüfungen bleiben ignoriert. Beide Programme wurden erfolgreich gebaut. Der zuvor im Gesamtlauf auftretende native OCR-Absturz ist durch eine prozessweite MTA-Nutzungsreferenz behoben. Ein Regressionstest mit 35 Sekunden Pause zwischen kurzlebigen OCR-Workern reproduzierte den Fehler vor der Korrektur und besteht danach.
+
+Zusätzlich sind [Änderungs- und Fehlerexperimente im Klon](relayne-change-trials.md) integriert: Starttypänderung eines Anwendungsdienstes, HTTP-Nachweis, reproduzierter Dienstausfall, Reparatur und verifizierter Checkpoint-Rückweg. Der erste unterstützte Änderungstyp ist Automatic ↔ Manual; beliebige Updates oder Installationen sind damit nicht abgenommen. Die [erweiterten Recovery-Funktionen](recovery-platform-expansion.md) bleiben separat dokumentiert.
+
+**Live-Abnahme weiterhin offen:** Lokal wurden weder ein Hyper-V-Modul bzw. VMMS-Dienst noch ein eingerichteter Relayne-Klon gefunden. Vorhandene RDP-Profile allein belegen keine Eignung als Testhost. Reale VM-, Prüfpunkt- oder Dienständerungen benötigen einen eindeutig bestimmten Testhost, den passenden Relayne-Klon und die Gastzugänge in der Anwendung. Die folgenden Abschnitte dokumentieren frühere Entwicklungsstände.
+
 ## Aktueller erweiterter Stand
 
 [Funktionsumfang und Grenzen](relayne-expanded-usps.md): signierte Reparaturpakete, automatische Klon-/Produktionsvergleiche, mehrstufige HTTP-Anmeldung mit JSON-Prüfung und getrennten Laufzeit-Slots, erweiterte Wiederherstellung, Icon-Prozeduren als Workflows, komprimierte Bildfreigabe mit Einzeltasten, Windows-RemoteApp, Gateway-Zustimmung/PAA sowie OIDC-Unternehmensanmeldung mit Browser/PKCE sind integriert.
@@ -54,3 +70,20 @@ Der aktuelle Build beider Programme (`cargo build --offline --bins`) ist erfolgr
 - Der Team-Dienst ist implementiert und lokal getestet, aber nicht extern bereitgestellt; produktiver Betrieb benötigt eine administrierte Instanz mit TLS-Zugriff. Der neue Cloud-Planungsaufruf wurde nicht mit einem kostenpflichtigen Live-API-Aufruf abgenommen.
 
 Diese Grenzen sind offen ausgewiesen; die gesamte ursprüngliche Wunschliste wird nicht als vollständig produktiv abgenommen bezeichnet.
+
+## Verifikation am 12.09.2026
+
+`cargo test --offline -- --test-threads=1`: 443 Anwendungstests und 16 Teamtests bestanden, 0 Fehler, 5 bestehende Tests ignoriert, 0 ausgefiltert. `cargo build --offline --bins` erfolgreich; bestehende Dead-Code-Warnungen bleiben bestehen. Die native Oberfläche wurde anhand der gekennzeichneten Dev-Simulation visuell geprüft (Screenshot: `docs/gui-concepts/relayne-differential-diagnosis.png`).
+
+Ausschließlich Entwicklungsprüfungen: Simulationen, Testdoubles und lokales Loopback-HTTP. Keine Verbindung zu gespeicherten RDP-Hosts, keine Live-Hyper-V-Abnahme und keine externen Modellaufrufe.
+## Dev-Szenariovergleich: Verifikation am 12.09.2026
+
+`cargo test --offline diagnostic -- --test-threads=1`: **24 Tests bestanden, 0 Fehler**; gezielter Diagnose-Regressionslauf, 428 Anwendungstests und 16 Teamtests ausgefiltert. Vier neue Tests prüfen den Szenariovergleich, unvollständige Evidenz und die Oberfläche ohne Fall-/Jobänderung. Der zuvor dokumentierte vollständige Gesamtlauf bleibt ein früherer Stand.
+
+`cargo build --offline --bin relayne` erfolgreich (51 bestehende Warnungen). Formatprüfung und `git diff --check` erfolgreich. Native Ansicht visuell geprüft: [Dev-Szenariovergleich](gui-concepts/relayne-diagnostic-comparison.png), sieben von sieben Simulationserwartungen erfüllt. Ausschließlich Dev; keine Live-Hosts oder externen Modellaufrufe.
+
+## Prüfungsvorschau: Verifikation am 12.09.2026
+
+`cargo test --offline diagnostic -- --test-threads=1`: **28 Tests bestanden, 0 Fehler**; gezielter Diagnose-Regressionslauf, 428 Anwendungstests und 16 Teamtests ausgefiltert. Vier neue Tests decken drei hypothetische Ergebnisse, unveränderte Originalfälle, Widersprüche, ausgeschöpfte Versuche, abgelaufene Evidenz und Rendering bei 640/1440 Pixeln ab.
+
+`cargo build --offline --bin relayne`, Formatprüfung und `git diff --check` erfolgreich; 51 bestehende Build-Warnungen. Die native Ansicht wurde aufgenommen und der sichtbare Einstieg in die Vorschau geprüft: [Prüfungsvorschau](gui-concepts/relayne-diagnostic-foresight.png). Der gesamte Vorschauinhalt ist in der scrollbaren Diagnoseansicht erreichbar. Ausschließlich lokale Entwicklungsprüfungen, keine Live-Hosts und keine externen Modellaufrufe. Kein erneuter vollständiger Gesamttest für diese begrenzte Erweiterung.

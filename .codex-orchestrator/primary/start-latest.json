@@ -1,0 +1,167 @@
+{
+  "alternativeJourney": "compass",
+  "artifactPath": ".codex-orchestrator/primary/start-latest.json",
+  "autonomyBoundary": "This recommendation did not run a journey, adapter, or product change. Any selected autonomous journey keeps its existing hard stops for credentials, production access, irreversible changes, spending, and high-stakes decisions.",
+  "claimBoundary": "This is local routing guidance based on declared inputs and project context; it is not evidence of customer demand, market fit, or release readiness.",
+  "confidence": 0.85,
+  "errors": [],
+  "generatedAt": "2026-09-12T06:32:48.548Z",
+  "handoff": "$forgemind-compass",
+  "inputs": {
+    "context": "project",
+    "mode": "autonomous",
+    "outcome": "improve"
+  },
+  "missingEvidence": [],
+  "nextAction": "Continue with $forgemind-compass; ForgeMind will apply the Leap route internally.",
+  "projectProfile": {
+    "artifactPath": ".codex-orchestrator/project-profile.json",
+    "claimBoundary": "Project-derived fields describe repository context. They are inferred or assumed until customer, market, pricing, or operating evidence is imported.",
+    "commercialAssumptions": {
+      "addressableAccounts": {
+        "evidence": "observed",
+        "sources": [
+          "project profile configuration"
+        ],
+        "value": 300
+      },
+      "buildCost": {
+        "evidence": "observed",
+        "sources": [
+          "project profile configuration"
+        ],
+        "value": 60000
+      },
+      "customerAcquisitionCost": {
+        "evidence": "observed",
+        "sources": [
+          "project profile configuration"
+        ],
+        "value": 2200
+      },
+      "grossMarginPercent": {
+        "evidence": "observed",
+        "sources": [
+          "project profile configuration"
+        ],
+        "value": 70
+      },
+      "monthlyChurnPercent": {
+        "evidence": "observed",
+        "sources": [
+          "project profile configuration"
+        ],
+        "value": 1.5
+      },
+      "monthlyNewCustomers": {
+        "evidence": "observed",
+        "sources": [
+          "project profile configuration"
+        ],
+        "value": 2
+      },
+      "monthlyPrice": {
+        "evidence": "observed",
+        "sources": [
+          "project profile configuration"
+        ],
+        "value": 1500
+      },
+      "monthlyRunCost": {
+        "evidence": "observed",
+        "sources": [
+          "project profile configuration"
+        ],
+        "value": 4500
+      },
+      "salesCycleMonths": {
+        "evidence": "observed",
+        "sources": [
+          "project profile configuration"
+        ],
+        "value": 6
+      },
+      "startingCustomers": {
+        "evidence": "observed",
+        "sources": [
+          "project profile configuration"
+        ],
+        "value": 0
+      }
+    },
+    "deploymentModel": {
+      "evidence": "missing",
+      "sources": [
+        "no deployment signal"
+      ],
+      "value": "unknown"
+    },
+    "differentiationApproach": {
+      "evidence": "observed",
+      "sources": [
+        "project profile configuration"
+      ],
+      "value": "enterprise-operations workflow with existing integration context"
+    },
+    "errors": [],
+    "evidenceGaps": [
+      "no structured commercial evidence was imported from research or telemetry",
+      "pricing, market size, CAC, churn, and cost values are project-derived assumptions",
+      "deployment model is unknown; validate operating cost assumptions"
+    ],
+    "evidenceSummary": {
+      "importedSignals": 0,
+      "outcomes": 0,
+      "packagePresent": false,
+      "projectDocuments": 10,
+      "readmePresent": true,
+      "researchRecords": 4,
+      "sourceSignals": 0,
+      "telemetryEvents": 0
+    },
+    "generatedAt": "2026-09-12T06:32:48.535Z",
+    "primaryJob": {
+      "evidence": "observed",
+      "sources": [
+        "forgemind.config.json"
+      ],
+      "value": "Diagnose interrupted remote sessions, execute operator-approved recovery steps and produce a traceable incident handoff"
+    },
+    "productCategory": {
+      "evidence": "observed",
+      "sources": [
+        "project profile configuration"
+      ],
+      "value": "enterprise-operations"
+    },
+    "schemaVersion": 1,
+    "status": "passed",
+    "targetAudience": {
+      "evidence": "observed",
+      "sources": [
+        "forgemind.config.json"
+      ],
+      "value": "Hypothesis: DACH IT administrators and small MSP support teams operating Windows RDP estates; not customer-validated"
+    },
+    "technicalCostSignals": [
+      {
+        "evidence": "observed",
+        "sources": [
+          "AI inference dependency or documentation"
+        ],
+        "value": "ai-inference"
+      }
+    ],
+    "workspace": "C:\\tmp\\Aivana-RUST-RDP-Client"
+  },
+  "rationale": "Leap is the safest next ForgeMind journey for the declared context and desired outcome.",
+  "recommendedJourney": "leap",
+  "routingSignals": [
+    "context:project",
+    "outcome:improve",
+    "mode:autonomous",
+    "project-category:enterprise-operations"
+  ],
+  "schemaVersion": 1,
+  "status": "passed"
+}

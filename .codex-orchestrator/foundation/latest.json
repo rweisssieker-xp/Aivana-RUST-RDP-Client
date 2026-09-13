@@ -19,9 +19,9 @@
       ],
       "decisionState": "draft",
       "dependsOn": [
-        "foundation_mtwgrrsd_prd"
+        "foundation_mty0duy5_prd"
       ],
-      "id": "foundation_mtwgrrsd_architecture",
+      "id": "foundation_mty0duy5_architecture",
       "revision": 1,
       "state": "ready"
     },
@@ -38,7 +38,7 @@
       "decisionState": "draft",
       "dependsOn": [],
       "evidence": "repository-derived",
-      "id": "foundation_mtwgrrsd_context",
+      "id": "foundation_mty0duy5_context",
       "revision": 1,
       "state": "ready"
     },
@@ -47,27 +47,27 @@
       {
         "decisionState": "draft",
         "dependsOn": [
-          "foundation_mtwgrrsd_prd",
-          "foundation_mtwgrrsd_architecture",
-          "foundation_mtwgrrsd_nfrs"
+          "foundation_mty0duy5_prd",
+          "foundation_mty0duy5_architecture",
+          "foundation_mty0duy5_nfrs"
         ],
-        "id": "foundation_mtwgrrsd_epic_1",
+        "id": "foundation_mty0duy5_epic_1",
         "revision": 1,
         "state": "ready",
-        "title": "Validate the Aivana native RDP incident workbench for DACH IT administrators and small MSPs. Compare sourced alternatives and evaluate operator-approved recovery plus incident evidence as the differentiation hypothesis. Consult docs/forgemind/venture-sources.json. No customer demand or willingness to pay has been measured. Category financial defaults must not be called observed evidence; the reviewed economics will be in docs/forgemind/venture-review.md. Naming remains unresolved. No outreach, spending, deployment or application implementation."
+        "title": "Relayne nach den lokalen Implementierungen von Recovery Agent, Living Recovery Plans und KI-generierten Anwendungstests gezielt verbessern: vorhandene Ergebnisse berücksichtigen, offene Validierungslücken priorisieren und den kleinsten reversiblen nächsten Schritt mit messbaren Abnahmekriterien bestimmen. Keine bereits implementierten Funktionen neu bauen. Kundenbedarf, Modellqualität und Live-Infrastruktur sind nicht validiert. Keine kostenpflichtigen Modellaufrufe, Produktionsverbindungen, Veröffentlichungen, Kundenkontakte oder Preisänderungen."
       }
     ],
-    "goal": "Validate the Aivana native RDP incident workbench for DACH IT administrators and small MSPs. Compare sourced alternatives and evaluate operator-approved recovery plus incident evidence as the differentiation hypothesis. Consult docs/forgemind/venture-sources.json. No customer demand or willingness to pay has been measured. Category financial defaults must not be called observed evidence; the reviewed economics will be in docs/forgemind/venture-review.md. Naming remains unresolved. No outreach, spending, deployment or application implementation.",
+    "goal": "Relayne nach den lokalen Implementierungen von Recovery Agent, Living Recovery Plans und KI-generierten Anwendungstests gezielt verbessern: vorhandene Ergebnisse berücksichtigen, offene Validierungslücken priorisieren und den kleinsten reversiblen nächsten Schritt mit messbaren Abnahmekriterien bestimmen. Keine bereits implementierten Funktionen neu bauen. Kundenbedarf, Modellqualität und Live-Infrastruktur sind nicht validiert. Keine kostenpflichtigen Modellaufrufe, Produktionsverbindungen, Veröffentlichungen, Kundenkontakte oder Preisänderungen.",
     "goalSource": "user",
-    "id": "foundation_mtwgrrsd",
-    "mode": "venture",
+    "id": "foundation_mty0duy5",
+    "mode": "one",
     "nfrs": {
       "assumptions": [],
       "decisionState": "draft",
       "dependsOn": [
-        "foundation_mtwgrrsd_architecture"
+        "foundation_mty0duy5_architecture"
       ],
-      "id": "foundation_mtwgrrsd_nfrs",
+      "id": "foundation_mty0duy5_nfrs",
       "requirements": [
         "Preserve applicable accessibility.",
         "Avoid secrets in artifacts.",
@@ -92,10 +92,10 @@
       ],
       "decisionState": "draft",
       "dependsOn": [
-        "foundation_mtwgrrsd_context"
+        "foundation_mty0duy5_context"
       ],
-      "id": "foundation_mtwgrrsd_prd",
-      "outcome": "Validate the Aivana native RDP incident workbench for DACH IT administrators and small MSPs. Compare sourced alternatives and evaluate operator-approved recovery plus incident evidence as the differentiation hypothesis. Consult docs/forgemind/venture-sources.json. No customer demand or willingness to pay has been measured. Category financial defaults must not be called observed evidence; the reviewed economics will be in docs/forgemind/venture-review.md. Naming remains unresolved. No outreach, spending, deployment or application implementation.",
+      "id": "foundation_mty0duy5_prd",
+      "outcome": "Relayne nach den lokalen Implementierungen von Recovery Agent, Living Recovery Plans und KI-generierten Anwendungstests gezielt verbessern: vorhandene Ergebnisse berücksichtigen, offene Validierungslücken priorisieren und den kleinsten reversiblen nächsten Schritt mit messbaren Abnahmekriterien bestimmen. Keine bereits implementierten Funktionen neu bauen. Kundenbedarf, Modellqualität und Live-Infrastruktur sind nicht validiert. Keine kostenpflichtigen Modellaufrufe, Produktionsverbindungen, Veröffentlichungen, Kundenkontakte oder Preisänderungen.",
       "revision": 1,
       "scope": "One reversible, measurable thin slice.",
       "state": "ready"
@@ -104,14 +104,14 @@
     "sprint": {
       "decisionState": "draft",
       "dependsOn": [
-        "foundation_mtwgrrsd_story_1"
+        "foundation_mty0duy5_story_1"
       ],
-      "id": "foundation_mtwgrrsd_sprint",
+      "id": "foundation_mty0duy5_sprint",
       "revision": 1,
       "state": "ready",
       "stories": [
         {
-          "id": "foundation_mtwgrrsd_story_1",
+          "id": "foundation_mty0duy5_story_1",
           "state": "ready"
         }
       ],
@@ -127,17 +127,17 @@
         "decisionState": "draft",
         "definitionOfDone": "Relevant tests pass or gaps are recorded.",
         "dependsOn": [
-          "foundation_mtwgrrsd_epic_1"
+          "foundation_mty0duy5_epic_1"
         ],
-        "id": "foundation_mtwgrrsd_story_1",
+        "id": "foundation_mty0duy5_story_1",
         "revision": 1,
         "state": "ready",
         "title": "Implement the smallest reversible outcome slice"
       }
     ]
   },
-  "foundationId": "foundation_mtwgrrsd",
-  "goal": "Validate the Aivana native RDP incident workbench for DACH IT administrators and small MSPs. Compare sourced alternatives and evaluate operator-approved recovery plus incident evidence as the differentiation hypothesis. Consult docs/forgemind/venture-sources.json. No customer demand or willingness to pay has been measured. Category financial defaults must not be called observed evidence; the reviewed economics will be in docs/forgemind/venture-review.md. Naming remains unresolved. No outreach, spending, deployment or application implementation.",
+  "foundationId": "foundation_mty0duy5",
+  "goal": "Relayne nach den lokalen Implementierungen von Recovery Agent, Living Recovery Plans und KI-generierten Anwendungstests gezielt verbessern: vorhandene Ergebnisse berücksichtigen, offene Validierungslücken priorisieren und den kleinsten reversiblen nächsten Schritt mit messbaren Abnahmekriterien bestimmen. Keine bereits implementierten Funktionen neu bauen. Kundenbedarf, Modellqualität und Live-Infrastruktur sind nicht validiert. Keine kostenpflichtigen Modellaufrufe, Produktionsverbindungen, Veröffentlichungen, Kundenkontakte oder Preisänderungen.",
   "goalSource": "user",
   "nextStory": {
     "acceptanceCriteria": [
@@ -148,9 +148,9 @@
     "decisionState": "draft",
     "definitionOfDone": "Relevant tests pass or gaps are recorded.",
     "dependsOn": [
-      "foundation_mtwgrrsd_epic_1"
+      "foundation_mty0duy5_epic_1"
     ],
-    "id": "foundation_mtwgrrsd_story_1",
+    "id": "foundation_mty0duy5_story_1",
     "revision": 1,
     "state": "ready",
     "title": "Implement the smallest reversible outcome slice"

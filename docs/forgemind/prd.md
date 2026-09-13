@@ -4,14 +4,14 @@
 
 ```json
 {
-  "id": "foundation_mtwgrrsd_prd",
+  "id": "foundation_mty0duy5_prd",
   "revision": 1,
   "decisionState": "draft",
   "state": "ready",
   "dependsOn": [
-    "foundation_mtwgrrsd_context"
+    "foundation_mty0duy5_context"
   ],
-  "outcome": "Validate the Aivana native RDP incident workbench for DACH IT administrators and small MSPs. Compare sourced alternatives and evaluate operator-approved recovery plus incident evidence as the differentiation hypothesis. Consult docs/forgemind/venture-sources.json. No customer demand or willingness to pay has been measured. Category financial defaults must not be called observed evidence; the reviewed economics will be in docs/forgemind/venture-review.md. Naming remains unresolved. No outreach, spending, deployment or application implementation.",
+  "outcome": "Relayne nach den lokalen Implementierungen von Recovery Agent, Living Recovery Plans und KI-generierten Anwendungstests gezielt verbessern: vorhandene Ergebnisse berücksichtigen, offene Validierungslücken priorisieren und den kleinsten reversiblen nächsten Schritt mit messbaren Abnahmekriterien bestimmen. Keine bereits implementierten Funktionen neu bauen. Kundenbedarf, Modellqualität und Live-Infrastruktur sind nicht validiert. Keine kostenpflichtigen Modellaufrufe, Produktionsverbindungen, Veröffentlichungen, Kundenkontakte oder Preisänderungen.",
   "scope": "One reversible, measurable thin slice.",
   "acceptanceCriteria": [
     "Implement the smallest useful slice.",

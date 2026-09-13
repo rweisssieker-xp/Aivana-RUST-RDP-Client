@@ -8,6 +8,7 @@ use serde_json::json;
 
 fn suggestion() -> Suggestion {
     Suggestion {
+        action: Default::default(),
         service: "Spooler".into(),
         rationale: "Explizit genannter Dienst".into(),
     }
@@ -33,6 +34,7 @@ fn target(host: &str) -> Target {
 fn successful(c: &Case) -> Run {
     let mut r = Run::new(
         ExecutionPlan {
+            restart: false,
             service: c.service.clone(),
             desired: ServiceState::Running,
             health: HealthCheck::Http {
@@ -101,6 +103,7 @@ fn parser_accepts_only_completed_bounded_service_suggestions() {
     assert!(parse_response(&refused).is_err());
     assert!(
         Suggestion {
+            action: Default::default(),
             service: "x".repeat(129),
             rationale: "x".into()
         }
@@ -109,6 +112,7 @@ fn parser_accepts_only_completed_bounded_service_suggestions() {
     );
     assert!(
         Suggestion {
+            action: Default::default(),
             service: "x".into(),
             rationale: "x".repeat(4097)
         }
@@ -225,4 +229,76 @@ fn encrypted_store_roundtrips_and_rejects_corruption_and_bounds() {
     std::fs::write(&p, b"broken").unwrap();
     assert!(Book::load(&p).is_err());
     std::fs::remove_file(p).unwrap();
+}
+
+#[test]
+fn restart_requires_action_binding_failed_baseline_and_intermediate_stop() {
+    let mut c = case();
+    c.action = RepairAction::Restart;
+    let mut r = successful(&c);
+    r.plan.restart = true;
+    r.hash = r.plan.hash().unwrap();
+    r.targets[0].before = Some(ServiceState::Running);
+    r.targets[0].evidence=vec![r#"{"service":"Spooler","state":"Running","dependentRunning":[],"prerequisiteStopped":[]}"#.into(),r#"{"service":"Spooler","before":"Running","desired":"Running","actual":"Running","verified":true,"stoppedVerified":true,"rollbackAttempted":false,"rollbackVerified":false,"problem":""}"#.into()];
+    assert_eq!(outcome(&c, &[r.clone()]), Outcome::Verified);
+    for mode in 0..4 {
+        let mut changed = r.clone();
+        match mode {
+            0 => {
+                changed.targets[0].evidence[1] = changed.targets[0].evidence[1]
+                    .replace("\"stoppedVerified\":true", "\"stoppedVerified\":false")
+            }
+            1 => changed.targets[0].baseline.as_mut().unwrap().passed = true,
+            2 => {
+                changed.plan.restart = false;
+                changed.hash = changed.plan.hash().unwrap();
+            }
+            _ => changed.targets[0].before = Some(ServiceState::Stopped),
+        }
+        assert_eq!(outcome(&c, &[changed]), Outcome::Unverified);
+    }
+    let mut failed = r.clone();
+    failed.finished = None;
+    failed.targets[0].phase = Phase::Verify;
+    failed
+        .finish_health(HealthEvidence {
+            at: Utc::now(),
+            passed: false,
+            detail: "failure".into(),
+        })
+        .unwrap();
+    assert_eq!(failed.targets[0].phase, Phase::Restore);
+    failed.assess_mutation(r#"{"service":"Spooler","before":"Running","desired":"Running","actual":"Running","verified":true}"#,true).unwrap();
+    failed.advance();
+    assert_eq!(outcome(&c, &[failed]), Outcome::Failed);
+}
+#[test]
+fn legacy_cases_and_plan_serialization_remain_unchanged() {
+    let c = case();
+    let serialized = serde_json::to_value(&c).unwrap();
+    assert!(serialized.get("action").is_none());
+    assert_eq!(
+        serde_json::from_value::<Case>(serialized).unwrap().action,
+        RepairAction::Start
+    );
+    let r = successful(&c);
+    let json = serde_json::to_value(&r.plan).unwrap();
+    assert!(json.get("restart").is_none());
+    let legacy: ExecutionPlan = serde_json::from_value(json).unwrap();
+    assert_eq!(legacy.hash().unwrap(), r.plan.hash().unwrap());
+    let mut restart = legacy.clone();
+    restart.restart = true;
+    assert_ne!(restart.hash().unwrap(), legacy.hash().unwrap());
+    assert!(
+        parse_response(&response(
+            r#"{"service":"Spooler","rationale":"Explicit restart","action":"Restart"}"#
+        ))
+        .is_ok()
+    );
+    assert!(
+        parse_response(&response(
+            r#"{"service":"Spooler","rationale":"x","action":"Delete"}"#
+        ))
+        .is_err()
+    );
 }

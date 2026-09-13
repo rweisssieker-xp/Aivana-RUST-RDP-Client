@@ -15,6 +15,8 @@ use std::{
 };
 
 const DRAFT_LIMIT: usize = 256 * 1024;
+#[path = "health_suggestions_panel.rs"]
+mod health_suggestions_panel;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Draft {
@@ -27,6 +29,7 @@ impl Default for Draft {
     fn default() -> Self {
         Self {
             plan: ExecutionPlan {
+                restart: false,
                 service: String::new(),
                 desired: ServiceState::Running,
                 health: HealthCheck::Http {
@@ -106,6 +109,7 @@ fn receipt_metadata(references: &[String]) -> Vec<String> {
         .collect()
 }
 pub(super) struct PromotionState {
+    health_ai: health_suggestions_panel::State,
     draft: Draft,
     labs: Vec<test_lab::Journal>,
     production: Option<Uuid>,
@@ -134,6 +138,7 @@ impl Default for PromotionState {
             ),
         };
         Self {
+            health_ai: Default::default(),
             draft,
             labs: vec![],
             production: None,
@@ -153,6 +158,59 @@ impl Default for PromotionState {
     }
 }
 impl PromotionState {
+    fn health_binding(
+        &self,
+        context: &crate::health_suggestions::Context,
+    ) -> anyhow::Result<String> {
+        use sha2::{Digest, Sha256};
+        Ok(format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&(&self.draft, context))?)
+        ))
+    }
+    fn adopt_health_suggestion(
+        &mut self,
+        binding: &str,
+        context: &crate::health_suggestions::Context,
+        proposal: &crate::health_suggestions::Proposal,
+    ) -> anyhow::Result<()> {
+        self.can_adopt_recovery()?;
+        context.validate()?;
+        anyhow::ensure!(
+            context.service == self.draft.plan.service && self.health_binding(context)? == binding,
+            "Entwurf oder Beschreibung geändert; neuen Vorschlag erstellen"
+        );
+        let health = proposal.health()?;
+        self.draft.plan.health = health;
+        self.draft.refs.clear();
+        self.receipt_info.clear();
+        self.acknowledged = false;
+        self.password.clear();
+        self.http_values = "{}".into();
+        self.health_ai = Default::default();
+        self.notice = "Geprüfte Anwendungstests übernommen. Alte Belege und Freigaben verworfen; neue Generalprobe erforderlich.".into();
+        Ok(())
+    }
+    pub(super) fn adopt_contract(&mut self, plan: &ExecutionPlan) -> anyhow::Result<()> {
+        self.can_adopt_recovery()?;
+        promotion::validate(plan)?;
+        self.health_ai = Default::default();
+        self.draft = Draft {
+            plan: plan.clone(),
+            refs: vec![],
+            recovery_case: None,
+        };
+        self.production = None;
+        self.lab = None;
+        self.user.clear();
+        self.password.clear();
+        self.http_values = "{}".into();
+        self.acknowledged = false;
+        self.receipt_info.clear();
+        self.initialized = false;
+        self.notice = "Neue Generalprobe vorbereitet. Zuordnung und Gastzugänge vor Ausführung prüfen; alte Belege wurden nicht übernommen.".into();
+        Ok(())
+    }
     pub(super) fn can_adopt_recovery(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
             !self.blocked,
@@ -170,12 +228,15 @@ impl PromotionState {
     pub(super) fn adopt_recovery(&mut self, case: &crate::recovery::Case) -> anyhow::Result<()> {
         self.can_adopt_recovery()?;
         crate::recovery::Suggestion {
+            action: case.action,
             service: case.service.clone(),
             rationale: case.rationale.clone(),
         }
         .validate()?;
+        self.health_ai = Default::default();
         self.draft = Draft::default();
         self.draft.plan.service = case.service.clone();
+        self.draft.plan.restart = case.action == crate::recovery::RepairAction::Restart;
         self.draft.recovery_case = Some(case.id);
         self.production = None;
         self.lab = None;
@@ -195,14 +256,130 @@ impl PromotionState {
 mod recovery_tests {
     use super::*;
 
+    #[test]
+    fn health_suggestions_adoption_revokes_old_authority_and_preserves_targets() {
+        let mut state = PromotionState::default();
+        state.blocked = false;
+        state.draft.plan = crate::promotion::tests::plan();
+        let original = state.draft.plan.clone();
+        state.draft.refs = vec!["old-proof".into()];
+        state.acknowledged = true;
+        state.password = "old-secret".into();
+        state.http_values = "old-values".into();
+        let context = crate::health_suggestions::Context {
+            service: original.service.clone(),
+            incident: "Ausfall".into(),
+            workflow: "Katalog öffnen".into(),
+        };
+        let proposal = crate::health_suggestions::Proposal {
+            port: Some(8081),
+            tls: Some(false),
+            steps: vec![crate::health_suggestions::Step {
+                path: "/ready".into(),
+                status: 200,
+                contains: "ready".into(),
+                rationale: "Anwendungsbereitschaft".into(),
+            }],
+            assumptions: vec![],
+            missing: vec![],
+        };
+        let binding = state.health_binding(&context).unwrap();
+        state
+            .adopt_health_suggestion(&binding, &context, &proposal)
+            .unwrap();
+        assert_eq!(state.draft.plan.service, original.service);
+        assert_eq!(
+            serde_json::to_value(&state.draft.plan.mappings).unwrap(),
+            serde_json::to_value(original.mappings).unwrap()
+        );
+        assert!(state.draft.refs.is_empty());
+        assert!(!state.acknowledged);
+        assert!(state.password.is_empty());
+        assert_eq!(state.http_values, "{}");
+        assert!(state.worker.is_none());
+        assert!(state.review.is_none());
+        assert_ne!(state.health_binding(&context).unwrap(), binding);
+    }
+    #[test]
+    fn health_suggestions_reject_changed_context_plan_and_pending_review() {
+        let mut state = PromotionState::default();
+        state.blocked = false;
+        state.draft.plan = crate::promotion::tests::plan();
+        let mut context = crate::health_suggestions::Context {
+            service: state.draft.plan.service.clone(),
+            incident: "Ausfall".into(),
+            workflow: String::new(),
+        };
+        let proposal = crate::health_suggestions::Proposal {
+            port: Some(8081),
+            tls: Some(false),
+            steps: vec![crate::health_suggestions::Step {
+                path: "/ready".into(),
+                status: 200,
+                contains: "ready".into(),
+                rationale: "Bereitschaft".into(),
+            }],
+            assumptions: vec![],
+            missing: vec![],
+        };
+        let binding = state.health_binding(&context).unwrap();
+        context.incident.push_str(" geändert");
+        assert!(
+            state
+                .adopt_health_suggestion(&binding, &context, &proposal)
+                .is_err()
+        );
+        let binding = state.health_binding(&context).unwrap();
+        state.draft.plan.mappings[0].production.host = "other.invalid".into();
+        assert!(
+            state
+                .adopt_health_suggestion(&binding, &context, &proposal)
+                .is_err()
+        );
+        let binding = state.health_binding(&context).unwrap();
+        state.review = Some(state.draft.clone());
+        assert!(
+            state
+                .adopt_health_suggestion(&binding, &context, &proposal)
+                .is_err()
+        );
+    }
+
     fn case() -> crate::recovery::Case {
         crate::recovery::Case {
+            action: Default::default(),
             id: Uuid::new_v4(),
             objective: "Anwendung ausgefallen".into(),
             created: Utc::now(),
             service: "AppService".into(),
             rationale: "Dienst vor Änderung prüfen".into(),
         }
+    }
+
+    #[test]
+    fn contract_rehearsal_keeps_exact_targets_but_discards_old_authority() {
+        let mut state = PromotionState::default();
+        state.blocked = false;
+        state.draft.recovery_case = Some(Uuid::new_v4());
+        state.draft.refs = vec!["old-proof".into()];
+        state.password = "old-secret".into();
+        state.http_values = "old-http-secret".into();
+        state.acknowledged = true;
+        let plan = crate::promotion::tests::plan();
+        state.adopt_contract(&plan).unwrap();
+        assert_eq!(
+            state.draft.plan.mappings[0].production.host,
+            "prod.example.invalid"
+        );
+        assert_eq!(state.draft.plan.service, "Spooler");
+        assert!(state.draft.refs.is_empty() && state.draft.recovery_case.is_none());
+        assert!(state.password.is_empty() && !state.acknowledged);
+        assert_eq!(state.http_values, "{}");
+        assert!(state.worker.is_none() && state.review.is_none());
+        state.review = Some(state.draft.clone());
+        let before = state.draft.plan.hash().unwrap();
+        assert!(state.adopt_contract(&plan).is_err());
+        assert_eq!(state.draft.plan.hash().unwrap(), before);
     }
 
     #[test]
@@ -274,6 +451,22 @@ fn current_production(plan: &ExecutionPlan, profiles: &[ConnectionProfile]) -> a
     Ok(())
 }
 impl AivanaApp {
+    pub(super) fn promotion_contract_source(&self) -> anyhow::Result<(ExecutionPlan, Vec<String>)> {
+        self.promotion.can_adopt_recovery()?;
+        current_production(&self.promotion.draft.plan, &self.profiles)?;
+        Ok((
+            self.promotion.draft.plan.clone(),
+            self.promotion.draft.refs.clone(),
+        ))
+    }
+    pub(super) fn prepare_contract_rehearsal(
+        &mut self,
+        plan: &ExecutionPlan,
+    ) -> anyhow::Result<()> {
+        current_production(plan, &self.profiles)?;
+        self.promotion.adopt_contract(plan)?;
+        self.persist_recovery_promotion()
+    }
     pub(super) fn persist_recovery_promotion(&mut self) -> anyhow::Result<()> {
         if let Err(e) = save(&self.promotion.draft) {
             self.promotion.blocked = true;
@@ -306,6 +499,11 @@ impl AivanaApp {
     pub(super) fn promotion_view(&mut self, ui: &mut Ui) {
         self.poll_promotion();
         let recovery_actions_allowed = self.recovery_actions_allowed();
+        let health_model = self.autopilot.settings.openai_model.clone();
+        let health_incident = self
+            .promotion
+            .recovery_case()
+            .and_then(|id| self.recovery_objective_for(id));
         let state = &mut self.promotion;
         if !state.initialized {
             state.initialized = true;
@@ -327,7 +525,7 @@ impl AivanaApp {
             && (state.draft.recovery_case.is_none() || recovery_actions_allowed), |ui| {
             if state.review.is_none() {
                 if state.draft.recovery_case.is_some() {
-                    ui.label(format!("Recovery-Dienst: {} → Running", state.draft.plan.service));
+                    ui.label(format!("Recovery-Dienst: {} → Running · Neustart: {}", state.draft.plan.service, state.draft.plan.restart));
                 } else {
                 ui.horizontal(|ui| { ui.label("Windows-Dienst"); ui.text_edit_singleline(&mut state.draft.plan.service); });
                 ui.horizontal(|ui| {
@@ -369,6 +567,7 @@ impl AivanaApp {
                 }
                 if let Some(i) = remove { state.draft.plan.mappings.remove(i); }
                 if state.draft.plan.hash().ok() != before { state.draft.refs.clear(); state.receipt_info.clear(); state.acknowledged = false; }
+                state.health_suggestions_ui(ui, &health_model, health_incident.as_deref());
                 ui.separator();
                 ui.horizontal(|ui| { ui.label("Gastbenutzer für alle zugeordneten Klone"); ui.text_edit_singleline(&mut state.user); });
                 ui.horizontal(|ui| { ui.label("Gastpasswort (nur im Arbeitsspeicher)"); ui.add(egui::TextEdit::singleline(&mut state.password).password(true)); });
@@ -391,7 +590,7 @@ impl AivanaApp {
             }
             if let Some(review) = state.review.clone() {
                 ui.separator(); ui.strong("Generalprobe zur Ausführung prüfen");
-                ui.label(format!("Dienst {} → {:?} · {} Klone", review.plan.service, review.plan.desired, review.plan.mappings.len()));
+                ui.label(format!("Dienst {} → {:?} · Neustart: {} · {} Klone", review.plan.service, review.plan.desired, review.plan.restart, review.plan.mappings.len()));
                 if let HealthCheck::Http { port, tls, path, status, contains, followups } = &review.plan.health {
                     ui.label(format!("HTTP GET {}://{}:{port}{path} · Status {status} · Antwort enthält: {}", if *tls { "https" } else { "http" }, if *tls { "localhost" } else { "127.0.0.1" }, if contains.is_empty() { "(kein Antwortmuster)" } else { contains }));
                     ui.label(format!("Produktion: identischer Pfad {path} und Port {port} am jeweiligen Produktionshost."));
@@ -430,12 +629,12 @@ impl AivanaApp {
                                             anyhow::ensure!(!cancel.load(Ordering::Acquire), "Abbruch angefordert");
                                             crate::equivalence::observe(&outcome.draft.plan, &lab, &user, &password)?;
                                             anyhow::ensure!(!cancel.load(Ordering::Acquire), "Abbruch angefordert");
-                                            let receipt = test_lab::execute_bound_test_with_values(lab, user.clone(), password.clone(), outcome.draft.plan.service.clone(), outcome.draft.plan.desired == ServiceState::Running, health.clone(), hash.clone(),http_values.clone())?;
+                                            let receipt = test_lab::execute_bound_repair_with_values(lab, user.clone(), password.clone(), outcome.draft.plan.service.clone(), outcome.draft.plan.desired == ServiceState::Running, health.clone(), hash.clone(),http_values.clone(),outcome.draft.plan.restart)?;
                                             outcome.draft.refs.push(receipt.reference());
                                             if let Err(e) = save(&outcome.draft) { outcome.storage_failed = true; return Err(e); }
                                             anyhow::ensure!(receipt.passed && !receipt.restored, "Generalprobe fehlgeschlagen; weitere Klone bleiben unverändert");
                                         }
-                                        promotion::check_receipts(&outcome.draft.plan, &outcome.draft.refs, Utc::now())
+                                        promotion::check_rehearsal_receipts(&outcome.draft.plan, &outcome.draft.refs, Utc::now())
                                     })();
                                     if result.is_err() { outcome.notice = "Generalprobe oder Belegspeicherung fehlgeschlagen. Keine Produktionsfreigabe; Lab-Journale prüfen. Erfolgreiche vorherige Klone können geändert sein.".into(); }
                                     if cancel.load(Ordering::Acquire) { outcome.notice = "Abbruch angefordert; die laufende Probe wurde abgewartet und weitere Klone werden nicht gestartet. Vorhandene Belege bleiben gespeichert. Eine Produktionsvorbereitung erfordert weiterhin vollständige gültige Belege und eine neue ausdrückliche Aktion.".into(); }
@@ -480,6 +679,9 @@ impl AivanaApp {
         }
         if !state.draft.refs.is_empty() {
             ui.small("Belegstatus wird bei der Produktionsvorbereitung erneut geprüft; maximal eine Stunde gültig.");
+            if ui.button("Wiederherstellungsplan pflegen …").clicked() {
+                self.view = View::RecoveryPlans;
+            }
         }
         ui.label(&state.notice);
         if let Some(draft) = prepare {

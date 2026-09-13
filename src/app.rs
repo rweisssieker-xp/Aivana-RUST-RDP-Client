@@ -43,27 +43,33 @@ const ACTIVE_GOAL_OBJECTIVE: &str =
     "bau das weiter aus max. usp max gui friendly max ai ki llm usage";
 
 mod capture;
+mod release_panel;
 mod change_history_panel;
 mod collaboration_capture;
 mod collaboration_panel;
 mod connection_probe;
+mod contracts_panel;
 mod desktop;
 mod execution_panel;
 mod incident_panel;
 mod insights_panel;
 mod integrations_panel;
 mod intelligence_panel;
+mod diagnostic_panel;
 mod mission_panel;
 mod operations_panel;
 mod promotion_panel;
 mod protocol_panel;
 mod recordings_panel;
+mod recovery_daemon_panel;
+mod recovery_extensions_panel;
 mod recovery_panel;
 mod session_windows;
 mod teaching_panel;
 mod team_panel;
 mod terminal_panel;
 mod test_lab_panel;
+mod change_trial_panel;
 mod vision_panel;
 mod workflow_ocr;
 mod workflow_panel;
@@ -92,6 +98,7 @@ mod tw {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
+    Release,
     Missions,
     Operations,
     SessionWindows,
@@ -110,6 +117,9 @@ enum View {
     Incident,
     Promotion,
     Recovery,
+    RecoveryPlans,
+    RecoveryDaemon,
+    RecoveryExtensions,
     Connections,
     Sessions,
     Approvals,
@@ -205,6 +215,9 @@ pub struct AivanaApp {
     incident: incident_panel::IncidentState,
     promotion: promotion_panel::PromotionState,
     recovery: recovery_panel::RecoveryState,
+    contracts: contracts_panel::ContractsState,
+    recovery_daemon: recovery_daemon_panel::RecoveryDaemonState,
+    recovery_extensions: recovery_extensions_panel::ExtensionsState,
     workflow_ocr: workflow_ocr::WorkflowOcrState,
     collaboration_capture: collaboration_capture::CaptureState,
 }
@@ -315,6 +328,9 @@ impl AivanaApp {
             incident: incident_panel::IncidentState::default(),
             promotion: promotion_panel::PromotionState::default(),
             recovery: recovery_panel::RecoveryState::default(),
+            contracts: contracts_panel::ContractsState::default(),
+            recovery_daemon: recovery_daemon_panel::RecoveryDaemonState::default(),
+            recovery_extensions: recovery_extensions_panel::ExtensionsState::default(),
             workflow_ocr: workflow_ocr::WorkflowOcrState::default(),
             collaboration_capture: collaboration_capture::CaptureState::default(),
         }
@@ -1164,6 +1180,7 @@ impl eframe::App for AivanaApp {
         self.poll_vision();
         self.poll_intelligence();
         self.poll_insights();
+        self.poll_contracts();
         self.poll_execution();
         self.poll_change_history();
         self.poll_test_lab();

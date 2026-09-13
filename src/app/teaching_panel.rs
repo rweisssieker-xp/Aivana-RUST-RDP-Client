@@ -35,6 +35,7 @@ pub(super) fn send_teaching_manual_input(
 #[derive(Default)]
 pub(super) struct TeachingState {
     pub teacher: Teacher,
+    compiler: CompilerState,
     cursor: usize,
     target: Option<Uuid>,
     approved: bool,
@@ -871,6 +872,20 @@ impl AivanaApp {
                 }
             });
         }
+        let mut compiled = None;
+        ui.add_enabled_ui(editable, |ui| {
+            compiled = self.teaching.compiler.show(
+                ui,
+                &self.teaching.teacher.procedure,
+                &self.autopilot.settings.openai_model,
+            );
+        });
+        if let Some(procedure) = compiled {
+            self.teaching.reset_replay();
+            self.teaching.queue.clear();
+            self.teaching.teacher.procedure = procedure;
+            self.status = "Compiler-Entwurf übernommen; bisherige Freigaben verworfen. Speichern oder Workflow vorbereiten.".into();
+        }
         if ui
             .add_enabled(
                 editable,
@@ -1396,5 +1411,137 @@ mod tests {
             state.teacher.procedure.steps[0],
             Step::Click { x: 50, .. }
         ));
+    }
+}
+
+#[derive(Default)]
+struct CompilerState {
+    explanation: String,
+    context: Option<crate::procedure_compiler::Context>,
+    consent: bool,
+    reviewed: bool,
+    model: String,
+    proposal: Option<crate::procedure_compiler::Proposal>,
+    pending: Option<std::sync::mpsc::Receiver<Result<crate::procedure_compiler::Proposal, String>>>,
+    notice: String,
+}
+impl CompilerState {
+    fn sync(&mut self, source: &teaching::Procedure, model: &str) {
+        if self.model != model
+            || self
+                .context
+                .as_ref()
+                .is_some_and(|c| !c.matches(source, &self.explanation))
+        {
+            self.context = None;
+            self.proposal = None;
+            self.pending = None;
+            self.consent = false;
+            self.reviewed = false;
+        }
+        self.model = model.into();
+    }
+    fn show(
+        &mut self,
+        ui: &mut Ui,
+        source: &teaching::Procedure,
+        model: &str,
+    ) -> Option<teaching::Procedure> {
+        self.sync(source, model);
+        let mut adopted = None;
+        egui::CollapsingHeader::new("Expertenverfahren mit KI kompilieren").show(ui,|ui| {
+            ui.label("Die Demonstration fachlich erklären: Welche Eingaben variieren, welcher sichtbare Zustand bestätigt jeden Schritt? Keine Geheimnisse eingeben.");
+            ui.add(egui::TextEdit::multiline(&mut self.explanation).desired_rows(3).desired_width(720.0).char_limit(4096));
+            self.sync(source,model);
+            if self.context.is_none() {
+                match crate::procedure_compiler::Context::new(source,&self.explanation) {
+                    Ok(context)=>self.context=Some(context),
+                    Err(error)=>{ui.label(error.to_string()); return;}
+                }
+            }
+            let context=self.context.clone().unwrap();
+            ui.label(format!("Modell: {model}. Exakter Versandinhalt (nur diese Metadaten und Erklärung):"));
+            egui::ScrollArea::vertical().id_salt("compiler_visible_input").max_height(180.0).show(ui,|ui| {ui.monospace(serde_json::to_string_pretty(&context).unwrap_or_default());});
+            ui.small("Keine Bilder, Parameterwerte, Profile oder Sitzungsdaten. Der Vorschlag ergänzt ausschließlich benannte Eingabeplätze und bekannte sichtbare Prüfanker; vorhandene Aktionen bleiben erhalten.");
+            ui.checkbox(&mut self.consent,"Diesen sichtbaren Inhalt für diesen Vorschlag an OpenAI senden");
+            if ui.add_enabled(self.consent && self.pending.is_none(),egui::Button::new("Verfahrensvorschlag erstellen")).clicked() {
+                let (tx,rx)=std::sync::mpsc::channel(); self.pending=Some(rx); self.proposal=None; self.reviewed=false; self.consent=false;
+                self.notice="KI erstellt einen ungeprüften Vorschlag …".into();
+                let model=model.to_owned(); let context=context.clone();
+                std::thread::spawn(move || {let _=tx.send(crate::procedure_compiler::cloud_suggest(&context,&model).map_err(|e|e.to_string()));});
+            }
+            if let Some(rx)=&self.pending {
+                match rx.try_recv() {
+                    Ok(result)=>{self.pending=None;match result {Ok(p)=>{self.proposal=Some(p);self.notice="Vorschlag fachlich prüfen; keine Ausführung erfolgt.".into();},Err(e)=>self.notice=e}},
+                    Err(std::sync::mpsc::TryRecvError::Disconnected)=>{self.pending=None;self.notice="KI-Compiler unterbrochen".into();},
+                    Err(std::sync::mpsc::TryRecvError::Empty)=>{ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));}
+                }
+            }
+            ui.label(&self.notice);
+            if let Some(proposal)=&mut self.proposal {
+                let mut changed=false;
+                for parameter in &mut proposal.parameters {
+                    ui.horizontal(|ui| {ui.label(format!("Schritt {}: Eingabeplatz → Parameter",parameter.step.saturating_add(1))); changed |= ui.text_edit_singleline(&mut parameter.name).changed();});
+                    ui.small(&parameter.reason);
+                }
+                for assertion in &proposal.assertions {
+                    let phase=assertion.after.map(|i|format!("nach Schritt {}",i.saturating_add(1))).unwrap_or_else(||"am Ende".into());
+                    let anchor=context.anchors.get(assertion.anchor).map(|a|format!("{} / {}",a.label,a.context)).unwrap_or_else(||"UNBEKANNTER ANKER".into());
+                    ui.label(format!("Prüfen {phase}: {anchor} — {}",assertion.reason));
+                }
+                for assumption in &proposal.assumptions { ui.label(format!("Annahme: {assumption}")); }
+                for missing in &proposal.missing { ui.colored_label(Color32::YELLOW,format!("Fehlt: {missing}")); }
+                if changed {self.reviewed=false;}
+                let preview=proposal.adopt(&context,source,true);
+                if let Err(error)=&preview {ui.colored_label(Color32::YELLOW,error.to_string());}
+                ui.add_enabled(preview.is_ok(),egui::Checkbox::new(&mut self.reviewed,"Alle Änderungen, Prüfbedingungen und Annahmen fachlich geprüft"));
+                if ui.add_enabled(self.reviewed && preview.is_ok(),egui::Button::new("Geprüften Entwurf in Lernablauf übernehmen")).clicked() {
+                    adopted=proposal.adopt(&context,source,self.reviewed).ok();
+                }
+                ui.small("Danach unten verschlüsselt speichern oder als Workflow vorbereiten. Ausführung benötigt neue Ziel- und Ablaufprüfung.");
+            }
+        });
+        if adopted.is_some() {
+            self.proposal = None;
+            self.context = None;
+            self.reviewed = false;
+            self.consent = false;
+        }
+        adopted
+    }
+}
+
+#[cfg(test)]
+mod compiler_panel_tests {
+    use super::*;
+    #[test]
+    fn compiler_source_explanation_or_model_changes_drop_consent_and_review() {
+        let source = teaching::Procedure {
+            dimensions: (800, 600),
+            steps: vec![Step::TextRequired],
+            success: "Ready".into(),
+            recovery: "Cancel".into(),
+            ..Default::default()
+        };
+        for change in 0..3 {
+            let mut state = CompilerState {
+                explanation: "Kunde eingeben".into(),
+                model: "gpt-5".into(),
+                consent: true,
+                reviewed: true,
+                ..Default::default()
+            };
+            state.context =
+                Some(crate::procedure_compiler::Context::new(&source, &state.explanation).unwrap());
+            let mut current = source.clone();
+            if change == 0 {
+                current.title = "changed".into();
+            }
+            if change == 1 {
+                state.explanation = "Anderer Zweck".into();
+            }
+            state.sync(&current, if change == 2 { "gpt-6" } else { "gpt-5" });
+            assert!(!state.consent && !state.reviewed && state.context.is_none());
+        }
     }
 }

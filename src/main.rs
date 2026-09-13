@@ -8,9 +8,13 @@ mod connection_options;
 mod diagnostics;
 mod equivalence;
 mod execution;
+mod health_suggestions;
 mod incident;
 mod integrations;
 mod intelligence;
+mod localization;
+mod release_readiness;
+mod diagnostic_lab;
 #[cfg(test)]
 mod intelligence_tests;
 mod ironrdp_client;
@@ -23,6 +27,7 @@ mod native_remoteapp;
 mod operations;
 mod package_trust;
 mod policy;
+mod procedure_compiler;
 mod profile_exchange;
 mod promotion;
 mod rd_gateway;
@@ -33,7 +38,11 @@ mod rdp_drives;
 mod recommendations;
 mod recording;
 mod recovery;
+mod recovery_contracts;
+mod recovery_daemon;
+mod recovery_tickets;
 mod remoteapp;
+mod repair_catalog;
 mod runbook;
 mod security;
 mod services;
@@ -122,6 +131,29 @@ fn main() -> eframe::Result<()> {
     install_rustls_crypto_provider();
 
     let args = std::env::args().collect::<Vec<_>>();
+    if args.iter().any(|arg| arg == "--release-readiness") {
+        let locale = match args.windows(2).find(|w| w[0] == "--language") {
+            Some(pair) => match localization::Locale::parse(&pair[1]) {
+                Some(locale) => locale,
+                None => { eprintln!("Supported locales: en-US, de, fr, it"); std::process::exit(2); }
+            },
+            None => localization::Locale::EnUs,
+        };
+        println!("{}", serde_json::to_string_pretty(&release_readiness::report(locale)).expect("static readiness report"));
+        return Ok(());
+    }
+    if args.iter().any(|arg| arg == "--recovery-worker-once") {
+        match recovery_daemon::run_once() {
+            Ok(count) => {
+                println!("Recovery background pass complete: {count}");
+                return Ok(());
+            }
+            Err(error) => {
+                eprintln!("Recovery background pass failed: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
     if args.iter().any(|arg| arg == "--help" || arg == "--ai-help") {
         println!("{}", build_cli_help());
         return Ok(());

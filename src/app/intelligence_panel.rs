@@ -5,6 +5,7 @@ use crate::operations::{JobQueue, JobStatus};
 use std::sync::mpsc;
 
 pub(super) struct IntelligenceState {
+    diagnostic: super::diagnostic_panel::State,
     book: Knowledge,
     error: Option<String>,
     objective: String,
@@ -39,6 +40,7 @@ impl Default for IntelligenceState {
                 ),
             };
         Self {
+            diagnostic: super::diagnostic_panel::State::default(),
             book,
             error,
             objective: String::new(),
@@ -161,6 +163,10 @@ impl AivanaApp {
     }
     pub(super) fn intelligence_view(&mut self, ui: &mut Ui) {
         ui.heading("Planen, prüfen & lernen");
+        let diagnostic_profile = self.selected_profile().cloned();
+        egui::CollapsingHeader::new("Ursachen durch Vergleichstests eingrenzen").default_open(true).show(ui, |ui| {
+            self.intelligence.diagnostic.draw(ui, diagnostic_profile.as_ref());
+        });
         if let Some(e) = &self.intelligence.error {
             ui.colored_label(tw::RED_600, e);
         }

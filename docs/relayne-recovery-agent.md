@@ -22,7 +22,7 @@ Der Nachweis ist historisch. Er ist keine kontinuierliche Zustandsüberwachung. 
 
 Der Schalter **Neue Recovery-Fälle und KI-Vorschläge aktivieren** deaktiviert neue Recovery-Aktionen. `RELAYNE_RECOVERY_AGENT=0` startet mit deaktiviertem Schalter; standardmäßig ist er aktiv. Bereits laufende Arbeit wird nicht mitten in einer Änderung unterbrochen. Bestehende Läufe bleiben für Ergebnisprüfung und kontrollierten Abbruch zugänglich. Die bestehende Oberfläche **Prüfen & Ausführen** bleibt ebenfalls erreichbar.
 
-Dies ist die erste lokale Produktintegration. Eine gehostete Mandantenplattform, Abrechnung, wiederkehrende Recovery-Verträge, ein Paketmarktplatz und automatische kundenseitige Ausführung sind nicht enthalten. Echte Hyper-V-/WinRM-Ausführung benötigt weiterhin die Infrastrukturabnahme aus [Klon → Produktion](relayne-promotion.md). Ein kostenpflichtiger Live-Modellaufruf und der zwanzig Fälle umfassende Vergleich zur Zeitersparnis sind keine Voraussetzung für die lokalen Softwaretests und werden nicht als durchgeführt dargestellt.
+Dies ist die erste lokale Produktintegration. Die nachfolgende Erweiterung [Lebende Wiederherstellungspläne](relayne-living-recovery-plans.md) ergänzt wiederkehrende lesende Vergleiche und Generalprobenfristen. Eine gehostete Mandantenplattform, Abrechnung, ein Paketmarktplatz und automatische kundenseitige Ausführung sind nicht enthalten. Echte Hyper-V-/WinRM-Ausführung benötigt weiterhin die Infrastrukturabnahme aus [Klon → Produktion](relayne-promotion.md). Ein kostenpflichtiger Live-Modellaufruf und der zwanzig Fälle umfassende Vergleich zur Zeitersparnis sind keine Voraussetzung für die lokalen Softwaretests und werden nicht als durchgeführt dargestellt.
 
 ## Verifikation am 12.09.2026
 

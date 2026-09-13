@@ -108,7 +108,8 @@ pub(crate) fn check_evidence(
         ensure!(
             receipt.binding == hash
                 && receipt.service == plan.service
-                && receipt.desired_running == (desired == "Running"),
+                && receipt.desired_running == (desired == "Running")
+                && receipt.restart == plan.restart,
             "Nachweis gehört zu einem anderen Auftrag"
         );
         ensure!(receipt.health == health, "HTTP-Prüfung wurde geändert");
@@ -116,7 +117,11 @@ pub(crate) fn check_evidence(
             receipt.passed
                 && !receipt.restored
                 && receipt.after == desired
-                && receipt.before != receipt.after
+                && (if plan.restart {
+                    receipt.before == "Running"
+                } else {
+                    receipt.before != receipt.after
+                })
                 && matches!(receipt.before.as_str(), "Running" | "Stopped"),
             "Kein erfolgreicher tatsächlicher Zustandswechsel im Klon nachgewiesen"
         );
@@ -134,6 +139,15 @@ pub fn check_receipts(
     references: &[String],
     now: DateTime<Utc>,
 ) -> Result<()> {
+    check_rehearsal_receipts(plan, references, now)?;
+    crate::recovery_contracts::ensure_execution_allowed(plan, references, now)
+}
+/// Validate the completed rehearsal itself, without granting production authorization.
+pub fn check_rehearsal_receipts(
+    plan: &ExecutionPlan,
+    references: &[String],
+    now: DateTime<Utc>,
+) -> Result<()> {
     ensure!(references.len() <= 32, "Zu viele Nachweise");
     let receipts = references
         .iter()
@@ -147,7 +161,7 @@ pub fn check_receipts(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{execution::Mapping, intelligence::ServiceState};
     pub fn plan() -> ExecutionPlan {
@@ -162,6 +176,7 @@ mod tests {
             detail: String::new(),
         };
         ExecutionPlan {
+            restart: false,
             service: "Spooler".into(),
             desired: ServiceState::Running,
             health: HealthCheck::Http {
@@ -265,6 +280,7 @@ mod tests {
     }
     fn receipt(plan: &ExecutionPlan, now: DateTime<Utc>) -> LabReceipt {
         seal(LabReceipt {
+            restart: false,
             id: Uuid::new_v4(),
             lab_id: plan.mappings[0].staging.profile_id.to_string(),
             vm_id: plan.mappings[0].staging.host.clone(),
@@ -280,6 +296,21 @@ mod tests {
             restored: false,
             proof_hash: String::new(),
         })
+    }
+    #[test]
+    fn restart_clone_proof_is_distinct_from_start_and_rejects_stopped_baseline() {
+        let mut plan = plan();
+        let old = receipt(&plan, Utc::now());
+        plan.restart = true;
+        assert!(check_evidence(&plan, &[old], Utc::now()).is_err());
+        let mut proof = receipt(&plan, Utc::now());
+        proof.restart = true;
+        proof.before = "Running".into();
+        proof = seal(proof);
+        assert!(check_evidence(&plan, &[proof.clone()], Utc::now()).is_ok());
+        proof.before = "Stopped".into();
+        proof = seal(proof);
+        assert!(check_evidence(&plan, &[proof], Utc::now()).is_err());
     }
     #[test]
     fn fresh_evidence_authorizes_only_exact_plan_and_transition() {
@@ -345,6 +376,17 @@ mod tests {
         );
         crate::equivalence::tests::save_fixture(&plan, &proof);
         assert!(check_receipts(&plan, &refs, now).is_ok());
+        let baseline = crate::equivalence::rehearsal_baseline(&plan, &refs, now).unwrap();
+        assert_eq!(
+            baseline.observed_at,
+            proof.started - chrono::Duration::seconds(2)
+        );
+        assert_eq!(baseline.rehearsed_at, proof.finished);
+        assert_eq!(baseline.fingerprints.len(), 1);
+        assert!(
+            crate::equivalence::rehearsal_baseline(&plan, &refs, now + chrono::Duration::hours(2))
+                .is_err()
+        );
         let mut run = crate::execution::Run::new(plan.clone(), false).unwrap();
         run.lab_receipts = refs.clone();
         let journal = crate::execution::Journal { runs: vec![run] };

@@ -154,14 +154,25 @@ pub struct Mapping {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ExecutionPlan {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub restart: bool,
     pub service: String,
     pub desired: ServiceState,
     pub health: HealthCheck,
     pub mappings: Vec<Mapping>,
 }
+pub fn is_false(value: &bool) -> bool {
+    !*value
+}
 impl ExecutionPlan {
     pub fn validate(&self) -> Result<()> {
         self.health.validate()?;
+        anyhow::ensure!(
+            !self.restart
+                || (self.desired == ServiceState::Running
+                    && matches!(self.health, HealthCheck::Http { .. })),
+            "Neustart benötigt Running und HTTP-Nachweis"
+        );
         if self.mappings.is_empty() || self.mappings.len() > 32 {
             bail!("1–32 Zielzuordnungen erforderlich");
         }
@@ -296,9 +307,18 @@ impl Run {
             && self.targets.len() == plan.mappings.len()
             && self.targets.iter().zip(&plan.mappings).all(|(t, m)| {
                 t.target.same_endpoint(&m.staging)
-                    && t.before.is_some_and(|before| before != plan.desired)
-                    && t.baseline.is_some()
+                    && t.before.is_some_and(|before| {
+                        if plan.restart {
+                            before == ServiceState::Running
+                        } else {
+                            before != plan.desired
+                        }
+                    })
+                    && t.baseline
+                        .as_ref()
+                        .is_some_and(|b| !plan.restart || !b.passed)
                     && t.health.as_ref().is_some_and(|h| h.passed)
+                    && (!plan.restart || evidenced_success(self, t))
             })
             && self
                 .finished
@@ -314,7 +334,7 @@ impl Run {
             Phase::Verify => {
                 t.phase = if evidence.passed {
                     Phase::Passed
-                } else if t.before == Some(self.plan.desired) {
+                } else if t.before == Some(self.plan.desired) && !self.plan.restart {
                     Phase::Failed
                 } else {
                     Phase::Restore
@@ -369,7 +389,10 @@ impl Run {
         {
             bail!("Antwort passt nicht zum geprüften Auftrag");
         }
-        target.phase = if v["verified"] == true && v["actual"] == desired.label() {
+        target.phase = if v["verified"] == true
+            && v["actual"] == desired.label()
+            && (!self.plan.restart || restore || v["stoppedVerified"] == true)
+        {
             if restore {
                 Phase::Restored
             } else {
@@ -408,6 +431,7 @@ pub struct LessonEvidence {
 }
 #[derive(Clone, Debug)]
 pub struct ExecutionLesson {
+    pub restart: bool,
     pub key: String,
     pub service: String,
     pub desired: ServiceState,
@@ -429,7 +453,13 @@ impl ExecutionLesson {
                 &plan.health,
             ))?)
         );
+        let key = if plan.restart {
+            format!("restart:{key}")
+        } else {
+            key
+        };
         Ok(Self {
+            restart: plan.restart,
             key,
             service: plan.service.clone(),
             desired: plan.desired,
@@ -470,7 +500,7 @@ fn evidenced_success(run: &Run, target: &TargetRun) -> bool {
     {
         return false;
     }
-    if before == run.plan.desired {
+    if before == run.plan.desired && !run.plan.restart {
         return !run.rehearsal;
     }
     target.evidence.iter().any(|text| {
@@ -480,6 +510,7 @@ fn evidenced_success(run: &Run, target: &TargetRun) -> bool {
                 && v["desired"] == run.plan.desired.label()
                 && v["actual"] == run.plan.desired.label()
                 && v["verified"] == true
+                && (!run.plan.restart || v["stoppedVerified"] == true)
         })
     })
 }
@@ -660,6 +691,7 @@ mod tests {
     }
     fn plan() -> ExecutionPlan {
         ExecutionPlan {
+            restart: false,
             service: "Spooler".into(),
             desired: ServiceState::Running,
             health: HealthCheck::Tcp { port: 80 },

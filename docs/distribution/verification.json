@@ -1,0 +1,93 @@
+{
+  "schema": "relayne-distribution-verification-v1",
+  "date": "2026-09-13",
+  "channel": "development",
+  "sale_ready": false,
+  "tests": {
+    "failed": 0,
+    "ignored": 5,
+    "filtered": 0,
+    "team_passed": 16,
+    "application_passed": 455
+  },
+  "build": {
+    "command": "cargo build --offline --bins",
+    "passed": true
+  },
+  "locales": [
+    "en-US",
+    "de",
+    "fr",
+    "it"
+  ],
+  "native_views_inspected": true,
+  "package_integrity_verified": true,
+  "installer_test_payload": "isolated fake executables, not launched",
+  "package": "C:/temp/relayne-dev-2026-09-13",
+  "files": [
+    {
+      "path": "docs/de/guide.md",
+      "sha256": "A420A6DAFE41635D18E65BDA5C74C2223F8E813C9DF1F913449DBEB91ADBAEC9",
+      "bytes": 5587
+    },
+    {
+      "path": "docs/en-US/guide.md",
+      "sha256": "7B8AD81743EE68FDED960958C6B56B7F038BB341332CB429BCF5558E1627407F",
+      "bytes": 5086
+    },
+    {
+      "path": "docs/fr/guide.md",
+      "sha256": "A5D75390D8561A0B2AC48906195380B910166256F1817B2A79A3CE479F9D9885",
+      "bytes": 5786
+    },
+    {
+      "path": "docs/it/guide.md",
+      "sha256": "5CE47FA1CD44A0CD0B51AA40D4A0AD31CBF2583DF993ECC5EB653B609FE3B068",
+      "bytes": 5338
+    },
+    {
+      "path": "Install-Relayne.ps1",
+      "sha256": "417EFA374F8E5D4880A398D7822879C86FBCDB11B5D2A300A1B64938EFBDF123",
+      "bytes": 1886
+    },
+    {
+      "path": "messages.json",
+      "sha256": "000D0289157C17F682DF328B316FAE7954508F1E1921874A174EDC9B141660B6",
+      "bytes": 2800
+    },
+    {
+      "path": "Package.Common.ps1",
+      "sha256": "1BFE0BB7C7D231EA036C2D5310B3581B1CE4D9645C0AB2C2CA2B39AF45B518BA",
+      "bytes": 3353
+    },
+    {
+      "path": "relayne_team.exe",
+      "sha256": "D8FAF43253A5F3737C340CEEC5CD7B2CBB11F3DDB06900046B8457D1AADDF739",
+      "bytes": 13640704
+    },
+    {
+      "path": "relayne.exe",
+      "sha256": "9FC1AEE9169E95712C2AF3E75B6D39016B7A7632E4975C3E0AE6814B265D3561",
+      "bytes": 85308416
+    },
+    {
+      "path": "Test-Package.ps1",
+      "sha256": "7768A58C53B2A966FD7F66E6E672B0D9E3C258A3BF52F5DDC1FBDD8B5F26D1BB",
+      "bytes": 367
+    },
+    {
+      "path": "Uninstall-Relayne.ps1",
+      "sha256": "006FE998EB133D3DA3108E33470A91D35A7A353115C671D8919E54087366AE7E",
+      "bytes": 1098
+    }
+  ],
+  "limitations": [
+    "Unsigned development package",
+    "Commercial checkout and activation disabled",
+    "Specialist UI and older documents not fully localized",
+    "Privacy and contract review pending",
+    "VAT treatment pending",
+    "Third-party license inventory blocked by missing offline metadata",
+    "No external host acceptance"
+  ]
+}

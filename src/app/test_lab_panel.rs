@@ -2,6 +2,7 @@ use super::*;
 use crate::test_lab::{self, Action, Journal};
 #[derive(Default)]
 pub(super) struct TestLabState {
+    trial: super::change_trial_panel::State,
     template: String,
     user: String,
     password: String,
@@ -57,7 +58,7 @@ impl AivanaApp {
         ui.heading("Isoliertes Hyper-V-Testlabor");
         ui.label("Generation 2 · 2 GB RAM · eigener privater Switch · differenzierende VHDX. Windows-Gast mit PowerShell Direct und lokalem Gastkonto erforderlich.");
         ui.label("Vorlage: offline, keinem bestehenden VM-Laufwerk zugeordnet, eigenständige VHDX mit Schreibschutz. Den Eltern-Datenträger unverändert lassen, solange ein Lab besteht.");
-        ui.add_enabled_ui(state.worker.is_none(),|ui| {
+        ui.add_enabled_ui(state.worker.is_none() && !state.trial.busy(),|ui| {
    if ui.button("Host-Voraussetzungen prüfen (nur lesen)").clicked(){state.review=Some((Action::Preflight,None));}
    ui.horizontal(|ui|{ui.label("Offline-Vorlage VHDX");ui.text_edit_singleline(&mut state.template);});
    if ui.button("Neues Lab vorbereiten …").clicked(){match test_lab::new_lab(&state.template){Ok(j)=>state.review=Some((Action::Create,Some(j))),Err(e)=>state.notice=format!("{e:#}")};}
@@ -101,5 +102,12 @@ impl AivanaApp {
         }
         ui.separator();
         ui.label(&state.notice);
+        if let Some(journal) = state.selected.and_then(|i| state.labs.get(i)).cloned() {
+            state.trial.draw(ui, &journal, state.worker.is_some());
+        } else {
+            ui.separator();
+            ui.heading("Änderung & Fehler im Klon erproben");
+            ui.label("Wähle einen laufenden Relayne-Klon, um eine Starttypänderung, einen gezielten Dienstausfall und den Rückweg per Checkpoint zu prüfen.");
+        }
     }
 }

@@ -209,6 +209,26 @@ fn native_words(_: &FrameUpdate) -> Result<Vec<Word>> {
     bail!("Lokale OCR benötigt Windows 10/11 und ein installiertes OCR-Sprachpaket")
 }
 #[cfg(windows)]
+fn keep_ocr_runtime_alive() -> Result<()> {
+    // windows-core caches agile WinRT activation factories for the process lifetime.
+    // Releasing the final worker apartment permits deferred COM server unloading,
+    // leaving those cached factories unusable when the next OCR worker arrives.
+    // Keep one MTA usage cookie for the same lifetime; Windows releases it at exit.
+    // The opaque cookie is retained as an integer, never dereferenced or shared as
+    // an interface pointer. Per-thread RoInitialize/RoUninitialize stay balanced.
+    static MTA_USAGE: std::sync::OnceLock<std::result::Result<usize, String>> =
+        std::sync::OnceLock::new();
+    match MTA_USAGE.get_or_init(|| unsafe {
+        windows::Win32::System::Com::CoIncrementMTAUsage()
+            .map(|cookie| cookie.0 as usize)
+            .map_err(|error| error.to_string())
+    }) {
+        Ok(_) => Ok(()),
+        Err(error) => bail!("Windows-OCR-Laufzeit konnte nicht gehalten werden: {error}"),
+    }
+}
+
+#[cfg(windows)]
 fn native_words(f: &FrameUpdate) -> Result<Vec<Word>> {
     use windows::{
         Graphics::Imaging::{BitmapAlphaMode, BitmapPixelFormat, SoftwareBitmap},
@@ -216,6 +236,7 @@ fn native_words(f: &FrameUpdate) -> Result<Vec<Word>> {
         Storage::Streams::DataWriter,
         Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize},
     };
+    keep_ocr_runtime_alive()?;
     unsafe {
         RoInitialize(RO_INIT_MULTITHREADED)?;
     }
@@ -382,4 +403,18 @@ fn native_ocr_generated_nonsecret_image() {
             })
             .is_ok()
     );
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn native_ocr_survives_idle_worker_teardown() {
+    std::thread::spawn(native_ocr_generated_nonsecret_image)
+        .join()
+        .unwrap();
+    // Windows can unload idle COM servers after its deferred cleanup interval.
+    // A fast back-to-back test does not exercise the cached factory's lifetime.
+    std::thread::sleep(std::time::Duration::from_secs(35));
+    std::thread::spawn(native_ocr_generated_nonsecret_image)
+        .join()
+        .unwrap();
 }

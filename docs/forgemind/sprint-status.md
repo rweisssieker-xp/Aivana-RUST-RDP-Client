@@ -4,16 +4,16 @@
 
 ```json
 {
-  "id": "foundation_mtwgrrsd_sprint",
+  "id": "foundation_mty0duy5_sprint",
   "revision": 1,
   "decisionState": "draft",
   "state": "ready",
   "dependsOn": [
-    "foundation_mtwgrrsd_story_1"
+    "foundation_mty0duy5_story_1"
   ],
   "stories": [
     {
-      "id": "foundation_mtwgrrsd_story_1",
+      "id": "foundation_mty0duy5_story_1",
       "state": "ready"
     }
   ],

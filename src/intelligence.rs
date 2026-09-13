@@ -184,8 +184,36 @@ $s.Refresh(); [pscustomobject]@{{service='{service}';before=$before;desired='{de
         source: format!("Relayne service state · {} · {service}", target.host),
     };
     crate::operations::winrm(&mut spec, &endpoint, &body);
+    // PowerShell -Command - needs a blank line to submit a multiline statement.
+    spec.stdin.push('\n');
     Ok(spec)
 }
+/// A bounded restart; state restoration cannot recover in-memory application state.
+pub fn restart_spec(target: &Target, service: &str) -> Result<CommandSpec> {
+    service_spec(target, service, None)?;
+    let endpoint = Endpoint::new(&target.host, "", target.port).map_err(anyhow::Error::msg)?;
+    let body = format!(
+        r#"$s=Get-Service -Name '{service}' -ErrorAction Stop; $s.Refresh(); $before=$s.Status.ToString();
+if ($before -ne 'Running') {{ throw 'Restart requires Running; no mutation attempted' }};
+if (@($s.DependentServices | Where-Object Status -eq Running).Count -gt 0) {{ throw 'Running dependents; no mutation attempted' }};
+if (@($s.ServicesDependedOn | Where-Object Status -ne Running).Count -gt 0) {{ throw 'Inactive prerequisites; no mutation attempted' }};
+$verified=$false;$stoppedVerified=$false;$rollbackAttempted=$false;$rollbackVerified=$false;$problem='';
+try {{ Stop-Service -InputObject $s -ErrorAction Stop; $s.WaitForStatus('Stopped',[TimeSpan]::FromSeconds(20)); $s.Refresh(); if ($s.Status.ToString() -ne 'Stopped') {{ throw 'Stop postcondition failed' }}; $stoppedVerified=$true;
+Start-Service -InputObject $s -ErrorAction Stop; $s.WaitForStatus('Running',[TimeSpan]::FromSeconds(20)); $s.Refresh(); if ($s.Status.ToString() -ne 'Running') {{ throw 'Start postcondition failed' }}; $verified=$true }}
+catch {{ $problem='Restart or verification failed'; $rollbackAttempted=$true; try {{ Start-Service -InputObject $s -ErrorAction Stop; $s.WaitForStatus('Running',[TimeSpan]::FromSeconds(20)); $s.Refresh(); $rollbackVerified=($s.Status.ToString() -eq 'Running') }} catch {{ $problem='Restart and restoration require manual inspection' }} }};
+$s.Refresh(); [pscustomobject]@{{service='{service}';before=$before;desired='Running';actual=$s.Status.ToString();verified=$verified;stoppedVerified=$stoppedVerified;rollbackAttempted=$rollbackAttempted;rollbackVerified=$rollbackVerified;problem=$problem}}"#
+    );
+    let mut spec = CommandSpec {
+        program: String::new(),
+        args: vec![],
+        stdin: String::new(),
+        source: format!("Relayne service restart · {} · {service}", target.host),
+    };
+    crate::operations::winrm(&mut spec, &endpoint, &body);
+    spec.stdin.push('\n');
+    Ok(spec)
+}
+
 pub fn captured_state(stdout: &str, service: &str) -> Result<ServiceState> {
     let v: serde_json::Value = serde_json::from_str(stdout.trim())?;
     if v["service"]
@@ -417,6 +445,76 @@ mod tests {
         assert!(!s.stdin.contains("-Force"));
         assert!(service_spec(&target(), "a';Stop-Service x", None).is_err());
     }
+    #[test]
+    #[cfg(windows)]
+    fn fake_restart_mutates_in_order_and_restores_running() {
+        use std::{
+            io::Write,
+            process::{Command, Stdio},
+        };
+        for mode in [
+            "success",
+            "start_failure",
+            "wrong_state",
+            "dependent",
+            "restore",
+        ] {
+            let mut spec = if mode == "restore" {
+                service_spec(
+                    &target(),
+                    "FixtureService",
+                    Some((ServiceState::Running, ServiceState::Running)),
+                )
+            } else {
+                restart_spec(&target(), "FixtureService")
+            }
+            .unwrap();
+            let prefix = format!(
+                r#"
+function New-PSSessionOption {{ param($OpenTimeout,$OperationTimeout) return $null }}
+function Invoke-Command {{ param($ComputerName,$Authentication,$SessionOption,$ScriptBlock) if($ComputerName -ne 'example.invalid'){{throw 'Unexpected host'}}; & $ScriptBlock }}
+$global:starts=0;$global:stops=$(if('{mode}' -eq 'restore'){{1}}else{{0}});$global:mode='{mode}'
+function Get-Service {{ param($Name) if($Name -ne 'FixtureService'){{throw 'Unexpected service'}}; $s=[pscustomobject]@{{Name=$Name;Status=$(if($global:mode -eq 'wrong_state'){{'Stopped'}}else{{'Running'}});DependentServices=@();ServicesDependedOn=@()}};if($global:mode -eq 'dependent'){{$s.DependentServices=@([pscustomobject]@{{Status='Running'}})}};$s|Add-Member ScriptMethod Refresh {{}};$s|Add-Member ScriptMethod WaitForStatus {{param($expected,$timeout) if($this.Status -ne [string]$expected){{throw 'State mismatch'}}}};return $s }}
+function Stop-Service {{ param($InputObject) if($global:mode -in @('dependent','wrong_state')){{throw 'UNEXPECTED MUTATION'}};$global:stops++;$InputObject.Status='Stopped' }}
+function Start-Service {{ param($InputObject) if($global:mode -in @('dependent','wrong_state')){{throw 'UNEXPECTED MUTATION'}};$global:starts++;if($global:stops -ne 1){{throw 'Stop must precede start'}};if($global:mode -eq 'start_failure' -and $global:starts -eq 1){{throw 'Injected start failure'}};$InputObject.Status='Running' }}
+"#
+            );
+            spec.stdin = format!("{prefix}\n{}\n", spec.stdin);
+            let mut child = Command::new(&spec.program)
+                .args(&spec.args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(spec.stdin.as_bytes())
+                .unwrap();
+            let output = child.wait_with_output().unwrap();
+            if mode == "wrong_state" || mode == "dependent" {
+                assert!(!output.status.success());
+                assert!(!String::from_utf8_lossy(&output.stderr).contains("UNEXPECTED MUTATION"));
+            } else {
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let proof: serde_json::Value = serde_json::from_slice(&output.stdout)
+                    .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&output.stderr)));
+                if mode != "restore" {
+                    assert_eq!(proof["stoppedVerified"], true);
+                }
+                assert_eq!(proof["verified"], mode == "success" || mode == "restore");
+                assert_eq!(proof["rollbackVerified"], mode == "start_failure");
+                assert_eq!(proof["actual"], "Running");
+            }
+        }
+    }
+
     #[test]
     fn evidence_must_confirm_actual_state() {
         let mut r = Repair {

@@ -11,6 +11,8 @@ use std::{
     time::{Duration, Instant},
 };
 use uuid::Uuid;
+
+pub mod change_trial;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Preflight {
@@ -234,7 +236,17 @@ fn execute_with_binding(
         journal
     };
     let payload = serde_json::json!({"action":action.key(),"lab":journal,"user":user,"password":password,"service":service,"desiredRunning":desired_running,"health":health,"boundRequest":bound_request,"httpValues":http_values});
+    let output = run_script(SCRIPT, payload)?;
+    if action == Action::Preflight {
+        let _: Preflight = serde_json::from_str(&output).context("Ungültiger Hyper-V-Preflight-Bericht")?;
+    }
+    Ok(output)
+}
+
+fn run_script(script: &str, payload: serde_json::Value) -> Result<String> {
     let mut command = Command::new("powershell.exe");
+    // Windows PowerShell must resolve its own modules, not inherited PowerShell 7 modules.
+    command.env_remove("PSModulePath");
     command
         .args([
             "-NoLogo",
@@ -256,7 +268,7 @@ fn execute_with_binding(
         .stdin
         .take()
         .context("stdin")?
-        .write_all(&script_envelope(SCRIPT, payload)?)?;
+        .write_all(&script_envelope(script, payload)?)?;
     let out = child.stdout.take().context("stdout")?;
     let err = child.stderr.take().context("stderr")?;
     let reader = |mut stream: Box<dyn Read + Send>| {
@@ -289,15 +301,13 @@ fn execute_with_binding(
             crate::security::redact_secret_text(&format!("{text}\n{errors}"))
         );
     }
-    if action == Action::Preflight {
-        let _: Preflight =
-            serde_json::from_str(text.trim()).context("Ungültiger Hyper-V-Preflight-Bericht")?;
-    }
     Ok(text.trim().into())
 }
 /// A completed adapter run. Promotion must load it by reference, never accept UI JSON.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LabReceipt {
+    #[serde(default, skip_serializing_if = "crate::execution::is_false")]
+    pub restart: bool,
     pub id: Uuid,
     pub lab_id: String,
     pub vm_id: String,
@@ -315,6 +325,8 @@ pub struct LabReceipt {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct BoundRequest {
+    #[serde(default, skip_serializing_if = "crate::execution::is_false")]
+    restart: bool,
     id: Uuid,
     lab_id: String,
     vm_id: String,
@@ -326,6 +338,10 @@ struct BoundRequest {
 }
 #[derive(Deserialize)]
 struct TestProof {
+    #[serde(default, rename = "stoppedVerified")]
+    stopped_verified: bool,
+    #[serde(default, rename = "baselineFailed")]
+    baseline_failed: bool,
     #[serde(rename = "requestHash")]
     request_hash: String,
     binding: String,
@@ -359,7 +375,11 @@ impl LabReceipt {
             || (self.passed
                 && (self.health.url.is_empty()
                     || self.restored
-                    || self.before == self.after
+                    || (if self.restart {
+                        self.before != "Running" || !self.desired_running
+                    } else {
+                        self.before == self.after
+                    })
                     || self.after
                         != if self.desired_running {
                             "Running"
@@ -493,7 +513,14 @@ fn complete_receipt(
     }
     let passed = proof.passed
         && !proof.restored
-        && proof.before != proof.after
+        && (if request.restart {
+            proof.before == "Running"
+                && request.desired_running
+                && proof.stopped_verified
+                && proof.baseline_failed
+        } else {
+            proof.before != proof.after
+        })
         && proof.after == desired
         && !request.health.url.is_empty()
         && proof.health_passed == Some(true)
@@ -506,6 +533,7 @@ fn complete_receipt(
                     .map_or(request.health.expected_status, |s| s.status),
             );
     let mut receipt = LabReceipt {
+        restart: request.restart,
         id: request.id,
         lab_id: request.lab_id.clone(),
         vm_id: request.vm_id.clone(),
@@ -554,6 +582,30 @@ pub fn execute_bound_test_with_values(
     binding: String,
     http_values: crate::execution::http_health::Values,
 ) -> Result<LabReceipt> {
+    execute_bound_repair_with_values(
+        journal,
+        user,
+        password,
+        service,
+        desired_running,
+        health,
+        binding,
+        http_values,
+        false,
+    )
+}
+pub fn execute_bound_repair_with_values(
+    journal: Journal,
+    user: String,
+    password: String,
+    service: String,
+    desired_running: bool,
+    health: HealthProbe,
+    binding: String,
+    http_values: crate::execution::http_health::Values,
+    restart: bool,
+) -> Result<LabReceipt> {
+    anyhow::ensure!(!restart || desired_running, "Restart requires Running");
     for step in &health.followups {
         step.options.validate_values(&http_values)?;
     }
@@ -572,6 +624,7 @@ pub fn execute_bound_test_with_values(
     }
     Uuid::parse_str(&current.vm_id)?;
     let request = BoundRequest {
+        restart,
         id: Uuid::new_v4(),
         lab_id: current.id.clone(),
         vm_id: current.vm_id.clone(),
@@ -628,6 +681,7 @@ pub fn load_receipt(reference: &str) -> Result<LabReceipt> {
         || request.binding != receipt.binding
         || request.service != receipt.service
         || request.desired_running != receipt.desired_running
+        || request.restart != receipt.restart
         || request.health != receipt.health
         || request.started != receipt.started
         || receipt.finished < receipt.started
@@ -639,7 +693,11 @@ pub fn load_receipt(reference: &str) -> Result<LabReceipt> {
     if receipt.passed
         && (receipt.health.url.is_empty()
             || receipt.restored
-            || receipt.before == receipt.after
+            || (if receipt.restart {
+                receipt.before != "Running" || !receipt.desired_running
+            } else {
+                receipt.before == receipt.after
+            })
             || receipt.after
                 != if receipt.desired_running {
                     "Running"
@@ -735,13 +793,13 @@ try {
   New-VHD -Path (Join-Path $j.directory 'child.vhdx') -ParentPath $j.template -Differencing|Out-Null
   $vm=New-VM -Name $j.name -Generation 2 -MemoryStartupBytes 2GB -Path $j.directory -VHDPath (Join-Path $j.directory 'child.vhdx') -SwitchName $j.name
   $j.vm_id=[string]$vm.Id;Save-Journal
-  $vm|Set-VM -Notes $j.id -AutomaticCheckpointsEnabled $false -AutomaticStartAction Nothing -AutomaticStopAction TurnOff
+  $vm|Set-VM -Notes $j.id -AutomaticCheckpointsEnabled $false -AutomaticStartAction Nothing -AutomaticStopAction TurnOff -CheckpointType Standard
   $vm=Assert-OwnedVM
   $vm|Start-VM
   $j.phase='running';$j.detail='VM started; guest readiness not yet verified';Save-Journal
  } elseif($p.action -eq 'test') {
   $vm=Assert-OwnedVM
-  $requestHash='';$binding=''
+  $requestHash='';$binding='';$bound=$null
   if($p.boundRequest){
    $bound=$p.boundRequest|ConvertFrom-Json
    if($bound.lab_id -cne $j.id -or $bound.vm_id -cne $j.vm_id -or $bound.service -cne $p.service -or [bool]$bound.desired_running -ne [bool]$p.desiredRunning -or $bound.health.url -cne $p.health.url -or $bound.health.expected_status -ne $p.health.expected_status -or $bound.health.body_marker -cne $p.health.body_marker){throw 'Bound request mismatch'}
@@ -763,7 +821,7 @@ try {
   $credential=New-Object Management.Automation.PSCredential($p.user,$secure)
   $p.password=$null
   $result=Invoke-Command -VMId ([guid]$j.vm_id) -Credential $credential -ScriptBlock {
-    param($service,$desiredRunning,$health,$httpValues)
+    param($service,$desiredRunning,$health,$httpValues,$restart)
     function Assert-Json($body,$assertions){
      if(!$assertions -or @($assertions.PSObject.Properties).Count -eq 0){return}
      Add-Type -AssemblyName System.Web.Extensions
@@ -803,17 +861,9 @@ try {
       if($jar.Count -ge 32 -and !$jar.ContainsKey($name)){throw 'Cookie count limit'};$jar[$name]=$value
      }
     }
-    Add-Type -AssemblyName System.ServiceProcess
-    $s=Get-Service -Name $service -ErrorAction Stop
-    $before=[string]$s.Status
-    if($before -notin @('Running','Stopped')){throw 'Service must be in stable Running/Stopped state'}
-    $desired=if($desiredRunning){'Running'}else{'Stopped'}
-    $passed=$false;$restored=$false;$failure='';$after=$before;$healthStatus=$null;$healthPassed=$null;$stage='service'
-    try {
-      if($desiredRunning){$s|Start-Service -ErrorAction Stop}else{$s|Stop-Service -ErrorAction Stop}
-      $s.WaitForStatus([ServiceProcess.ServiceControllerStatus]$desired,[TimeSpan]::FromSeconds(30))
-      $s.Refresh();$after=[string]$s.Status;$passed=($after -eq $desired)
-      if(!$passed){throw 'Service verification did not reach requested state'}
+    function Test-RepairHealth {
+      $passed=$true;$healthPassed=$null;$healthStatus=$null
+      try {
       if($health.url){
        $stage='http';$passed=$false
        $baseUri=[uri]$health.url
@@ -860,6 +910,29 @@ try {
        } finally {$request.Abort();if($reader){$reader.Dispose()};if($response){$response.Close()}}
        }
       }
+      } catch { $passed=$false;$healthPassed=$false }
+      [pscustomobject]@{passed=$passed;status=$healthStatus}
+    }
+    Add-Type -AssemblyName System.ServiceProcess
+    $s=Get-Service -Name $service -ErrorAction Stop
+    $before=[string]$s.Status
+    if($before -notin @('Running','Stopped')){throw 'Service must be in stable Running/Stopped state'}
+    $desired=if($desiredRunning){'Running'}else{'Stopped'}
+    $stoppedVerified=$false;$baselineFailed=$false;
+    if($restart -and ($before -ne 'Running' -or !$desiredRunning)){throw 'Restart requires running service'}
+    if(@($s.DependentServices | Where-Object Status -eq Running).Count -gt 0){throw 'Running dependents; no mutation attempted'}
+    if(@($s.ServicesDependedOn | Where-Object Status -ne Running).Count -gt 0){throw 'Inactive prerequisites; no mutation attempted'}
+    if($restart){$baseline=Test-RepairHealth;$baselineFailed=(!$baseline.passed);if(!$baselineFailed){throw 'Restart baseline is healthy; no mutation attempted'}}
+    $passed=$false;$restored=$false;$failure='';$after=$before;$healthStatus=$null;$healthPassed=$null;$stage='service'
+    try {
+      if($restart){$s|Stop-Service -ErrorAction Stop;$s.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Stopped,[TimeSpan]::FromSeconds(30));$s.Refresh();if([string]$s.Status -ne 'Stopped'){throw 'Stop verification failed'};$stoppedVerified=$true}
+      if($desiredRunning){$s|Start-Service -ErrorAction Stop}else{$s|Stop-Service -ErrorAction Stop}
+      $s.WaitForStatus([ServiceProcess.ServiceControllerStatus]$desired,[TimeSpan]::FromSeconds(30))
+      $s.Refresh();$after=[string]$s.Status;$passed=($after -eq $desired)
+      if(!$passed){throw 'Service verification did not reach requested state'}
+      $stage='http';$httpResult=Test-RepairHealth
+      $healthStatus=$httpResult.status;$healthPassed=$httpResult.passed;$passed=$healthPassed
+      if(!$passed){throw 'HTTP health verification failed'}
     } catch {
       $failure=$stage+' check failed: '+$_.Exception.GetType().Name
       try {
@@ -868,12 +941,12 @@ try {
         $s.Refresh();$after=[string]$s.Status;$restored=($after -eq $before)
       } catch {$failure += '; restore failed: ' + $_.Exception.GetType().Name}
     }
-    [pscustomobject]@{computer=$env:COMPUTERNAME;service=$s.Name;before=$before;desired=$desired;after=$after;passed=$passed;restored=$restored;failure=$failure;healthStatus=$healthStatus;healthPassed=$healthPassed}
-  } -ArgumentList $p.service,$p.desiredRunning,$p.health,$p.httpValues
+    [pscustomobject]@{computer=$env:COMPUTERNAME;service=$s.Name;before=$before;desired=$desired;after=$after;passed=$passed;restored=$restored;failure=$failure;healthStatus=$healthStatus;healthPassed=$healthPassed;stoppedVerified=$stoppedVerified;baselineFailed=$baselineFailed}
+  } -ArgumentList $p.service,$p.desiredRunning,$p.health,$p.httpValues,([bool]$bound.restart)
   $result|Add-Member -NotePropertyName planHash -NotePropertyValue $planHash
   $result|Add-Member -NotePropertyName requestHash -NotePropertyValue $requestHash
   $result|Add-Member -NotePropertyName binding -NotePropertyValue $binding
-  $j.detail=$result|Select-Object planHash,requestHash,binding,computer,service,before,desired,after,passed,restored,failure,healthStatus,healthPassed|ConvertTo-Json -Compress
+  $j.detail=$result|Select-Object planHash,requestHash,binding,computer,service,before,desired,after,passed,restored,failure,healthStatus,healthPassed,stoppedVerified,baselineFailed|ConvertTo-Json -Compress
   $j.phase=if($result.passed){'test_passed'}else{'test_failed'};Save-Journal
  } elseif($p.action -eq 'cleanup') {
   # Identity and topology checks happen before the first destructive operation.
@@ -1069,7 +1142,7 @@ mod tests {
  function Get-VMSwitch { param($Id) [pscustomobject]@{Name=$j.name;SwitchType='Private'} }
  function Get-Service {
   param($Name)
-  $service=[pscustomobject]@{Name=$Name;Status='Stopped'}
+  $service=[pscustomobject]@{Name=$Name;Status='Stopped';DependentServices=@();ServicesDependedOn=@()}
   $service|Add-Member ScriptMethod Refresh {}
   $service|Add-Member ScriptMethod WaitForStatus {param($expected,$timeout) if($global:failOnce){$global:failOnce=$false;throw 'Synthetic verification failure'};if([string]$this.Status -ne [string]$expected){throw 'Wrong fake state'}}
   return $service
@@ -1115,6 +1188,138 @@ mod tests {
 
     #[test]
     #[cfg(windows)]
+    fn fake_restart_proves_stop_start_and_restores_on_failure() {
+        for mode in ["success", "http_failure", "stop_failure", "healthy"] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let deadline = Instant::now();
+                let mut count = 0;
+                let expected = if mode == "healthy" || mode == "stop_failure" {
+                    1
+                } else {
+                    2
+                };
+                while count < expected && deadline.elapsed() < Duration::from_secs(15) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            stream.set_nonblocking(false).unwrap();
+                            stream
+                                .set_read_timeout(Some(Duration::from_secs(2)))
+                                .unwrap();
+                            let mut buffer = [0; 2048];
+                            let _ = stream.read(&mut buffer);
+                            let status = if mode == "healthy" || (count == 1 && mode == "success") {
+                                "200 OK"
+                            } else {
+                                "503 Unavailable"
+                            };
+                            let response = format!(
+                                "HTTP/1.1 {status}\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+                            );
+                            stream.write_all(response.as_bytes()).unwrap();
+                            count += 1;
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(10))
+                        }
+                        Err(_) => break,
+                    }
+                }
+                assert_eq!(count, expected);
+            });
+            let dir = std::env::temp_dir().join(format!("relayne-restart-{}", Uuid::new_v4()));
+            std::fs::create_dir(&dir).unwrap();
+            let id = Uuid::new_v4().to_string();
+            let mut prefix = format!(
+                "{FAKE_GUARDS}\n{}\n$global:failOnce=${}",
+                FAKE_REHEARSAL
+                    .replace("Name=$Name;Status='Stopped'", "Name=$Name;Status='Running'"),
+                if mode == "stop_failure" {
+                    "true"
+                } else {
+                    "false"
+                }
+            );
+            if mode == "healthy" {
+                prefix.push_str("\nfunction Start-Service {throw 'UNEXPECTED MUTATION'}; function Stop-Service {throw 'UNEXPECTED MUTATION'}");
+            }
+            let request = BoundRequest {
+                restart: true,
+                id: Uuid::new_v4(),
+                lab_id: id.clone(),
+                vm_id: id.clone(),
+                binding: "a".repeat(64),
+                service: "FixtureService".into(),
+                desired_running: true,
+                health: HealthProbe {
+                    url: format!("http://{address}/health"),
+                    expected_status: 200,
+                    body_marker: "ok".into(),
+                    followups: vec![],
+                },
+                started: Utc::now(),
+            };
+            let output = fake_run(
+                &prefix,
+                serde_json::json!({"action":"test","boundRequest":serde_json::to_string(&request).unwrap(),"user":"fixture","password":"fixture-secret","service":request.service,"desiredRunning":true,"health":request.health,"lab":{"id":id,"name":"Owned","directory":dir.to_string_lossy(),"vm_id":id,"switch_id":id,"template":"fixture.vhdx","phase":"running","detail":""}}),
+            );
+            assert!(
+                output.status.success() || mode == "healthy",
+                "restart fake error: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            server.join().unwrap();
+            if mode == "healthy" {
+                assert!(!output.status.success());
+                assert!(String::from_utf8_lossy(&output.stderr).contains("baseline is healthy"));
+                assert!(!String::from_utf8_lossy(&output.stderr).contains("UNEXPECTED MUTATION"));
+            } else {
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let journal = read_journal(&dir.join("journal.dpapi")).unwrap();
+                let raw: serde_json::Value = serde_json::from_str(&journal.detail).unwrap();
+                assert_eq!(raw["baselineFailed"], true);
+                let receipt = complete_receipt(
+                    &request,
+                    serde_json::from_str(&journal.detail).unwrap(),
+                    Utc::now(),
+                )
+                .unwrap();
+                receipt.verify_integrity().unwrap();
+                assert!(receipt.restart);
+                assert_eq!(receipt.before, "Running");
+                assert_eq!(receipt.after, "Running");
+                assert_eq!(receipt.passed, mode == "success");
+                assert_eq!(receipt.restored, mode != "success");
+                if mode == "success" {
+                    assert_eq!(raw["stoppedVerified"], true);
+                    let mut missing = raw.clone();
+                    missing["stoppedVerified"] = serde_json::json!(false);
+                    assert!(
+                        !complete_receipt(
+                            &request,
+                            serde_json::from_value(missing).unwrap(),
+                            Utc::now()
+                        )
+                        .unwrap()
+                        .passed
+                    );
+                }
+            }
+            if dir.join("journal.dpapi").exists() {
+                std::fs::remove_file(dir.join("journal.dpapi")).unwrap();
+            }
+            std::fs::remove_dir(dir).unwrap();
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
     fn fake_http_health_failure_restores_service() {
         for (expected_marker, desired_running) in
             [("healthy", true), ("absent", true), ("healthy", false)]
@@ -1152,6 +1357,7 @@ mod tests {
             let id = uuid::Uuid::new_v4().to_string();
             let prefix = format!("{FAKE_GUARDS}\n{FAKE_REHEARSAL}\n$global:failOnce=$false");
             let request = BoundRequest {
+                restart: false,
                 id: Uuid::new_v4(),
                 lab_id: id.clone(),
                 vm_id: id.clone(),
@@ -1408,6 +1614,7 @@ mod tests {
                     let dir = std::env::temp_dir().join(format!("relayne-session-{id}"));
                     std::fs::create_dir(&dir).unwrap();
                     let request = BoundRequest {
+                        restart: false,
                         id: Uuid::new_v4(),
                         lab_id: id.clone(),
                         vm_id: id.clone(),

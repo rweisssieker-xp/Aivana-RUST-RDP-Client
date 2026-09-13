@@ -1,0 +1,9 @@
+# Clone change trials and repeatable faults
+
+Approved direction: test changes and their return path in an isolated clone, and automate a bounded fault reproduction. First supported change is a Windows application service startup type (Automatic or Manual). This is not a package/update installer or a general script runner.
+
+A user selects an existing Relayne-owned private-network Hyper-V lab, service, public loopback HTTP probe and guest credentials. A reviewed request binds all values. The adapter verifies ownership, healthy Running baseline and supported startup state, creates a uniquely named checkpoint, changes startup type, verifies the application, stops the service to reproduce an observed HTTP failure, starts it and verifies recovery. Finally it restores the checkpoint and verifies baseline startup type, Running status and HTTP health. A no-op change is rejected. Running dependent services and essential OS/PowerShell Direct services are excluded.
+
+All mutations require explicit UI execution. No production adapter, model execution, scheduling or automatic promotion is added. Credentials travel through stdin and remain transient. Durable DPAPI request precedes execution; a receipt records actual stages and rollback separately. Failed/interrupted trials remain unresolved and block subsequent trials in that lab until an explicit checkpoint restoration succeeds. A trial is successful only when every stage and return verification succeeds. The checkpoint is deleted only after verified restoration. Trial evidence never substitutes for production recovery receipts.
+
+Tests use a typed fake adapter or PowerShell command doubles; no live Hyper-V, guest changes or external accounts are exercised. Native UI checks and offline build complete local validation. Actual Hyper-V checkpoint and guest integration remain an operator acceptance requirement.

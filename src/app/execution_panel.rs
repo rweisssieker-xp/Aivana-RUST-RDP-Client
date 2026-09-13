@@ -141,6 +141,7 @@ pub(super) struct ExecutionState {
     health: Option<mpsc::Receiver<HealthEvidence>>,
     service: String,
     desired: ServiceState,
+    restart: bool,
     http: bool,
     port: u16,
     tls: bool,
@@ -177,6 +178,7 @@ impl Default for ExecutionState {
             health: None,
             service: String::new(),
             desired: ServiceState::Running,
+            restart: false,
             http: true,
             port: 80,
             tls: false,
@@ -207,8 +209,10 @@ impl AivanaApp {
         references: Vec<String>,
         recovery_case: Option<Uuid>,
     ) -> anyhow::Result<()> {
+        self.contracts_execution_allowed(&plan, &references)?;
         if let Some(id) = recovery_case {
             self.validate_recovery_case(id, &plan.service)?;
+            self.validate_recovery_action(id, plan.restart)?;
             anyhow::ensure!(
                 plan.desired == ServiceState::Running,
                 "Recovery unterstützt ausschließlich Dienststart"
@@ -253,6 +257,12 @@ impl AivanaApp {
             .iter()
             .any(|m| m.staging.protocol == crate::promotion::LAB_PROTOCOL)
         {
+            if self
+                .contracts_execution_allowed(&run.plan, &run.lab_receipts)
+                .is_err()
+            {
+                return false;
+            }
             crate::promotion::check_receipts(&run.plan, &run.lab_receipts, Utc::now()).is_ok()
         } else {
             self.execution
@@ -324,6 +334,7 @@ impl AivanaApp {
         }
         self.execution.service = lesson.service.clone();
         self.execution.desired = lesson.desired;
+        self.execution.restart = lesson.restart;
         match &lesson.health {
             HealthCheck::Tcp { port } => {
                 self.execution.http = false;
@@ -392,6 +403,7 @@ impl AivanaApp {
         }
         let e = &self.execution;
         let plan = ExecutionPlan {
+            restart: e.restart,
             service: e.service.trim().into(),
             desired: e.desired,
             mappings,
@@ -545,6 +557,9 @@ impl AivanaApp {
         if phase == Phase::Apply
             && (t.before.is_none()
                 || t.baseline.is_none()
+                || (r.plan.restart
+                    && (t.before != Some(ServiceState::Running)
+                        || !t.baseline.as_ref().is_some_and(|b| !b.passed)))
                 || !t
                     .captured
                     .is_some_and(|at| (0..120).contains(&(Utc::now() - at).num_seconds())))
@@ -597,7 +612,11 @@ impl AivanaApp {
             Phase::Restore => Some((r.plan.desired, t.before.unwrap())),
             _ => None,
         };
-        let spec = intelligence::service_spec(&t.target, &r.plan.service, change);
+        let spec = if phase == Phase::Apply && r.plan.restart {
+            intelligence::restart_spec(&t.target, &r.plan.service)
+        } else {
+            intelligence::service_spec(&t.target, &r.plan.service, change)
+        };
         match spec {
             Ok(spec) => {
                 if !self.execution_save() {
@@ -653,7 +672,8 @@ impl AivanaApp {
                 .is_some_and(|i| self.execution.book.runs[i].finished.is_none());
             ui.add_enabled_ui(!busy, |ui| {
             ui.horizontal(|ui| {
-                ui.label("Dienst"); ui.text_edit_singleline(&mut self.execution.service);
+                ui.checkbox(&mut self.execution.restart, "Kontrollierter Neustart (Running + fehlerhafter HTTP-Test)");
+                  ui.label("Dienst"); ui.text_edit_singleline(&mut self.execution.service);
                 ui.selectable_value(&mut self.execution.desired, ServiceState::Running, "Running");
                 ui.selectable_value(&mut self.execution.desired, ServiceState::Stopped, "Stopped");
             });
@@ -770,13 +790,20 @@ impl AivanaApp {
         }
         let t = &run.targets[run.current];
         if t.phase == Phase::Review && run.finished.is_none() {
+            if run.plan.restart {
+                ui.strong("Neustart: laufenden Dienst stoppen, Stopped nachweisen, wieder starten. Rückweg kann nur den Dienstzustand Running herstellen, keinen Prozesszustand.");
+            }
             ui.label(format!("Änderung prüfen: {} / {} / {:?} → {}. Bei Funktionsfehler Wiederherstellung auf {:?}.",t.target.host,run.plan.service,t.before,run.plan.desired.label(),t.before));
             if let Some(before) = t.before {
-                if let Ok(spec) = intelligence::service_spec(
-                    &t.target,
-                    &run.plan.service,
-                    Some((before, run.plan.desired)),
-                ) {
+                if let Ok(spec) = if run.plan.restart {
+                    intelligence::restart_spec(&t.target, &run.plan.service)
+                } else {
+                    intelligence::service_spec(
+                        &t.target,
+                        &run.plan.service,
+                        Some((before, run.plan.desired)),
+                    )
+                } {
                     ui.collapsing("Exakter Befehl mit Schutzprüfungen und Rückweg", |ui| {
                         ui.monospace(spec.preview());
                     });
@@ -786,7 +813,7 @@ impl AivanaApp {
             let fresh = t
                 .captured
                 .is_some_and(|at| (0..120).contains(&(Utc::now() - at).num_seconds()));
-            let change = t.before != Some(run.plan.desired);
+            let change = run.plan.restart || t.before != Some(run.plan.desired);
             if !fresh {
                 ui.label(
                     "Vorprüfung älter als 120 Sekunden: abbrechen und neuen Lauf vorbereiten.",
@@ -799,6 +826,9 @@ impl AivanaApp {
                 .add_enabled(
                     self.execution.reviewed
                         && fresh
+                        && (!run.plan.restart
+                            || (t.before == Some(ServiceState::Running)
+                                && t.baseline.as_ref().is_some_and(|b| !b.passed)))
                         && (!run.rehearsal || change)
                         && (run.recovery_case.is_none() || self.recovery_actions_allowed())
                         && self.execution.error.is_none(),
@@ -891,6 +921,7 @@ mod recovery_selection_tests {
         };
         let mut run = Run::new(
             ExecutionPlan {
+                restart: false,
                 service: "AppService".into(),
                 desired: ServiceState::Running,
                 health: HealthCheck::Tcp { port: 80 },

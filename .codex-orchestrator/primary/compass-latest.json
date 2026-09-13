@@ -1,0 +1,178 @@
+{
+  "artifactPath": ".codex-orchestrator/primary/compass-latest.json",
+  "claimBoundary": "Compass is a local routing recommendation. Any customer, market, pricing, or outcome claim remains evidence-labelled in the selected journey.",
+  "errors": [],
+  "foundation": {
+    "foundationId": "foundation_mty0duxj",
+    "nextStory": {
+      "acceptanceCriteria": [
+        "Implement the smallest useful slice.",
+        "Record relevant verification evidence.",
+        "Preserve a rollback or recovery path."
+      ],
+      "decisionState": "draft",
+      "definitionOfDone": "Relevant tests pass or gaps are recorded.",
+      "dependsOn": [
+        "foundation_mty0duxj_epic_1"
+      ],
+      "id": "foundation_mty0duxj_story_1",
+      "revision": 1,
+      "state": "ready",
+      "title": "Implement the smallest reversible outcome slice"
+    },
+    "readiness": {
+      "blockers": [],
+      "status": "concerns"
+    },
+    "scope": "lightweight"
+  },
+  "generatedAt": "2026-09-12T06:33:14.469Z",
+  "goal": "Relayne nach den lokalen Implementierungen von Recovery Agent, Living Recovery Plans und KI-generierten Anwendungstests gezielt verbessern: vorhandene Ergebnisse berücksichtigen, offene Validierungslücken priorisieren und den kleinsten reversiblen nächsten Schritt mit messbaren Abnahmekriterien bestimmen. Keine bereits implementierten Funktionen neu bauen. Kundenbedarf, Modellqualität und Live-Infrastruktur sind nicht validiert. Keine kostenpflichtigen Modellaufrufe, Produktionsverbindungen, Veröffentlichungen, Kundenkontakte oder Preisänderungen.",
+  "goalSource": "user",
+  "handoff": "$forgemind-compass",
+  "nextAction": "Continue with $forgemind-compass; ForgeMind will apply the ship route internally.",
+  "projectProfile": {
+    "artifactPath": ".codex-orchestrator/project-profile.json",
+    "claimBoundary": "Project-derived fields describe repository context. They are inferred or assumed until customer, market, pricing, or operating evidence is imported.",
+    "commercialAssumptions": {
+      "addressableAccounts": {
+        "evidence": "observed",
+        "sources": [
+          "project profile configuration"
+        ],
+        "value": 300
+      },
+      "buildCost": {
+        "evidence": "observed",
+        "sources": [
+          "project profile configuration"
+        ],
+        "value": 60000
+      },
+      "customerAcquisitionCost": {
+        "evidence": "observed",
+        "sources": [
+          "project profile configuration"
+        ],
+        "value": 2200
+      },
+      "grossMarginPercent": {
+        "evidence": "observed",
+        "sources": [
+          "project profile configuration"
+        ],
+        "value": 70
+      },
+      "monthlyChurnPercent": {
+        "evidence": "observed",
+        "sources": [
+          "project profile configuration"
+        ],
+        "value": 1.5
+      },
+      "monthlyNewCustomers": {
+        "evidence": "observed",
+        "sources": [
+          "project profile configuration"
+        ],
+        "value": 2
+      },
+      "monthlyPrice": {
+        "evidence": "observed",
+        "sources": [
+          "project profile configuration"
+        ],
+        "value": 1500
+      },
+      "monthlyRunCost": {
+        "evidence": "observed",
+        "sources": [
+          "project profile configuration"
+        ],
+        "value": 4500
+      },
+      "salesCycleMonths": {
+        "evidence": "observed",
+        "sources": [
+          "project profile configuration"
+        ],
+        "value": 6
+      },
+      "startingCustomers": {
+        "evidence": "observed",
+        "sources": [
+          "project profile configuration"
+        ],
+        "value": 0
+      }
+    },
+    "deploymentModel": {
+      "evidence": "missing",
+      "sources": [
+        "no deployment signal"
+      ],
+      "value": "unknown"
+    },
+    "differentiationApproach": {
+      "evidence": "observed",
+      "sources": [
+        "project profile configuration"
+      ],
+      "value": "enterprise-operations workflow with existing integration context"
+    },
+    "errors": [],
+    "evidenceGaps": [
+      "no structured commercial evidence was imported from research or telemetry",
+      "pricing, market size, CAC, churn, and cost values are project-derived assumptions",
+      "deployment model is unknown; validate operating cost assumptions"
+    ],
+    "evidenceSummary": {
+      "importedSignals": 0,
+      "outcomes": 0,
+      "packagePresent": false,
+      "projectDocuments": 10,
+      "readmePresent": true,
+      "researchRecords": 4,
+      "sourceSignals": 0,
+      "telemetryEvents": 0
+    },
+    "generatedAt": "2026-09-12T06:33:14.438Z",
+    "primaryJob": {
+      "evidence": "observed",
+      "sources": [
+        "forgemind.config.json"
+      ],
+      "value": "Diagnose interrupted remote sessions, execute operator-approved recovery steps and produce a traceable incident handoff"
+    },
+    "productCategory": {
+      "evidence": "observed",
+      "sources": [
+        "project profile configuration"
+      ],
+      "value": "enterprise-operations"
+    },
+    "schemaVersion": 1,
+    "status": "passed",
+    "targetAudience": {
+      "evidence": "observed",
+      "sources": [
+        "forgemind.config.json"
+      ],
+      "value": "Hypothesis: DACH IT administrators and small MSP support teams operating Windows RDP estates; not customer-validated"
+    },
+    "technicalCostSignals": [
+      {
+        "evidence": "observed",
+        "sources": [
+          "AI inference dependency or documentation"
+        ],
+        "value": "ai-inference"
+      }
+    ],
+    "workspace": "C:\\tmp\\Aivana-RUST-RDP-Client"
+  },
+  "rationale": "Compass selected ship from the stated outcome and the project profile; this is routing guidance, not a claim about customer demand.",
+  "recommendedJourney": "ship",
+  "schemaVersion": 1,
+  "status": "passed"
+}

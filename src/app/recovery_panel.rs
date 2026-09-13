@@ -17,6 +17,7 @@ pub(super) struct RecoveryState {
     objective: String,
     service: String,
     rationale: String,
+    action: recovery::RepairAction,
     proposal_objective: Option<String>,
     consent: bool,
     planning: Option<(String, mpsc::Receiver<Result<Suggestion, String>>)>,
@@ -42,6 +43,7 @@ impl Default for RecoveryState {
             objective: String::new(),
             service: String::new(),
             rationale: String::new(),
+            action: Default::default(),
             proposal_objective: None,
             consent: false,
             planning: None,
@@ -63,6 +65,121 @@ fn outcome_label(outcome: Outcome) -> &'static str {
 }
 
 impl AivanaApp {
+    pub(super) fn recovery_ticket_report(&self, id: Uuid) -> anyhow::Result<String> {
+        let case = self
+            .recovery
+            .book
+            .cases
+            .iter()
+            .find(|c| c.id == id)
+            .ok_or_else(|| anyhow::anyhow!("Recovery-Fall fehlt"))?;
+        let runs = self.recovery_execution_runs();
+        let mut report = format!(
+            "Historischer Recovery-Nachweis (keine Aussage über aktuelle Gesundheit)\nFall: {}\nDienst: {}\nAktion: {:?}\nAuftrag: {}\nStatus: {}\n",
+            case.id,
+            case.service,
+            case.action,
+            case.objective,
+            outcome_label(recovery::outcome(case, runs))
+        );
+        for run in runs
+            .iter()
+            .filter(|r| r.recovery_case == Some(id))
+            .rev()
+            .take(4)
+        {
+            report.push_str(&format!(
+                "Lauf {} · Plan {} · Klon: {} · Abschluss: {:?}\n",
+                run.id, run.hash, run.rehearsal, run.finished
+            ));
+            for target in &run.targets {
+                report.push_str(&format!(
+                    "Ziel {} · {:?} · Vorher {:?} · Baseline {:?} · Nachher {:?}\n",
+                    target.target.profile_id,
+                    target.phase,
+                    target.before,
+                    target.baseline,
+                    target.health
+                ));
+            }
+        }
+        let report = crate::security::redact_secret_text(&report);
+        anyhow::ensure!(report.len() <= 16384, "Ticketbericht überschreitet 16 KiB");
+        Ok(report)
+    }
+
+    pub(super) fn import_ticket_case(
+        &mut self,
+        identity: &str,
+        objective: String,
+        service: String,
+    ) -> anyhow::Result<Uuid> {
+        anyhow::ensure!(
+            self.recovery_actions_allowed(),
+            "Recovery deaktiviert oder gesperrt"
+        );
+        self.promotion.can_adopt_recovery()?;
+        use sha2::{Digest, Sha256};
+        anyhow::ensure!(
+            !identity.is_empty() && identity.len() <= 262144,
+            "Ticketidentität fehlt oder ist zu groß"
+        );
+        let digest = Sha256::digest(serde_json::to_vec(&(
+            "relayne-ticket-case-v1",
+            identity,
+            &service,
+        ))?);
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(&digest[..16]);
+        let id = Uuid::from_bytes(bytes);
+        let mut case = Case::new(
+            objective,
+            Suggestion {
+                action: Default::default(),
+                service,
+                rationale: "Explizit geprüfter Ticketimport; keine Ausführungsfreigabe".into(),
+            },
+        )?;
+        case.id = id;
+        let mut book = self.recovery.book.clone();
+        if let Some(existing) = book.cases.iter().find(|c| c.id == id) {
+            anyhow::ensure!(
+                existing.objective == case.objective
+                    && existing.service == case.service
+                    && existing.action == case.action,
+                "Ticketfall-Identität kollidiert mit anderem Inhalt"
+            );
+            case = existing.clone();
+        } else {
+            book.cases.push(case.clone());
+        }
+        book.save(&app_data_file("relayne-recovery.dpapi")?)?;
+        self.recovery.book = book;
+        self.recovery.selected = Some(case.id);
+        self.promotion.adopt_recovery(&case)?;
+        self.persist_recovery_promotion()?;
+        Ok(case.id)
+    }
+    pub(super) fn validate_recovery_action(&self, id: Uuid, restart: bool) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.recovery
+                .book
+                .cases
+                .iter()
+                .any(|c| c.id == id && (c.action == recovery::RepairAction::Restart) == restart),
+            "Recovery-Aktion wurde geändert"
+        );
+        Ok(())
+    }
+
+    pub(super) fn recovery_objective_for(&self, id: Uuid) -> Option<String> {
+        self.recovery
+            .book
+            .cases
+            .iter()
+            .find(|c| c.id == id)
+            .map(|c| c.objective.clone())
+    }
     pub(super) fn recovery_actions_allowed(&self) -> bool {
         self.recovery.enabled && self.recovery.error.is_none()
     }
@@ -100,6 +217,7 @@ impl AivanaApp {
         let case = Case::new(
             self.recovery.objective.clone(),
             Suggestion {
+                action: self.recovery.action,
                 service: self.recovery.service.clone(),
                 rationale: if self.recovery.rationale.trim().is_empty() {
                     "Dienst vom Operator ausgewählt; Ausgangszustand und Funktionstest noch zu prüfen.".into()
@@ -135,6 +253,7 @@ impl AivanaApp {
                 self.recovery.planning = None;
                 match result {
                     Ok(suggestion) if source == self.recovery.objective => {
+                        self.recovery.action = suggestion.action;
                         self.recovery.service = suggestion.service;
                         self.recovery.rationale = suggestion.rationale;
                         self.recovery.proposal_objective = Some(source);
@@ -151,6 +270,10 @@ impl AivanaApp {
             }
         }
         ui.heading("Recovery Agent");
+        ui.small("Neustart: kontrollierter Stop/Start. Rückweg stellt Running wieder her; verlorener Prozesszustand ist nicht wiederherstellbar.");
+        if ui.button("Wiederherstellungspläne öffnen").clicked() {
+            self.view = View::RecoveryPlans;
+        }
         ui.label("Von der Störung zur geprüften Wiederherstellung eines Windows-Dienstes.");
         ui.checkbox(
             &mut self.recovery.enabled,
@@ -180,7 +303,14 @@ impl AivanaApp {
                 self.recovery
                     .selected
                     .and_then(|id| self.recovery.book.cases.iter().find(|c| c.id == id))
-                    .map(|c| format!("{} · {}", c.service, c.created.format("%d.%m. %H:%M")))
+                    .map(|c| {
+                        format!(
+                            "{} · {:?} · {}",
+                            c.service,
+                            c.action,
+                            c.created.format("%d.%m. %H:%M")
+                        )
+                    })
                     .unwrap_or_else(|| "Noch kein gespeicherter Fall".into()),
             )
             .show_ui(ui, |ui| {
@@ -260,6 +390,19 @@ impl AivanaApp {
     }
 
     fn recovery_intake(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Reparatur");
+            ui.selectable_value(
+                &mut self.recovery.action,
+                recovery::RepairAction::Start,
+                "Gestoppten Dienst starten",
+            );
+            ui.selectable_value(
+                &mut self.recovery.action,
+                recovery::RepairAction::Restart,
+                "Laufenden, ungesunden Dienst neu starten",
+            );
+        });
         ui.strong("Was funktioniert nicht?");
         ui.add(egui::TextEdit::multiline(&mut self.recovery.objective).desired_width(720.0).desired_rows(3).char_limit(4096)
             .hint_text("Zum Beispiel: Die Anwendung antwortet nicht. Der zugehörige Dienst heißt AppService."));
@@ -308,7 +451,7 @@ impl AivanaApp {
                 .desired_rows(2)
                 .char_limit(4096),
         );
-        ui.small("Die Übernahme startet keine Verbindung. Sie ersetzt den bisherigen Testentwurf; Ziel, HTTP-Erfolgskriterien und Klon müssen anschließend ausdrücklich zugeordnet werden. Der erste Recovery-Ablauf unterstützt den Start eines gestoppten Dienstes.");
+        ui.small("Die Übernahme startet keine Verbindung. Sie ersetzt den bisherigen Testentwurf; Ziel, HTTP-Erfolgskriterien und Klon müssen anschließend ausdrücklich zugeordnet werden. Unterstützt: gestoppten Dienst starten oder laufenden Dienst nach fehlgeschlagenem HTTP-Test kontrolliert neu starten.");
         if ui
             .add_enabled(
                 self.recovery.enabled

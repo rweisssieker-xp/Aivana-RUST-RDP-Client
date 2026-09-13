@@ -23,6 +23,24 @@
       "durationMs": 1010,
       "recordedAt": "2026-09-12T05:15:37.228Z",
       "status": "passed"
+    },
+    {
+      "command": "guide",
+      "durationMs": 46,
+      "recordedAt": "2026-09-12T06:32:48.554Z",
+      "status": "passed"
+    },
+    {
+      "command": "one",
+      "durationMs": 131,
+      "recordedAt": "2026-09-12T06:33:14.497Z",
+      "status": "ready"
+    },
+    {
+      "command": "innovation",
+      "durationMs": 1078,
+      "recordedAt": "2026-09-12T13:57:41.191Z",
+      "status": "passed"
     }
   ],
   "schemaVersion": 1

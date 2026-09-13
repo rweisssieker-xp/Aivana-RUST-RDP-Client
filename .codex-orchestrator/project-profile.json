@@ -97,13 +97,13 @@
     "importedSignals": 0,
     "outcomes": 0,
     "packagePresent": false,
-    "projectDocuments": 8,
+    "projectDocuments": 10,
     "readmePresent": true,
     "researchRecords": 4,
     "sourceSignals": 0,
     "telemetryEvents": 0
   },
-  "generatedAt": "2026-09-11T04:36:25.067Z",
+  "generatedAt": "2026-09-12T06:33:14.475Z",
   "primaryJob": {
     "evidence": "observed",
     "sources": [

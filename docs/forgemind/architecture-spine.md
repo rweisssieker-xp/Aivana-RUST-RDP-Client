@@ -4,12 +4,12 @@
 
 ```json
 {
-  "id": "foundation_mtwgrrsd_architecture",
+  "id": "foundation_mty0duy5_architecture",
   "revision": 1,
   "decisionState": "draft",
   "state": "ready",
   "dependsOn": [
-    "foundation_mtwgrrsd_prd"
+    "foundation_mty0duy5_prd"
   ],
   "decisions": [
     "Follow existing repository stack and conventions.",

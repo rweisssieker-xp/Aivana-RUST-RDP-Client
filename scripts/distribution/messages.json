@@ -1,0 +1,34 @@
+{
+  "en-US": {
+    "verified": "Development package integrity verified; publisher authentication and sales acceptance remain open.",
+    "invalid": "Package or path validation failed. Existing installations were not intentionally modified. Check the trusted package and guide.",
+    "unsigned": "Unsigned development package: explicit -AllowUnsignedDev is required. Not a commercial release.",
+    "exists": "This version already exists. No files were overwritten.",
+    "installed": "Development version installed. Start the executable manually; no connection was made.",
+    "removed": "Version removed. User data and credentials were retained."
+  },
+  "de": {
+    "verified": "Integrität des Dev-Pakets geprüft; Herausgeberprüfung und Verkaufsfreigabe stehen aus.",
+    "invalid": "Paket- oder Pfadprüfung fehlgeschlagen. Bestehende Installationen wurden nicht absichtlich geändert. Vertrauenswürdiges Paket und Handbuch prüfen.",
+    "unsigned": "Unsigniertes Dev-Paket: ausdrückliches -AllowUnsignedDev erforderlich. Kein Verkaufsrelease.",
+    "exists": "Diese Version existiert bereits. Keine Datei wurde überschrieben.",
+    "installed": "Entwicklungsversion installiert. Programm manuell starten; keine Verbindung aufgebaut.",
+    "removed": "Version entfernt. Benutzerdaten und Zugangsdaten bleiben erhalten."
+  },
+  "fr": {
+    "verified": "Intégrité du paquet de développement vérifiée ; authentification de l’éditeur et autorisation de vente restent ouvertes.",
+    "invalid": "Échec de validation du paquet ou du chemin. Les installations existantes n’ont pas été volontairement modifiées. Vérifier le paquet fiable et le guide.",
+    "unsigned": "Paquet de développement non signé : -AllowUnsignedDev explicite requis. Pas de version commerciale.",
+    "exists": "Cette version existe déjà. Aucun fichier écrasé.",
+    "installed": "Version de développement installée. Démarrer le programme manuellement ; aucune connexion effectuée.",
+    "removed": "Version supprimée. Données et identifiants utilisateur conservés."
+  },
+  "it": {
+    "verified": "Integrità del pacchetto di sviluppo verificata; autenticazione dell’editore e autorizzazione alla vendita ancora aperte.",
+    "invalid": "Verifica del pacchetto o del percorso fallita. Le installazioni esistenti non sono state modificate intenzionalmente. Controllare pacchetto attendibile e guida.",
+    "unsigned": "Pacchetto di sviluppo non firmato: serve -AllowUnsignedDev esplicito. Non è una versione commerciale.",
+    "exists": "Questa versione esiste già. Nessun file sovrascritto.",
+    "installed": "Versione di sviluppo installata. Avviare manualmente il programma; nessuna connessione effettuata.",
+    "removed": "Versione rimossa. Dati e credenziali utente conservati."
+  }
+}

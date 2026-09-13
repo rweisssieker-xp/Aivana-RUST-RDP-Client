@@ -25,11 +25,15 @@ pub struct Fingerprint {
     pub dependencies: Vec<String>,
 }
 impl Fingerprint {
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         ensure!(
             !self.os_version.is_empty()
                 && !self.os_build.is_empty()
-                && !self.architecture.is_empty(),
+                && !self.architecture.is_empty()
+                && matches!(
+                    self.start_mode.as_str(),
+                    "Auto" | "Manual" | "Disabled" | "Boot" | "System"
+                ),
             "OS-Beobachtung unvollständig"
         );
         for hash in [&self.executable_hash, &self.configuration_hash] {
@@ -55,6 +59,78 @@ struct Observation {
     production: Fingerprint,
     guest: Fingerprint,
 }
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RehearsalBaseline {
+    pub observed_at: DateTime<Utc>,
+    pub rehearsed_at: DateTime<Utc>,
+    pub fingerprints: Vec<Fingerprint>,
+}
+pub fn rehearsal_baseline(
+    plan: &ExecutionPlan,
+    references: &[String],
+    now: DateTime<Utc>,
+) -> Result<RehearsalBaseline> {
+    ensure!(references.len() <= 32, "Zu viele Nachweise");
+    let receipts = references
+        .iter()
+        .map(|reference| crate::test_lab::load_receipt(reference))
+        .collect::<Result<Vec<_>>>()?;
+    crate::promotion::check_evidence(plan, &receipts, now)?;
+    let mut observations = Vec::new();
+    let mut rehearsed = Vec::new();
+    for mapping in &plan.mappings {
+        let receipt = receipts
+            .iter()
+            .find(|r| {
+                r.lab_id == mapping.staging.profile_id.to_string()
+                    && r.vm_id == mapping.staging.host
+            })
+            .context("Passender Lab-/VM-Nachweis fehlt")?;
+        check(plan, receipt, now)?;
+        let observation = load_observation(plan, receipt)?;
+        // Validate the same loaded object used for the baseline, including on concurrent replacement.
+        validate_observation(plan, receipt, now, &observation)?;
+        rehearsed.push(receipt.finished);
+        observations.push(observation);
+    }
+    Ok(RehearsalBaseline {
+        observed_at: observations
+            .iter()
+            .map(|o| o.started)
+            .min()
+            .context("Beobachtung fehlt")?,
+        rehearsed_at: rehearsed.into_iter().min().context("Nachweis fehlt")?,
+        fingerprints: observations.into_iter().map(|o| o.production).collect(),
+    })
+}
+pub fn observe_production(
+    plan: &ExecutionPlan,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<Vec<Fingerprint>> {
+    crate::promotion::validate(plan)?;
+    let script = script(true);
+    let mut fingerprints = Vec::with_capacity(plan.mappings.len());
+    for mapping in &plan.mappings {
+        let raw = run_raw(
+            &script,
+            serde_json::json!({"host":mapping.production.host,"service":plan.service}),
+            cancel,
+            Duration::from_secs(90),
+        )?;
+        fingerprints.push(decode_production(&raw)?);
+    }
+    ensure!(
+        !cancel.load(std::sync::atomic::Ordering::Relaxed),
+        "Beobachtung abgebrochen"
+    );
+    Ok(fingerprints)
+}
+fn decode_production(raw: &[u8]) -> Result<Fingerprint> {
+    let fingerprint: Fingerprint = serde_json::from_slice(raw)
+        .map_err(|_| anyhow::anyhow!("Fingerprint-Antwort unvollständig oder ungültig"))?;
+    fingerprint.validate()?;
+    Ok(fingerprint)
+}
 fn path(hash: &str, lab: &str) -> Result<std::path::PathBuf> {
     ensure!(
         hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()),
@@ -75,13 +151,24 @@ fn compare(production: &Fingerprint, guest: &Fingerprint) -> Result<()> {
     Ok(())
 }
 pub(crate) fn check(plan: &ExecutionPlan, receipt: &LabReceipt, now: DateTime<Utc>) -> Result<()> {
+    validate_observation(plan, receipt, now, &load_observation(plan, receipt)?)
+}
+fn load_observation(plan: &ExecutionPlan, receipt: &LabReceipt) -> Result<Observation> {
     let hash = plan.hash()?;
     let file = std::fs::File::open(path(&hash, &receipt.lab_id)?)
         .context("Automatischer Vorlage-/Produktionsvergleich fehlt")?;
     let mut raw = Vec::new();
     file.take(131073).read_to_end(&mut raw)?;
     ensure!(raw.len() <= 131072, "Vergleichsbeleg zu groß");
-    let observation: Observation = serde_json::from_slice(&security::unprotect_secret(&raw)?)?;
+    serde_json::from_slice(&security::unprotect_secret(&raw)?).context("Vergleichsbeleg ungültig")
+}
+fn validate_observation(
+    plan: &ExecutionPlan,
+    receipt: &LabReceipt,
+    now: DateTime<Utc>,
+    observation: &Observation,
+) -> Result<()> {
+    let hash = plan.hash()?;
     ensure!(
         observation.plan_hash == hash
             && observation.lab_id == receipt.lab_id
@@ -139,9 +226,36 @@ pub fn observe(plan: &ExecutionPlan, lab: &Journal, user: &str, password: &str) 
     )
 }
 fn collect(payload: serde_json::Value) -> Result<(Fingerprint, Fingerprint)> {
-    run_script(SCRIPT, payload)
+    run_script(&script(false), payload)
 }
 fn run_script(script: &str, payload: serde_json::Value) -> Result<(Fingerprint, Fingerprint)> {
+    let raw = run_raw(
+        script,
+        payload,
+        &std::sync::atomic::AtomicBool::new(false),
+        Duration::from_secs(90),
+    )?;
+    #[derive(Deserialize)]
+    struct Pair {
+        production: Fingerprint,
+        guest: Fingerprint,
+    }
+    let pair: Pair = serde_json::from_slice(&raw)
+        .map_err(|_| anyhow::anyhow!("Fingerprint-Antwort unvollständig oder ungültig"))?;
+    pair.production.validate()?;
+    pair.guest.validate()?;
+    Ok((pair.production, pair.guest))
+}
+fn run_raw(
+    script: &str,
+    payload: serde_json::Value,
+    cancel: &std::sync::atomic::AtomicBool,
+    timeout: Duration,
+) -> Result<Vec<u8>> {
+    ensure!(
+        !cancel.load(std::sync::atomic::Ordering::Relaxed),
+        "Beobachtung abgebrochen"
+    );
     use base64::Engine;
     let bootstrap = format!(
         "$ErrorActionPreference='Stop';[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);$p=[Console]::In.ReadToEnd()|ConvertFrom-Json;try{{ {script} }}catch{{[Console]::Error.WriteLine('Readonly fingerprint collection failed');exit 1}}"
@@ -176,44 +290,59 @@ fn run_script(script: &str, payload: serde_json::Value) -> Result<(Fingerprint, 
         .context("stdin")?
         .write_all(&serde_json::to_vec(&payload)?)?;
     let mut out = child.stdout.take().context("stdout")?;
-    let reader = std::thread::spawn(move || {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
         let mut raw = Vec::new();
         let read = Read::by_ref(&mut out).take(131073).read_to_end(&mut raw);
-        (read, raw)
+        let _ = sender.send((read, raw));
     });
     let deadline = Instant::now();
-    let status = loop {
-        if let Some(s) = child.try_wait()? {
-            break s;
-        }
-        if deadline.elapsed() > Duration::from_secs(90) {
+    let mut status = None;
+    let mut output = None;
+    loop {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) || deadline.elapsed() > timeout {
             let _ = child.kill();
             let _ = child.wait();
-            anyhow::bail!("Vergleich überschreitet 90 Sekunden");
+            anyhow::bail!("Beobachtung abgebrochen oder Zeitgrenze überschritten");
+        }
+        if status.is_none() {
+            status = child.try_wait()?;
+        }
+        if output.is_none() {
+            output = receiver.try_recv().ok();
+        }
+        if output.as_ref().is_some_and(|(_, raw)| raw.len() > 131072) {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!("Fingerprint überschreitet Ausgabegrenze");
+        }
+        if status.is_some_and(|s| !s.success()) {
+            anyhow::bail!("Produktion konnte nicht gelesen werden; keine Freigabe");
+        }
+        if status.is_some() && output.is_some() {
+            break;
         }
         std::thread::sleep(Duration::from_millis(100));
-    };
-    ensure!(
-        status.success(),
-        "Vorlage/Produktion konnte nicht gelesen werden; keine Freigabe"
-    );
-    let (read, raw) = reader
-        .join()
-        .map_err(|_| anyhow::anyhow!("Fingerprint-Leser fehlgeschlagen"))?;
+    }
+    let (read, raw) = output.context("Fingerprint-Leser fehlgeschlagen")?;
     read?;
     ensure!(
         raw.len() <= 131072,
         "Fingerprint überschreitet Ausgabegrenze"
     );
-    #[derive(Deserialize)]
-    struct Pair {
-        production: Fingerprint,
-        guest: Fingerprint,
-    }
-    let pair: Pair = serde_json::from_slice(&raw)?;
-    Ok((pair.production, pair.guest))
+    Ok(raw)
 }
-const SCRIPT: &str = r#"
+fn script(production_only: bool) -> String {
+    format!(
+        "{FINGERPRINT_SCRIPT}\n{}",
+        if production_only {
+            PRODUCTION_SCRIPT
+        } else {
+            PAIR_SCRIPT
+        }
+    )
+}
+const FINGERPRINT_SCRIPT: &str = r#"
 $fingerprint={param($service)
  $ErrorActionPreference='Stop'
  $os=Get-CimInstance Win32_OperatingSystem
@@ -241,6 +370,11 @@ $fingerprint={param($service)
  try{$configHash=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($config)))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
  [pscustomobject]@{os_version=[string]$os.Version;os_build=[string]$os.BuildNumber;architecture=[string]$os.OSArchitecture;executable_hash=(Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant();executable_version=[string]$item.VersionInfo.FileVersion;configuration_hash=$configHash;start_mode=[string]$s.StartMode;dependencies=$dependencies}
 }
+"#;
+const PRODUCTION_SCRIPT: &str = r#"
+Invoke-Command -ComputerName $p.host -Authentication Negotiate -SessionOption (New-PSSessionOption -OpenTimeout 15000 -OperationTimeout 30000) -ScriptBlock $fingerprint -ArgumentList $p.service -ErrorAction Stop | ConvertTo-Json -Depth 5 -Compress
+"#;
+const PAIR_SCRIPT: &str = r#"
 $vm=Get-VM -Id ([guid]$p.vm) -ErrorAction Stop
 if($vm.Name -cne $p.name -or $vm.State -ne 'Running'){throw 'VM identity/state mismatch'}
 $switch=Get-VMSwitch -Id ([guid]$p.switch) -ErrorAction Stop
@@ -292,7 +426,143 @@ pub(crate) mod tests {
     #[cfg(windows)]
     fn actual_generated_script_uses_guarded_local_fixture() {
         // All remote and system-reading cmdlets are shadowed before the actual generated script runs.
-        let prefix = r#"
+        let prefix = SYSTEM_FIXTURE;
+        let payload = serde_json::json!({"host":"fixture.invalid","vm":uuid::Uuid::new_v4(),"name":"fixture","switch":uuid::Uuid::new_v4(),"service":"fixture","user":"fixture","password":"fixture"});
+        let (production, guest) =
+            run_script(&format!("{prefix}\n{}", script(false)), payload).unwrap();
+        compare(&production, &guest).unwrap();
+        assert_eq!(guest.dependencies, vec!["rpcss"]);
+    }
+    #[test]
+    #[cfg(windows)]
+    fn production_script_is_readonly_and_uses_current_identity() {
+        let guards = r#"
+function Get-VM {throw 'Forbidden VM access'}
+function Get-VMSwitch {throw 'Forbidden VM access'}
+function Get-VMNetworkAdapter {throw 'Forbidden VM access'}
+function Start-Service {throw 'Forbidden mutation'}
+function Stop-Service {throw 'Forbidden mutation'}
+function Set-ItemProperty {throw 'Forbidden mutation'}
+function Invoke-Command {param($ComputerName,$Authentication,$SessionOption,$VMId,$Credential,$ScriptBlock,$ArgumentList,$ErrorAction)
+ if($VMId -or $Credential -or $ComputerName -ne 'fixture.invalid' -or $Authentication -ne 'Negotiate'){throw 'Wrong transport'}
+ & $ScriptBlock @ArgumentList
+}
+"#;
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let raw = run_raw(
+            &format!("{SYSTEM_FIXTURE}\n{guards}\n{}", script(true)),
+            serde_json::json!({"host":"fixture.invalid","service":"fixture"}),
+            &cancel,
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        let fingerprint = decode_production(&raw).unwrap();
+        assert_eq!(fingerprint.dependencies, vec!["rpcss"]);
+        assert!(decode_production(b"{}").is_err());
+        assert!(
+            decode_production(b"secret invalid json")
+                .unwrap_err()
+                .to_string()
+                .find("secret")
+                .is_none()
+        );
+    }
+    #[test]
+    #[cfg(windows)]
+    fn collector_cancels_and_bounds_output() {
+        let cancel = std::sync::atomic::AtomicBool::new(true);
+        assert!(
+            run_raw(
+                "throw 'must not execute'",
+                serde_json::json!({}),
+                &cancel,
+                Duration::from_secs(1)
+            )
+            .is_err()
+        );
+        cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            run_raw(
+                "[Console]::Write('x'*131073)",
+                serde_json::json!({}),
+                &cancel,
+                Duration::from_secs(10)
+            )
+            .is_err()
+        );
+        assert!(
+            run_raw(
+                "Start-Sleep -Seconds 10",
+                serde_json::json!({}),
+                &cancel,
+                Duration::from_millis(100)
+            )
+            .is_err()
+        );
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let signal = cancel.clone();
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            signal.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+        let started = Instant::now();
+        assert!(
+            run_raw(
+                "Start-Sleep -Seconds 10",
+                serde_json::json!({}),
+                &cancel,
+                Duration::from_secs(10)
+            )
+            .is_err()
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+        worker.join().unwrap();
+    }
+    #[test]
+    fn production_rejects_invalid_targets_before_starting_collection() {
+        let target = crate::mission::Target {
+            profile_id: uuid::Uuid::new_v4(),
+            name: "fixture".into(),
+            host: "fixture.invalid".into(),
+            port: 3389,
+            protocol: "RDP".into(),
+            username: String::new(),
+            domain: String::new(),
+            route: String::new(),
+        };
+        let staging = crate::mission::Target {
+            profile_id: uuid::Uuid::new_v4(),
+            host: uuid::Uuid::new_v4().to_string(),
+            port: 0,
+            protocol: crate::promotion::LAB_PROTOCOL.into(),
+            route: "PowerShellDirect/private-switch".into(),
+            ..target.clone()
+        };
+        let mut plan = ExecutionPlan {
+            restart: false,
+            service: "Spooler".into(),
+            desired: crate::intelligence::ServiceState::Running,
+            health: crate::execution::HealthCheck::Http {
+                port: 8080,
+                tls: false,
+                path: "/health".into(),
+                status: 200,
+                contains: String::new(),
+                followups: vec![],
+            },
+            mappings: vec![crate::execution::Mapping {
+                production: target,
+                staging,
+            }],
+        };
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        plan.mappings[0].production.host = "bad;host".into();
+        assert!(observe_production(&plan, &cancel).is_err());
+        plan.mappings[0].production.host = "fixture.invalid".into();
+        plan.service = "bad'command".into();
+        assert!(observe_production(&plan, &cancel).is_err());
+    }
+    const SYSTEM_FIXTURE: &str = r#"
 function Get-VM {param($Id,$ErrorAction) [pscustomobject]@{Name=$p.name;State='Running'}}
 function Get-VMSwitch {param($Id,$ErrorAction) [pscustomobject]@{Id=$p.switch;SwitchType='Private'}}
 function Get-VMNetworkAdapter {param($VM) [pscustomobject]@{SwitchId=$p.switch}}
@@ -304,11 +574,6 @@ function Get-Item {param($LiteralPath,$ErrorAction) [pscustomobject]@{Length=20;
 function Get-Service {param($Name,$ErrorAction) [pscustomobject]@{ServicesDependedOn=@([pscustomobject]@{Name='RpcSs'})}}
 function Get-FileHash {param($LiteralPath,$Algorithm) [pscustomobject]@{Hash=('A'*64)}}
 "#;
-        let payload = serde_json::json!({"host":"fixture.invalid","vm":uuid::Uuid::new_v4(),"name":"fixture","switch":uuid::Uuid::new_v4(),"service":"fixture","user":"fixture","password":"fixture"});
-        let (production, guest) = run_script(&format!("{prefix}\n{SCRIPT}"), payload).unwrap();
-        compare(&production, &guest).unwrap();
-        assert_eq!(guest.dependencies, vec!["rpcss"]);
-    }
     #[test]
     fn comparison_is_strict_and_missing_observations_fail() {
         let base = fixture();
@@ -326,21 +591,6 @@ function Get-FileHash {param($LiteralPath,$Algorithm) [pscustomobject]@{Hash=('A
                 _ => changed.dependencies.clear(),
             };
             assert!(compare(&base, &changed).is_err());
-        }
-    }
-    #[test]
-    fn generated_script_has_readonly_transports_and_no_tls_bypass() {
-        assert!(SCRIPT.contains("-VMId"));
-        assert!(SCRIPT.contains("-Authentication Negotiate"));
-        assert!(SCRIPT.contains("Get-FileHash"));
-        for forbidden in [
-            "Start-Service",
-            "Stop-Service",
-            "Set-ItemProperty",
-            "SkipCACheck",
-            "ServerCertificateValidationCallback",
-        ] {
-            assert!(!SCRIPT.contains(forbidden));
         }
     }
 }

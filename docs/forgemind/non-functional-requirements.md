@@ -4,12 +4,12 @@
 
 ```json
 {
-  "id": "foundation_mtwgrrsd_nfrs",
+  "id": "foundation_mty0duy5_nfrs",
   "revision": 1,
   "decisionState": "draft",
   "state": "ready",
   "dependsOn": [
-    "foundation_mtwgrrsd_architecture"
+    "foundation_mty0duy5_architecture"
   ],
   "requirements": [
     "Preserve applicable accessibility.",

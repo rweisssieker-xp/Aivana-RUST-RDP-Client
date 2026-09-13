@@ -12,6 +12,7 @@ const AMBER: Color32 = Color32::from_rgb(159, 87, 12);
 #[derive(Default, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub(super) struct DesktopState {
+    locale: crate::localization::Locale,
     order: Vec<Uuid>,
     group: String,
     compact: bool,
@@ -37,11 +38,17 @@ pub(super) struct DesktopState {
 
 impl DesktopState {
     pub fn load() -> Self {
-        app_data_file("desktop-layout.json")
+        let mut state: Self = app_data_file("desktop-layout.json")
             .ok()
             .and_then(|path| std::fs::read(path).ok())
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let args = std::env::args().collect::<Vec<_>>();
+        if let Some(language) = args.windows(2).find(|w| w[0] == "--language")
+            .and_then(|w| crate::localization::Locale::parse(&w[1])) {
+            state.locale = language;
+        }
+        state
     }
 
     fn save(&self) -> anyhow::Result<()> {
@@ -112,6 +119,7 @@ fn child(ui: &mut Ui, id: impl std::hash::Hash, rect: Rect) -> Ui {
 
 impl AivanaApp {
     pub(super) fn desktop_shell(&mut self, ui: &mut Ui) {
+        let locale = self.desktop.locale;
         let ctx = ui.ctx().clone();
         let scale = self.desktop.workbench.scale.clamp(0.8, 1.75);
         if (ctx.zoom_factor() - scale).abs() > 0.01 {
@@ -145,6 +153,15 @@ impl AivanaApp {
             top.style_mut().visuals = egui::Visuals::dark();
         }
         top.horizontal(|ui| {
+            let previous = self.desktop.locale;
+            egui::ComboBox::from_id_salt("application-language")
+                .selected_text(self.desktop.locale.name())
+                .show_ui(ui, |ui| {
+                    for language in crate::localization::Locale::ALL {
+                        ui.selectable_value(&mut self.desktop.locale, language, language.name());
+                    }
+                });
+            if previous != self.desktop.locale { self.save_desktop_layout(); }
             ui.label(
                 RichText::new("Relayne")
                     .size(25.0)
@@ -156,7 +173,7 @@ impl AivanaApp {
                     }),
             );
             ui.add_space(12.0);
-            if (focused || self.view != View::Sessions) && ui.button("Arbeitsbereich").clicked() {
+            if (focused || self.view != View::Sessions) && ui.button(crate::localization::tr(locale, "Arbeitsbereich")).clicked() {
                 self.desktop.focus = false;
                 self.view = View::Sessions;
             }
@@ -165,7 +182,7 @@ impl AivanaApp {
                     RichText::new(if self.view == View::Missions {
                         "MISSION CONTROL"
                     } else {
-                        "RECHNERZENTRALE"
+                        crate::localization::tr(locale, "RECHNERZENTRALE")
                     })
                     .size(11.0)
                     .color(MUTED),
@@ -176,7 +193,7 @@ impl AivanaApp {
                     .button(if focused {
                         "Aktionen · Strg Umschalt K"
                     } else {
-                        "Suchen & Aktionen · Strg K"
+                        crate::localization::tr(locale, "Suchen & Aktionen · Strg K")
                     })
                     .clicked()
                 {
@@ -254,7 +271,8 @@ impl AivanaApp {
         } else {
             ScrollArea::vertical()
                 .auto_shrink([false, false])
-                .show(&mut body, |ui| match self.view {
+                    .show(&mut body, |ui| match self.view {
+                        View::Release => super::release_panel::draw(ui, self.desktop.locale),
                     View::Missions => self.missions_view(ui),
                     View::Operations => self.operations_view(ui),
                     View::SessionWindows => self.session_layouts_ui(ui),
@@ -272,6 +290,9 @@ impl AivanaApp {
                     View::Incident => self.incident_view(ui),
                     View::Promotion => self.promotion_view(ui),
                     View::Recovery => self.recovery_view(ui),
+                    View::RecoveryPlans => self.contracts_view(ui),
+                    View::RecoveryDaemon => self.recovery_daemon_panel(ui),
+                    View::RecoveryExtensions => self.recovery_extensions_view(ui),
                     View::Terminal => {}
                     View::Connections => self.connections_view(ui),
                     View::Approvals => self.approvals_view(ui),
@@ -285,12 +306,12 @@ impl AivanaApp {
     }
 
     fn desktop_navigation(&mut self, ui: &mut Ui) {
-        ui.label(RichText::new("ARBEITSBEREICHE").size(11.0).color(MUTED));
+        ui.label(RichText::new(crate::localization::tr(self.desktop.locale,"ARBEITSBEREICHE")).size(11.0).color(MUTED));
         ui.add_space(12.0);
         if ui
             .selectable_label(
                 self.view == View::Sessions && self.desktop.group.is_empty(),
-                "Alle Rechner",
+                crate::localization::tr(self.desktop.locale,"Alle Rechner"),
             )
             .clicked()
         {
@@ -302,7 +323,7 @@ impl AivanaApp {
             self.save_desktop_layout();
         }
         if ui
-            .selectable_label(self.desktop.workbench.favorites, "Favoriten")
+            .selectable_label(self.desktop.workbench.favorites, crate::localization::tr(self.desktop.locale,"Favoriten"))
             .clicked()
         {
             self.desktop.workbench.favorites = true;
@@ -335,7 +356,8 @@ impl AivanaApp {
                 }
             });
         ui.add_space(26.0);
-        ui.label(RichText::new("VERWALTEN").size(11.0).color(MUTED));
+        ui.label(RichText::new(crate::localization::tr(self.desktop.locale,"VERWALTEN")).size(11.0).color(MUTED));
+        let recovery_notices = crate::recovery_daemon::unread_count();
         for (view, label) in [
             (View::Missions, "Mission Control"),
             (View::Operations, "Remote-Werkzeuge"),
@@ -347,6 +369,9 @@ impl AivanaApp {
             (View::Vision, "Bildschirm verstehen"),
             (View::Intelligence, "Planen & Lernen"),
             (View::Recovery, "Recovery Agent"),
+            (View::RecoveryPlans, "Recovery-Pläne"),
+            (View::RecoveryDaemon, "Hintergrund"),
+            (View::RecoveryExtensions, "Tickets & Katalog"),
             (View::Insights, "Ursachen & Lösungen"),
             (View::Execution, "Prüfen & Ausführen"),
             (View::Promotion, "Klon → Produktion"),
@@ -359,7 +384,13 @@ impl AivanaApp {
             (View::Approvals, "Freigaben"),
             (View::Workspaces, "Abläufe & Wissen"),
             (View::Settings, "Einstellungen"),
+            (View::Release, "Verkaufsbereitschaft"),
         ] {
+            let label = if view == View::RecoveryDaemon && recovery_notices > 0 {
+                format!("{} ({recovery_notices})", crate::localization::tr(self.desktop.locale, "Hintergrund"))
+            } else {
+                crate::localization::tr(self.desktop.locale, label).to_owned()
+            };
             if ui.selectable_label(self.view == view, label).clicked() {
                 self.view = view;
             }
@@ -1087,6 +1118,12 @@ impl AivanaApp {
                         ("Bildschirm verstehen", View::Vision),
                         ("Planen & Lernen", View::Intelligence),
                         ("Recovery Agent", View::Recovery),
+                        ("Wiederherstellungspläne", View::RecoveryPlans),
+                        ("Recovery-Hintergrundbetrieb", View::RecoveryDaemon),
+                        (
+                            "Tickets und Kompatibilitätskatalog",
+                            View::RecoveryExtensions,
+                        ),
                         ("Ursachen & Lösungen", View::Insights),
                         ("Prüfen & Ausführen", View::Execution),
                         ("Klon → Produktion", View::Promotion),
@@ -1465,6 +1502,9 @@ mod tests {
                 View::Incident,
                 View::Promotion,
                 View::Recovery,
+                View::RecoveryPlans,
+                View::RecoveryDaemon,
+                View::RecoveryExtensions,
                 View::Terminal,
             ] {
                 app.view = view;

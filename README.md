@@ -4,6 +4,16 @@ Native Windows-Arbeitsumgebung für RDP, SSH, geprüfte Remote-Aufträge und gem
 
 Neu: Der [Recovery Agent](docs/relayne-recovery-agent.md) verbindet Störungsbeschreibung und geprüften KI-Dienstvorschlag mit Klon-Generalprobe, Produktionsfreigabe und fallbezogenem Ergebnisnachweis. Aufruf über **Recovery Agent**; die Übernahme eines Vorschlags startet keine Verbindung.
 
+[Lebende Wiederherstellungspläne](docs/relayne-living-recovery-plans.md) ergänzen getrennte Prüfintervalle, lesende Produktionsvergleiche, dauerhafte Entwertung bei Änderungen und eine Bereitschaftsübersicht. Automatische Vergleiche benötigen Zustimmung für die aktuelle Sitzung.
+
+[KI-generierte Anwendungstests](docs/relayne-ai-application-tests.md) übersetzen freigegebene Störungs- und Ablaufbeschreibungen in prüfbare HTTP-Erfolgskriterien. Die ausdrückliche Übernahme ersetzt die bisherigen Kriterien und erfordert eine neue Generalprobe.
+
+[Erweiterte Recovery-Funktionen](docs/recovery-platform-expansion.md): Hintergrundüberwachung und geplante Klonproben, Expert Procedure Compiler, geprüfter Dienstneustart, signierter Kompatibilitätskatalog sowie Jira-/JSON-Tickets mit geprüften Ergebnisberichten.
+
+[Änderungen und Fehler im Klon erproben](docs/relayne-change-trials.md): Starttypänderung, reproduzierter Dienstausfall, Reparaturnachweis und geprüfter Checkpoint-Rückweg im isolierten Testlabor.
+
+[Ursachen durch Vergleichstests eingrenzen](docs/relayne-differential-diagnosis.md): vier explizite Ursachenhypothesen, unterscheidende Prüfungen, Widersprüche und fehlende Belege; getrennte Dev-Simulation und später freigegebene Leseprüfungen.
+
 Aktueller Ausbau: [signierte Reparaturpakete, automatische Klonvergleiche, erweiterte Wiederherstellung, Icon-Prozeduren, RemoteApp, Gateway-Interaktion und Unternehmensidentitäten](docs/relayne-expanded-usps.md). Die Übersicht beschreibt den ausführbaren Umfang und die weiterhin nötige Infrastrukturabnahme. Die [vorherigen Erweiterungen](docs/relayne-next-usps.md) bleiben als Entwicklungsstand dokumentiert.
 
 Für Windows-Dienstaufträge verbindet [Klon → Produktion](docs/relayne-promotion.md) jetzt die Generalprobe mit der Produktionsvorbereitung: gespeicherte Nachweise binden Dienst, HTTP-Prüfung, VM und Produktionsziele, gelten höchstens eine Stunde und werden vor jeder Änderung erneut geprüft. Produktionsfreigabe und Wiederherstellung verwenden den vorhandenen Ausführungsablauf.
@@ -364,3 +374,8 @@ cargo test
 cargo build
 cargo run -- --rdp-smoke-test
 ```
+# Distribution / Auslieferung / Distribution / Distribuzione
+
+[English (US)](docs/distribution/en-US/guide.md) · [Deutsch](docs/distribution/de/guide.md) · [Français](docs/distribution/fr/guide.md) · [Italiano](docs/distribution/it/guide.md)
+
+Development only · Nur Entwicklung · Développement uniquement · Solo sviluppo.
