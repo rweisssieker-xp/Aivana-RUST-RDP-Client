@@ -44,6 +44,7 @@ const ACTIVE_GOAL_OBJECTIVE: &str =
 
 mod capture;
 mod release_panel;
+mod learned_repair_panel;
 mod change_history_panel;
 mod collaboration_capture;
 mod collaboration_panel;

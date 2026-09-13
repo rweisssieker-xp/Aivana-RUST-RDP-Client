@@ -7,6 +7,9 @@
 | fr | [Français](fr/guide.md) |
 | it | [Italiano](it/guide.md) |
 
+Learning repair recommendations / Lernende Reparaturempfehlungen / Recommandations de réparation / Raccomandazioni di riparazione:
+[en-US](en-US/learning.md) · [de](de/learning.md) · [fr](fr/learning.md) · [it](it/learning.md)
+
 ## en-US
 Development distribution only. The guide and release view are translated; full localization of specialist panels and earlier documents remains open. Packaging uses an explicit file allowlist. Publisher signing, operational acceptance, final privacy/terms, third-party notices, payment and licensing are not complete.
 

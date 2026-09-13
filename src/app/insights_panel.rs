@@ -247,6 +247,7 @@ impl AivanaApp {
         self.solution_recommendations_ui(ui);
     }
     fn solution_recommendations_ui(&mut self, ui: &mut Ui) {
+        self.learned_repairs_ui(ui);
         ui.heading("Passende Lösungen aus Erfahrung");
         ui.collapsing("Automatisch gelernte geprüfte Dienstabläufe", |ui| {
             let lessons=self.execution_lessons();

@@ -322,6 +322,11 @@ impl AivanaApp {
         }
         self.execution.book.lessons()
     }
+
+    pub(super) fn ranked_execution_lessons(&self, target: &crate::mission::Target) -> Vec<crate::execution::learning::RankedLesson> {
+        if self.execution.error.is_some() { return Vec::new(); }
+        crate::execution::learning::rank(&self.execution.book, target, Utc::now())
+    }
     pub(super) fn use_execution_lesson(&mut self, lesson: &crate::execution::ExecutionLesson) {
         if self
             .execution

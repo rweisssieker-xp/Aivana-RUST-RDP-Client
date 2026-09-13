@@ -12,7 +12,7 @@ const AMBER: Color32 = Color32::from_rgb(159, 87, 12);
 #[derive(Default, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub(super) struct DesktopState {
-    locale: crate::localization::Locale,
+    pub(super) locale: crate::localization::Locale,
     order: Vec<Uuid>,
     group: String,
     compact: bool,

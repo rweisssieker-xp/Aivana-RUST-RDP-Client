@@ -16,6 +16,7 @@ use std::{
 use uuid::Uuid;
 #[path = "http_health.rs"]
 pub(crate) mod http_health;
+pub(crate) mod learning;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HttpGetStep {
@@ -717,6 +718,60 @@ mod tests {
         run.assess_mutation(r#"{"service":"Spooler","before":"Stopped","desired":"Running","actual":"Running","verified":true}"#, false).unwrap();
         run.finish_health(health(true)).unwrap();
         run
+    }
+
+    fn learning_http_plan() -> ExecutionPlan {
+        let mut p = plan();
+        p.health = HealthCheck::Http { port: 80, path: "/health".into(), status: 200, contains: "healthy".into(), tls: false, followups: vec![] };
+        p
+    }
+
+    #[test]
+    fn learning_repair_history_is_target_bound_and_separates_rehearsal() {
+        let p=learning_http_plan(); let selected=p.mappings[0].production.clone();
+        let good=completed_success(p.clone(),false);
+        let rehearsal=completed_success(p,true);
+        let mut other=learning_http_plan();other.mappings[0].production=target("other");
+        let other=completed_success(other,false);
+        let rows=learning::rank(&Journal{runs:vec![good,rehearsal,other]},&selected,Utc::now());
+        assert_eq!(rows.len(),1);assert_eq!(rows[0].lesson.production.successes,1);
+        assert_eq!(rows[0].lesson.rehearsal.successes,1);assert_eq!(rows[0].excluded,1);
+        assert!(rows[0].eligible());assert_eq!(rows[0].score,5);
+    }
+
+    #[test]
+    fn learning_new_adverse_result_retracts_prior_recommendation() {
+        let p=learning_http_plan();let selected=p.mappings[0].production.clone();
+        let mut good=completed_success(p.clone(),false);
+        let past=Utc::now()-chrono::Duration::days(1);
+        good.finished=Some(past);good.targets[0].captured=Some(past);
+        good.targets[0].baseline.as_mut().unwrap().at=past;good.targets[0].health.as_mut().unwrap().at=past;
+        let mut bad=completed_success(p,false);bad.targets[0].phase=Phase::Restored;
+        let rows=learning::rank(&Journal{runs:vec![bad,good]},&selected,Utc::now());
+        assert_eq!(rows[0].lesson.production.successes,1);assert_eq!(rows[0].lesson.production.restored,1);
+        assert!(!rows[0].eligible());assert_eq!(rows[0].score,-3);
+    }
+
+    #[test]
+    fn learning_rejects_duplicates_expired_and_future_records() {
+        let p=learning_http_plan();let selected=p.mappings[0].production.clone();
+        let good=completed_success(p.clone(),false);
+        let mut old=completed_success(p.clone(),false);old.finished=Some(Utc::now()-chrono::Duration::days(91));
+        let mut future=completed_success(p,false);future.finished=Some(Utc::now()+chrono::Duration::days(1));
+        let rows=learning::rank(&Journal{runs:vec![good.clone(),good,old,future]},&selected,Utc::now());
+        assert_eq!(rows[0].excluded,4);assert_eq!(rows[0].lesson.production.successes,0);assert!(!rows[0].eligible());
+    }
+
+    #[test]
+    fn learning_healthy_noop_and_tcp_are_not_repair_success() {
+        let p=learning_http_plan();let selected=p.mappings[0].production.clone();
+        let mut noop=completed_success(p,false);noop.targets[0].before=Some(ServiceState::Running);
+        noop.targets[0].baseline.as_mut().unwrap().passed=true;
+        let rows=learning::rank(&Journal{runs:vec![noop]},&selected,Utc::now());
+        assert_eq!(rows[0].lesson.production.unknown,1);assert!(!rows[0].eligible());
+        assert!(rows[0].gaps.contains(&"gap_baseline"));assert!(rows[0].gaps.contains(&"gap_transition"));
+        let tcp=completed_success(plan(),false);let selected=tcp.plan.mappings[0].production.clone();
+        assert!(!learning::rank(&Journal{runs:vec![tcp]},&selected,Utc::now())[0].eligible());
     }
     #[test]
     fn execution_lessons_group_hosts_but_separate_rehearsal_and_health_plan() {
