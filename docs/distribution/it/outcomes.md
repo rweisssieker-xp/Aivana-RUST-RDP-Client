@@ -16,3 +16,15 @@ Copia rapporto in JSON inserisce negli appunti identificativo del profilo selezi
 ## Verifica — 2026-09-13
 
 Quattro test mirati di risultati/interfaccia e 21 test di regressione dell’esecuzione superati (tre comuni). La nuova vista è stata renderizzata in quattro lingue a 640 e 1440 pixel. Compilazione offline e formattazione verificate. Nessuna nuova suite completa o connessione reale; restano gli avvisi esistenti.
+
+## Avvisi dallo storico delle riparazioni
+
+La sezione espandibile valuta le riparazioni documentate in produzione per chiave di procedura identica (servizio, azione e controllo di salute). Prove di test, identificativi duplicati, date future/scadute e intervalli incoerenti sono esclusi. Nessuna notifica, richiesta di rete o azione automatica; il rapporto viene ricalcolato durante la visualizzazione.
+
+Riparazioni ripetute: almeno tre esecuzioni distinte su almeno due date UTC negli ultimi sette giorni. Indica attività di riparazione ricorrente, senza provare una causa comune degli incidenti.
+
+Intervalli più lunghi: gli ultimi tre successi vengono confrontati con i tre precedenti in 30 giorni. Ogni gruppo copre almeno due date UTC; i tre recenti devono rientrare negli ultimi sette giorni. La mediana deve almeno raddoppiare e aumentare di almeno 5.000 millisecondi. Una mediana iniziale pari a zero non attiva la regola.
+
+Ogni segnale contiene gli identificativi sorgente e, per il rallentamento, entrambe le mediane. L’esportazione JSON usa ora relayne-outcome-impact-v2 con identità delle procedure e segnali. Sono euristiche retrospettive, non previsioni statisticamente validate. Nessuna soglia raggiunta non dimostra né salute del sistema né dati sufficienti. Restano i limiti della misurazione dei soli successi.
+
+Verifica degli avvisi (2026-09-13): superati 24 test di esecuzione inclusi tre nuovi test degli avvisi, oltre al test dell’interfaccia in quattro lingue. Compilazione offline e formattazione verificate. Nessuna nuova suite completa o connessione reale.

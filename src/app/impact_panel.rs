@@ -14,6 +14,62 @@ fn t(locale: Locale, key: &str) -> &str {
 }
 const TEXT: &[[&str; 5]] = &[
     [
+        "radar",
+        "Frühwarnradar aus Reparaturverläufen",
+        "Repair-history warning radar",
+        "Alertes issues de l’historique des réparations",
+        "Avvisi dallo storico delle riparazioni",
+    ],
+    [
+        "radar_rules",
+        "Nur belegte Produktionserfolge, je identischem Verfahren. Wiederholung: mindestens 3 Läufe an 2 UTC-Tagen in 7 Tagen. Verlangsamung: letzte 3 gegen vorherige 3 Erfolge in 30 Tagen, beide Gruppen an mehreren Tagen; mindestens Faktor 2 und 5 Sekunden mehr.",
+        "Evidenced production successes only, per identical procedure. Repetition: at least 3 runs on 2 UTC dates in 7 days. Slowdown: latest 3 versus preceding 3 successes in 30 days, each group across multiple dates; at least 2x and 5 seconds more.",
+        "Réussites de production étayées uniquement, par procédure identique. Répétition : au moins 3 exécutions sur 2 dates UTC en 7 jours. Ralentissement : 3 dernières réussites contre 3 précédentes en 30 jours, chaque groupe sur plusieurs dates ; au moins 2 fois plus et 5 secondes supplémentaires.",
+        "Solo successi documentati in produzione, per procedura identica. Ripetizione: almeno 3 esecuzioni su 2 date UTC in 7 giorni. Rallentamento: ultimi 3 successi rispetto ai 3 precedenti in 30 giorni, ogni gruppo su più date; almeno 2 volte e 5 secondi in più.",
+    ],
+    [
+        "radar_none",
+        "Keine Warnschwelle erreicht. Das ist kein Nachweis eines gesunden Systems; Daten können fehlen.",
+        "No warning threshold reached. This does not prove system health; data may be missing.",
+        "Aucun seuil d’alerte atteint. Cela ne prouve pas le bon état du système ; des données peuvent manquer.",
+        "Nessuna soglia di avviso raggiunta. Non dimostra la salute del sistema; possono mancare dati.",
+    ],
+    [
+        "repeated",
+        "Wiederholte belegte Reparaturen — dauerhafte Ursache prüfen",
+        "Repeated evidenced repairs — investigate persistent causes",
+        "Réparations étayées répétées — rechercher les causes persistantes",
+        "Riparazioni documentate ripetute — verificare cause persistenti",
+    ],
+    [
+        "slower",
+        "Prüfintervalle deutlich länger — Verfahren und Umgebung prüfen",
+        "Verification intervals substantially longer — review procedure and environment",
+        "Intervalles de vérification nettement plus longs — revoir procédure et environnement",
+        "Intervalli di verifica molto più lunghi — controllare procedura e ambiente",
+    ],
+    [
+        "radar_limit",
+        "Rückblickende Heuristik, keine Ausfallprognose oder automatisch ausgeführte Maßnahme. Verschiedene Vorfälle können dieselbe Reparatur benötigen.",
+        "Retrospective heuristic, not an outage forecast or automatically executed action. Different incidents may require the same repair.",
+        "Heuristique rétrospective, pas une prévision de panne ni une action automatique. Des incidents différents peuvent nécessiter la même réparation.",
+        "Euristica retrospettiva, non una previsione di guasto o un’azione automatica. Incidenti diversi possono richiedere la stessa riparazione.",
+    ],
+    [
+        "radar_baseline",
+        "Vorheriger Median → aktueller Median (ms)",
+        "Previous median → current median (ms)",
+        "Médiane précédente → médiane actuelle (ms)",
+        "Mediana precedente → mediana attuale (ms)",
+    ],
+    [
+        "radar_runs",
+        "Auslösende Laufkennungen",
+        "Triggering run identifiers",
+        "Identifiants des exécutions déclenchantes",
+        "Identificativi delle esecuzioni che attivano l’avviso",
+    ],
+    [
         "title",
         "Nachweisbare Ergebnisse",
         "Measured outcomes",
@@ -121,6 +177,43 @@ const TEXT: &[[&str; 5]] = &[
     ],
 ];
 fn draw(ui: &mut Ui, locale: Locale, report: &Report) {
+    ui.collapsing(t(locale, "radar"), |ui| {
+        ui.label(t(locale, "radar_rules"));
+        ui.label(t(locale, "radar_limit"));
+        if report.signals.is_empty() {
+            ui.label(t(locale, "radar_none"));
+        }
+        for signal in &report.signals {
+            ui.group(|ui| {
+                ui.strong(format!(
+                    "{} · {}",
+                    signal.service,
+                    t(
+                        locale,
+                        match signal.kind {
+                            crate::execution::impact::radar::Kind::RepeatedRepairs => "repeated",
+                            crate::execution::impact::radar::Kind::SlowerVerification => "slower",
+                        }
+                    )
+                ));
+                if let (Some(before), Some(after)) =
+                    (signal.baseline_median_ms, signal.recent_median_ms)
+                {
+                    ui.label(format!(
+                        "{}: {:.0} → {:.0}",
+                        t(locale, "radar_baseline"),
+                        before,
+                        after
+                    ));
+                }
+                ui.collapsing(t(locale, "radar_runs"), |ui| {
+                    for id in &signal.source_runs {
+                        ui.monospace(id.to_string());
+                    }
+                });
+            });
+        }
+    });
     ui.label(t(locale, "scope"));
     ui.label(t(locale, "limits"));
     for (key, c) in [
@@ -211,6 +304,7 @@ mod tests {
     #[test]
     fn impact_view_renders_all_languages_and_empty_metrics() {
         let report = crate::execution::impact::Report {
+            signals: vec![],
             selected_profile: Uuid::new_v4(),
             schema: "test",
             as_of: Utc::now(),

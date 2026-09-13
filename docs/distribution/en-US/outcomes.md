@@ -16,3 +16,15 @@ Copy outcome report as JSON creates a local clipboard report with selected profi
 ## Verification — 2026-09-13
 
 Four focused outcome/UI tests and 21 execution regression tests passed (three overlap). The new view was rendered in four languages at 640 and 1440 pixels. Offline application build and formatting check passed. No full-suite rerun or live connections; existing build warnings remain.
+
+## Repair-history warning radar
+
+The expandable radar evaluates evidenced production repairs by identical procedure key (service, action and health check). Rehearsal, duplicate run IDs, future/expired timestamps and inconsistent intervals are excluded. It generates no notifications, network requests or automatic actions; the report is recomputed when the view is opened/rendered.
+
+Repeated repairs: at least three distinct runs on at least two UTC dates during the last seven days. This indicates recurring repair activity, not proof that the incidents share a cause.
+
+Slower verification: the latest three successes are compared with the preceding three within a 30-day history. Each group must cover at least two UTC dates; the recent three must all be within seven days. The recent median must be at least twice the baseline and at least 5,000 milliseconds greater; a zero baseline cannot trigger this rule.
+
+Each signal includes the exact source run identifiers and, for slowdown, both medians. JSON export now uses schema relayne-outcome-impact-v2 and includes procedure identities and signals. These are retrospective heuristics, not statistically validated forecasts. No threshold reached does not establish system health or sufficient evidence. Existing success-only timing limitations still apply.
+
+Radar verification (2026-09-13): 24 execution tests including three new radar tests, plus the four-language UI test, passed. Offline build and formatting checks passed. No full-suite rerun or live connection.

@@ -1,5 +1,6 @@
 //! Auditable observed outcomes. No manual baseline, labor savings, MTTR or ROI claims.
 use super::*;
+pub(crate) mod radar;
 
 #[derive(Default, Debug, Serialize)]
 pub struct Cohort {
@@ -12,6 +13,9 @@ pub struct Cohort {
 }
 #[derive(Debug, Serialize)]
 pub struct Sample {
+    pub procedure_key: String,
+    pub service: String,
+    pub restart: bool,
     pub run: Uuid,
     pub target: Uuid,
     pub rehearsal: bool,
@@ -21,6 +25,7 @@ pub struct Sample {
 }
 #[derive(Debug, Serialize)]
 pub struct Report {
+    pub signals: Vec<radar::Signal>,
     pub selected_profile: Uuid,
     pub schema: &'static str,
     pub as_of: DateTime<Utc>,
@@ -47,8 +52,9 @@ fn median(values: &mut [i64]) -> Option<f64> {
 }
 pub fn report(journal: &Journal, target: &Target, now: DateTime<Utc>) -> Report {
     let mut result = Report {
+        signals: vec![],
         selected_profile: target.profile_id,
-        schema: "relayne-outcome-impact-v1",
+        schema: "relayne-outcome-impact-v2",
         as_of: now,
         window_days: learning::WINDOW_DAYS,
         production: Cohort::default(),
@@ -94,6 +100,9 @@ pub fn report(journal: &Journal, target: &Target, now: DateTime<Utc>) -> Report 
                 continue;
             }
             result.samples.push(Sample {
+                procedure_key: row.lesson.key.clone(),
+                service: row.lesson.service.clone(),
+                restart: row.lesson.restart,
                 run: run.id,
                 target: target.target.profile_id,
                 rehearsal: run.rehearsal,
@@ -103,6 +112,7 @@ pub fn report(journal: &Journal, target: &Target, now: DateTime<Utc>) -> Report 
             });
         }
     }
+    result.signals = radar::detect(&result.samples, now);
     result
         .samples
         .sort_by_key(|s| (s.observed_at, s.run, s.target));

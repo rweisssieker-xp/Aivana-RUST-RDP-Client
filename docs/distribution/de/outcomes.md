@@ -16,3 +16,15 @@ Ergebnisbericht als JSON kopieren erzeugt einen lokalen Zwischenablagebericht mi
 ## Prüfung — 2026-09-13
 
 Vier gezielte Ergebnis-/Oberflächentests und 21 Ausführungs-Regressionstests bestanden (drei überschneiden sich). Die neue Ansicht wurde in vier Sprachen bei 640 und 1440 Pixeln gerendert. Offline-Build und Formatprüfung erfolgreich. Kein erneuter Gesamttest und keine Live-Verbindungen; bestehende Build-Warnungen bleiben erhalten.
+
+## Frühwarnradar aus Reparaturverläufen
+
+Das aufklappbare Radar wertet belegte Produktionsreparaturen je identischem Verfahrensschlüssel aus (Dienst, Aktion und Funktionstest). Testläufe, doppelte Laufkennungen, zukünftige/veraltete Zeitpunkte und inkonsistente Intervalle bleiben ausgeschlossen. Es erzeugt keine Benachrichtigungen, Netzwerkaufrufe oder automatischen Aktionen; die Auswertung erfolgt beim Öffnen/Darstellen der Ansicht.
+
+Wiederholte Reparaturen: mindestens drei unterschiedliche Läufe an mindestens zwei UTC-Tagen innerhalb der letzten sieben Tage. Dies zeigt wiederkehrende Reparaturaktivität, belegt aber keine gemeinsame Störungsursache.
+
+Längere Prüfintervalle: Die letzten drei Erfolge werden mit den drei vorherigen innerhalb von 30 Tagen verglichen. Jede Gruppe muss mindestens zwei UTC-Tage abdecken; die jüngsten drei müssen innerhalb von sieben Tagen liegen. Ihr Median muss mindestens doppelt so hoch und mindestens 5.000 Millisekunden größer sein. Eine Null-Baseline löst diese Regel nicht aus.
+
+Jede Warnung enthält die auslösenden Laufkennungen und bei Verlangsamung beide Mediane. Der JSON-Export verwendet jetzt das Schema relayne-outcome-impact-v2 mit Verfahrensidentitäten und Warnungen. Dies sind rückblickende Heuristiken, keine statistisch validierten Prognosen. Keine erreichte Schwelle belegt weder Systemgesundheit noch ausreichende Daten. Die Grenzen einer Zeitmessung nur erfolgreicher Fälle bleiben bestehen.
+
+Radar-Prüfung (2026-09-13): 24 Ausführungs-Tests einschließlich drei neuer Radar-Tests sowie der viersprachige Oberflächentest bestanden. Offline-Build und Formatprüfung erfolgreich. Kein erneuter Gesamttest und keine Live-Verbindung.

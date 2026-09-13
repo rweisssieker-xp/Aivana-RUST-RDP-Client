@@ -16,3 +16,15 @@ Copier le rapport en JSON place dans le presse-papiers l’identifiant du profil
 ## Vérification — 2026-09-13
 
 Quatre tests ciblés de résultats/interface et 21 tests de régression d’exécution réussis (trois communs). La nouvelle vue a été rendue en quatre langues à 640 et 1440 pixels. Compilation hors ligne et formatage vérifiés. Aucun nouveau test global ni connexion réelle ; avertissements existants conservés.
+
+## Alertes issues de l’historique des réparations
+
+La section dépliable évalue les réparations de production étayées par clé de procédure identique (service, action et contrôle de santé). Répétitions de test, identifiants dupliqués, dates futures/expirées et intervalles incohérents sont exclus. Aucune notification, requête réseau ou action automatique ; le rapport est recalculé lors de l’affichage.
+
+Réparations répétées : au moins trois exécutions distinctes sur au moins deux dates UTC durant les sept derniers jours. Cela indique une activité récurrente, sans prouver une cause commune des incidents.
+
+Intervalles plus longs : comparaison des trois dernières réussites avec les trois précédentes sur 30 jours. Chaque groupe couvre au moins deux dates UTC ; les trois récentes doivent dater de sept jours au plus. Leur médiane doit au moins doubler et augmenter d’au moins 5 000 millisecondes. Une médiane initiale nulle ne déclenche pas cette règle.
+
+Chaque signal fournit les identifiants sources et, pour le ralentissement, les deux médianes. L’export JSON utilise désormais relayne-outcome-impact-v2 avec identités des procédures et signaux. Ce sont des heuristiques rétrospectives, pas des prévisions statistiquement validées. L’absence de seuil atteint ne prouve ni un système sain ni des données suffisantes. Les limites du chronométrage des seules réussites restent applicables.
+
+Vérification des alertes (2026-09-13) : 24 tests d’exécution dont trois nouveaux tests d’alertes, ainsi que le test d’interface en quatre langues, réussis. Compilation hors ligne et formatage validés. Aucun nouveau test global ni connexion réelle.
