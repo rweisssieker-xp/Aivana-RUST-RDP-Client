@@ -174,6 +174,7 @@ impl AivanaApp {
             return;
         };
         let target = crate::mission::Target::from_profile(profile);
+        self.repair_impact_ui(ui,&target);
         let rows = self.ranked_execution_lessons(&target);
         if rows.is_empty() {
             ui.label(text(locale, "empty"));

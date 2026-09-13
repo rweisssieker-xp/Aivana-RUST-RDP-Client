@@ -17,6 +17,7 @@ use uuid::Uuid;
 #[path = "http_health.rs"]
 pub(crate) mod http_health;
 pub(crate) mod learning;
+pub(crate) mod impact;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HttpGetStep {
@@ -724,6 +725,32 @@ mod tests {
         let mut p = plan();
         p.health = HealthCheck::Http { port: 80, path: "/health".into(), status: 200, contains: "healthy".into(), tls: false, followups: vec![] };
         p
+    }
+
+    #[test]
+    fn impact_uses_target_health_time_not_batch_completion() {
+        let p=learning_http_plan();let selected=p.mappings[0].production.clone();
+        let mut run=completed_success(p,false);
+        let now=Utc::now();let start=now-chrono::Duration::minutes(10);
+        run.targets[0].captured=Some(start);run.targets[0].baseline.as_mut().unwrap().at=start;
+        run.targets[0].health.as_mut().unwrap().at=start+chrono::Duration::seconds(20);run.finished=Some(now);
+        let journal=Journal{runs:vec![run]};let before=serde_json::to_value(&journal).unwrap();
+        let report=impact::report(&journal,&selected,now);
+        assert_eq!(report.production.repaired,1);assert_eq!(report.production.duration_samples,1);
+        assert_eq!(report.production.median_observation_to_health_ms,Some(20_000.0));
+        assert!(!report.roi_measured);assert!(!report.labor_savings_measured);
+        assert_eq!(serde_json::to_value(&journal).unwrap(),before);
+    }
+
+    #[test]
+    fn impact_keeps_failures_and_rehearsals_out_of_success_duration() {
+        let p=learning_http_plan();let selected=p.mappings[0].production.clone();
+        let rehearsal=completed_success(p.clone(),true);let mut failed=completed_success(p,false);failed.targets[0].phase=Phase::Failed;
+        let report=impact::report(&Journal{runs:vec![rehearsal,failed]},&selected,Utc::now());
+        assert_eq!(report.production.failed,1);assert_eq!(report.production.repaired,0);
+        assert_eq!(report.production.median_observation_to_health_ms,None);
+        assert_eq!(report.rehearsal.repaired,1);assert_eq!(report.rehearsal.duration_samples,1);
+        assert_eq!(report.samples.len(),1);assert!(report.samples[0].rehearsal);
     }
 
     #[test]

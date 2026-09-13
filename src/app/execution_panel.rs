@@ -327,6 +327,11 @@ impl AivanaApp {
         if self.execution.error.is_some() { return Vec::new(); }
         crate::execution::learning::rank(&self.execution.book, target, Utc::now())
     }
+
+    pub(super) fn repair_impact(&self,target:&crate::mission::Target)->Option<crate::execution::impact::Report> {
+        if self.execution.error.is_some(){return None;}
+        Some(crate::execution::impact::report(&self.execution.book,target,Utc::now()))
+    }
     pub(super) fn use_execution_lesson(&mut self, lesson: &crate::execution::ExecutionLesson) {
         if self
             .execution
