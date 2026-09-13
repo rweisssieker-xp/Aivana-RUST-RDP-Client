@@ -28,3 +28,8 @@ Intervalli più lunghi: gli ultimi tre successi vengono confrontati con i tre pr
 Ogni segnale contiene gli identificativi sorgente e, per il rallentamento, entrambe le mediane. L’esportazione JSON usa ora relayne-outcome-impact-v2 con identità delle procedure e segnali. Sono euristiche retrospettive, non previsioni statisticamente validate. Nessuna soglia raggiunta non dimostra né salute del sistema né dati sufficienti. Restano i limiti della misurazione dei soli successi.
 
 Verifica degli avvisi (2026-09-13): superati 24 test di esecuzione inclusi tre nuovi test degli avvisi, oltre al test dell’interfaccia in quattro lingue. Compilazione offline e formattazione verificate. Nessuna nuova suite completa o connessione reale.
+## Verifica locale degli avvisi
+
+Una nota obbligatoria consente di confermare un avviso e riaprirlo manualmente. L’avviso resta visibile. La conferma riguarda esattamente profilo, procedura e prove di origine. Prove modificate o 30 giorni trascorsi riaprono la verifica; il semplice aggiornamento della vista non la riapre. Non autorizza riparazioni e non modifica prove o classificazione.
+
+Archivio locale protetto da Windows DPAPI in `relayne-warning-reviews.dpapi`. Note limitate a 256 caratteri (1.024 byte), con oscuramento dei segreti nei limiti del possibile; non inserire credenziali. Massimo 256 conferme; rimuovere quelle scadute per liberare spazio. Ricaricare dopo conflitti di scrittura o errori di lettura. Un salvataggio fallito conserva lo stato precedente. Le conferme non sono incluse nell’esportazione JSON degli esiti.

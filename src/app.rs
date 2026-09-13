@@ -220,6 +220,7 @@ pub struct AivanaApp {
     contracts: contracts_panel::ContractsState,
     recovery_daemon: recovery_daemon_panel::RecoveryDaemonState,
     recovery_extensions: recovery_extensions_panel::ExtensionsState,
+    warning_reviews: impact_panel::ReviewState,
     workflow_ocr: workflow_ocr::WorkflowOcrState,
     collaboration_capture: collaboration_capture::CaptureState,
 }
@@ -333,6 +334,7 @@ impl AivanaApp {
             contracts: contracts_panel::ContractsState::default(),
             recovery_daemon: recovery_daemon_panel::RecoveryDaemonState::default(),
             recovery_extensions: recovery_extensions_panel::ExtensionsState::default(),
+            warning_reviews: impact_panel::ReviewState::default(),
             workflow_ocr: workflow_ocr::WorkflowOcrState::default(),
             collaboration_capture: collaboration_capture::CaptureState::default(),
         }

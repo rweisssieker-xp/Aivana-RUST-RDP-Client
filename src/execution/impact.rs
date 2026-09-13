@@ -1,6 +1,7 @@
 //! Auditable observed outcomes. No manual baseline, labor savings, MTTR or ROI claims.
 use super::*;
 pub(crate) mod radar;
+pub(crate) mod triage;
 
 #[derive(Default, Debug, Serialize)]
 pub struct Cohort {

@@ -1,5 +1,82 @@
 use super::*;
+use crate::execution::impact::triage::{self, Book};
 use crate::{execution::impact::Report, localization::Locale};
+
+pub(super) struct ReviewState {
+    book: Book,
+    blocked: bool,
+    drafts: std::collections::HashMap<String, String>,
+}
+impl Default for ReviewState {
+    fn default() -> Self {
+        let loaded = app_data_file("relayne-warning-reviews.dpapi").and_then(|p| Book::load(&p));
+        let blocked = loaded.is_err();
+        Self {
+            book: loaded.unwrap_or_default(),
+            blocked,
+            drafts: Default::default(),
+        }
+    }
+}
+impl ReviewState {
+    fn save(&mut self, mut next: Book) {
+        match app_data_file("relayne-warning-reviews.dpapi").and_then(|p| next.save(&p)) {
+            Ok(()) => self.book = next,
+            Err(_) => self.blocked = true,
+        }
+    }
+    fn signal(
+        &mut self,
+        ui: &mut Ui,
+        locale: Locale,
+        report: &Report,
+        signal: &crate::execution::impact::radar::Signal,
+    ) {
+        let Ok(key) = triage::fingerprint(report, signal) else {
+            ui.label(t(locale, "review_error"));
+            return;
+        };
+        ui.push_id(&key, |ui| {
+            if let Some(ack) = self.book.current(&key, report.as_of) {
+                ui.label(format!(
+                    "{} · {}",
+                    t(locale, "reviewed"),
+                    ack.at.to_rfc3339()
+                ));
+                ui.label(&ack.note);
+                if ui
+                    .add_enabled(!self.blocked, egui::Button::new(t(locale, "reopen")))
+                    .clicked()
+                {
+                    let mut next = self.book.clone();
+                    next.entries.remove(&key);
+                    self.save(next);
+                }
+            } else {
+                let note = self.drafts.entry(key.clone()).or_default();
+                ui.add(
+                    egui::TextEdit::singleline(note)
+                        .hint_text(t(locale, "note"))
+                        .char_limit(256),
+                );
+                if ui
+                    .add_enabled(
+                        !self.blocked && !note.trim().is_empty(),
+                        egui::Button::new(t(locale, "ack")),
+                    )
+                    .clicked()
+                {
+                    let mut next = self.book.clone();
+                    if next.acknowledge(key.clone(), note, report.as_of).is_ok() {
+                        self.save(next);
+                    } else {
+                        self.blocked = true;
+                    }
+                }
+            }
+        });
+    }
+}
 fn t(locale: Locale, key: &str) -> &str {
     let i = match locale {
         Locale::De => 1,
@@ -13,6 +90,56 @@ fn t(locale: Locale, key: &str) -> &str {
         .unwrap_or(key)
 }
 const TEXT: &[[&str; 5]] = &[
+    [
+        "review_rules",
+        "Quittierungen gelten lokal für diese Belege, höchstens 30 Tage. Geänderte Belege öffnen die Warnung wieder. Keine Reparaturfreigabe.",
+        "Reviews apply locally to this evidence for at most 30 days. Changed evidence reopens the warning. No repair authorization.",
+        "Les validations locales concernent ces preuves pendant 30 jours maximum. Toute modification rouvre l’alerte. Aucune autorisation de réparation.",
+        "Le conferme locali valgono per queste prove per massimo 30 giorni. Prove modificate riaprono l’avviso. Nessuna autorizzazione alla riparazione.",
+    ],
+    [
+        "reviewed",
+        "Lokal geprüft",
+        "Reviewed locally",
+        "Vérifié localement",
+        "Verificato localmente",
+    ],
+    [
+        "note",
+        "Prüfnotiz (erforderlich)",
+        "Review note (required)",
+        "Note de vérification (obligatoire)",
+        "Nota di verifica (obbligatoria)",
+    ],
+    [
+        "ack",
+        "Diese Belege quittieren",
+        "Acknowledge this evidence",
+        "Valider ces preuves",
+        "Conferma queste prove",
+    ],
+    ["reopen", "Wieder öffnen", "Reopen", "Rouvrir", "Riapri"],
+    [
+        "review_error",
+        "Quittierung nicht verfügbar oder Speicherung fehlgeschlagen. Speicher neu laden.",
+        "Review unavailable or save failed. Reload the store.",
+        "Validation indisponible ou échec d’enregistrement. Rechargez le stockage.",
+        "Conferma non disponibile o salvataggio non riuscito. Ricaricare l’archivio.",
+    ],
+    [
+        "reload",
+        "Quittierungen neu laden",
+        "Reload reviews",
+        "Recharger les validations",
+        "Ricarica le conferme",
+    ],
+    [
+        "cleanup",
+        "Abgelaufene Quittierungen entfernen",
+        "Remove expired reviews",
+        "Supprimer les validations expirées",
+        "Rimuovi le conferme scadute",
+    ],
     [
         "radar",
         "Frühwarnradar aus Reparaturverläufen",
@@ -176,15 +303,33 @@ const TEXT: &[[&str; 5]] = &[
         "Registro di esecuzione illeggibile; rapporto non disponibile.",
     ],
 ];
-fn draw(ui: &mut Ui, locale: Locale, report: &Report) {
+fn draw(ui: &mut Ui, locale: Locale, report: &Report, reviews: &mut ReviewState) {
     ui.collapsing(t(locale, "radar"), |ui| {
         ui.label(t(locale, "radar_rules"));
         ui.label(t(locale, "radar_limit"));
+        ui.label(t(locale, "review_rules"));
+        if reviews.blocked {
+            ui.label(t(locale, "review_error"));
+        }
+        if ui.button(t(locale, "reload")).clicked() {
+            *reviews = ReviewState::default();
+        }
+        if ui
+            .add_enabled(!reviews.blocked, egui::Button::new(t(locale, "cleanup")))
+            .clicked()
+        {
+            let mut next = reviews.book.clone();
+            next.entries.retain(|_, a| {
+                a.at > report.as_of || report.as_of - a.at < chrono::Duration::days(30)
+            });
+            reviews.save(next);
+        }
         if report.signals.is_empty() {
             ui.label(t(locale, "radar_none"));
         }
         for signal in &report.signals {
             ui.group(|ui| {
+                reviews.signal(ui, locale, report, signal);
                 ui.strong(format!(
                     "{} · {}",
                     signal.service,
@@ -288,10 +433,11 @@ fn draw(ui: &mut Ui, locale: Locale, report: &Report) {
     }
 }
 impl AivanaApp {
-    pub(super) fn repair_impact_ui(&self, ui: &mut Ui, target: &crate::mission::Target) {
+    pub(super) fn repair_impact_ui(&mut self, ui: &mut Ui, target: &crate::mission::Target) {
         let locale = self.desktop.locale;
-        ui.collapsing(t(locale, "title"), |ui| match self.repair_impact(target) {
-            Some(report) => draw(ui, locale, &report),
+        let report = self.repair_impact(target);
+        ui.collapsing(t(locale, "title"), |ui| match report {
+            Some(report) => draw(ui, locale, &report, &mut self.warning_reviews),
             None => {
                 ui.label(t(locale, "unavailable"));
             }
@@ -332,7 +478,13 @@ mod tests {
                         ..Default::default()
                     },
                     |ctx| {
-                        egui::CentralPanel::default().show(ctx, |ui| draw(ui, locale, &report));
+                        let mut reviews = ReviewState {
+                            book: Book::default(),
+                            blocked: false,
+                            drafts: Default::default(),
+                        };
+                        egui::CentralPanel::default()
+                            .show(ctx, |ui| draw(ui, locale, &report, &mut reviews));
                     },
                 );
                 assert!(!result.shapes.is_empty());

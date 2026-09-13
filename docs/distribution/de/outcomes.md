@@ -28,3 +28,8 @@ Längere Prüfintervalle: Die letzten drei Erfolge werden mit den drei vorherige
 Jede Warnung enthält die auslösenden Laufkennungen und bei Verlangsamung beide Mediane. Der JSON-Export verwendet jetzt das Schema relayne-outcome-impact-v2 mit Verfahrensidentitäten und Warnungen. Dies sind rückblickende Heuristiken, keine statistisch validierten Prognosen. Keine erreichte Schwelle belegt weder Systemgesundheit noch ausreichende Daten. Die Grenzen einer Zeitmessung nur erfolgreicher Fälle bleiben bestehen.
 
 Radar-Prüfung (2026-09-13): 24 Ausführungs-Tests einschließlich drei neuer Radar-Tests sowie der viersprachige Oberflächentest bestanden. Offline-Build und Formatprüfung erfolgreich. Kein erneuter Gesamttest und keine Live-Verbindung.
+## Lokale Prüfung von Warnungen
+
+Radarwarnungen lassen sich mit Pflichtnotiz quittieren und manuell wieder öffnen. Die Warnung bleibt sichtbar. Die Quittierung gilt für das genaue Profil, Verfahren und die auslösenden Belege. Geänderte Belege oder ein Alter von 30 Tagen öffnen die Prüfung wieder; eine Aktualisierung allein nicht. Dies erteilt keine Reparaturfreigabe und verändert weder Ergebnisbelege noch Rangfolge.
+
+Die Speicherung erfolgt lokal mit Windows-DPAPI in `relayne-warning-reviews.dpapi`. Notizen sind auf 256 Zeichen (1.024 Bytes) begrenzt; eine Geheimnisbereinigung erfolgt nach bestem Bemühen. Keine Zugangsdaten eintragen. Maximal 256 Quittierungen; abgelaufene Einträge können entfernt werden. Bei Schreibkonflikten oder Lesefehlern neu laden. Fehlgeschlagene Schreibvorgänge erhalten den bisherigen Stand. Quittierungen sind nicht im Ergebnis-JSON enthalten.

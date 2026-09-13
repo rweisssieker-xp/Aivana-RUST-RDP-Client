@@ -28,3 +28,8 @@ Slower verification: the latest three successes are compared with the preceding 
 Each signal includes the exact source run identifiers and, for slowdown, both medians. JSON export now uses schema relayne-outcome-impact-v2 and includes procedure identities and signals. These are retrospective heuristics, not statistically validated forecasts. No threshold reached does not establish system health or sufficient evidence. Existing success-only timing limitations still apply.
 
 Radar verification (2026-09-13): 24 execution tests including three new radar tests, plus the four-language UI test, passed. Offline build and formatting checks passed. No full-suite rerun or live connection.
+## Local warning reviews
+
+Radar warnings can be acknowledged with a required note and reopened manually. The warning remains visible. Acknowledgements apply to the exact profile, procedure and source evidence; changed evidence or 30 days of age reopens the review. Refreshing the view does not reset it. This never authorizes a repair or changes outcome evidence or ranking.
+
+Reviews are stored locally in `relayne-warning-reviews.dpapi`, protected by Windows DPAPI. Notes are limited to 256 characters (1,024 bytes), with best-effort secret redaction; do not enter credentials. The store holds at most 256 reviews. Remove expired reviews to free capacity. Reload after a conflicting write or read failure; failed writes retain the previous state. Reviews are not included in outcome JSON exports.

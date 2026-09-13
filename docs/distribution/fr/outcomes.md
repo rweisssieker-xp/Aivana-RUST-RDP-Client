@@ -28,3 +28,8 @@ Intervalles plus longs : comparaison des trois dernières réussites avec les tr
 Chaque signal fournit les identifiants sources et, pour le ralentissement, les deux médianes. L’export JSON utilise désormais relayne-outcome-impact-v2 avec identités des procédures et signaux. Ce sont des heuristiques rétrospectives, pas des prévisions statistiquement validées. L’absence de seuil atteint ne prouve ni un système sain ni des données suffisantes. Les limites du chronométrage des seules réussites restent applicables.
 
 Vérification des alertes (2026-09-13) : 24 tests d’exécution dont trois nouveaux tests d’alertes, ainsi que le test d’interface en quatre langues, réussis. Compilation hors ligne et formatage validés. Aucun nouveau test global ni connexion réelle.
+## Vérification locale des alertes
+
+Une note obligatoire permet de valider une alerte et de la rouvrir manuellement. L’alerte reste visible. La validation concerne exactement le profil, la procédure et les preuves sources. Des preuves modifiées ou un délai de 30 jours rouvrent la vérification ; une simple actualisation ne le fait pas. Cela n’autorise aucune réparation et ne modifie ni les preuves ni le classement.
+
+Stockage local protégé par Windows DPAPI dans `relayne-warning-reviews.dpapi`. Notes limitées à 256 caractères (1 024 octets), avec masquage des secrets au mieux ; ne saisissez pas d’identifiants. Maximum de 256 validations ; supprimez les validations expirées pour libérer de la place. Rechargez après un conflit d’écriture ou une erreur de lecture. Une écriture échouée conserve l’état précédent. Les validations sont absentes de l’export JSON des résultats.
