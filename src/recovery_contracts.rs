@@ -48,7 +48,7 @@ pub enum Readiness {
     Paused,
 }
 fn refs_valid(refs: &[String], max: usize) -> Result<()> {
-    ensure!(refs.len() <= max, "Zu viele Nachweisverweise");
+    ensure!(refs.len() <= max, "Too many evidence references");
     let mut seen = BTreeSet::new();
     for reference in refs {
         ensure!(
@@ -56,7 +56,7 @@ fn refs_valid(refs: &[String], max: usize) -> Result<()> {
                 && reference.len() <= 1024
                 && !reference.chars().any(char::is_control)
                 && seen.insert(reference),
-            "Nachweisverweis ungültig oder doppelt"
+            "Invalid or duplicate evidence reference"
         );
     }
     Ok(())
@@ -78,11 +78,11 @@ fn baseline_valid(
     refs_valid(refs, 32)?;
     ensure!(
         refs.len() == plan.mappings.len() && baseline.fingerprints.len() == plan.mappings.len(),
-        "Nachweise und Fingerprints müssen allen Zielen entsprechen"
+        "Evidence and fingerprints must match all targets"
     );
     ensure!(
         baseline.observed_at <= baseline.rehearsed_at && baseline.rehearsed_at <= now,
-        "Rehearsal-Zeitfolge ungültig"
+        "Invalid rehearsal chronology"
     );
     for fp in &baseline.fingerprints {
         fp.validate()?;
@@ -124,7 +124,7 @@ impl Contract {
                 && self.revision > 0
                 && !self.name.trim().is_empty()
                 && self.name.len() <= 1024,
-            "Vertrag ungültig"
+            "Invalid contract"
         );
         Self::validate_settings(self.check_minutes, self.rehearsal_hours)?;
         baseline_valid(&self.plan, &self.references, &self.baseline, now)?;
@@ -134,17 +134,17 @@ impl Contract {
                 .references
                 .iter()
                 .any(|r| self.revoked_references.contains(r)),
-            "Aktiver Nachweis wurde widerrufen"
+            "Active evidence was revoked"
         );
         ensure!(
             self.invalidated.is_some() == self.invalidated_at.is_some()
                 && self.invalidated_at.is_none_or(|at| at <= now),
-            "Widerrufszeit ungültig"
+            "Invalid revocation time"
         );
         if let Some(reason) = &self.invalidated {
             ensure!(
                 !reason.trim().is_empty() && reason.len() <= 4096,
-                "Ungültiger Widerrufsgrund"
+                "Invalid revocation reason"
             );
         }
         if let Some(check) = &self.last_check {
@@ -153,7 +153,7 @@ impl Contract {
                 check.error.is_some()
                     || check.fingerprints == self.baseline.fingerprints
                     || self.invalidated.is_some(),
-                "Drift ohne Widerruf"
+                "Drift without revocation"
             );
         }
         Ok(())
@@ -161,7 +161,7 @@ impl Contract {
     fn validate_settings(minutes: u32, hours: u32) -> Result<()> {
         ensure!(
             (5..=1440).contains(&minutes) && (1..=720).contains(&hours),
-            "Prüfintervall 5–1440 Minuten; Generalprobe 1–720 Stunden"
+            "Check interval: 5–1440 minutes; rehearsal: 1–720 hours"
         );
         Ok(())
     }
@@ -170,7 +170,7 @@ impl Contract {
         let revision = self
             .revision
             .checked_add(1)
-            .context("Vertragsrevision erschöpft")?;
+            .context("Contract revision exhausted")?;
         self.check_minutes = minutes;
         self.rehearsal_hours = hours;
         self.enabled = enabled;
@@ -185,7 +185,7 @@ impl Contract {
         if self.invalidated.is_none() {
             let reason = safe(reason);
             self.invalidated = Some(if reason.trim().is_empty() {
-                "Nachweis widerrufen".into()
+                "Evidence revoked".into()
             } else {
                 reason
             });
@@ -199,21 +199,21 @@ impl Contract {
     ) -> Result<()> {
         ensure!(
             after <= check.started && check.started <= check.finished && check.finished <= now,
-            "Prüfzeitfolge ungültig"
+            "Invalid check chronology"
         );
         ensure!(
             check.fingerprints.len() <= self.plan.mappings.len(),
-            "Zu viele Fingerprints"
+            "Too many fingerprints"
         );
         if let Some(error) = &check.error {
             ensure!(
                 !error.trim().is_empty() && error.len() <= 4096,
-                "Prüffehler ungültig"
+                "Invalid check error"
             );
         } else {
             ensure!(
                 check.fingerprints.len() == self.plan.mappings.len(),
-                "Zielbeobachtungen fehlen"
+                "Target observations are missing"
             );
         }
         for fp in &check.fingerprints {
@@ -227,7 +227,7 @@ impl Contract {
         mut check: Check,
         now: DateTime<Utc>,
     ) -> Result<()> {
-        ensure!(revision == self.revision, "Veraltete Vertragsrevision");
+        ensure!(revision == self.revision, "Outdated contract revision");
         let after = self
             .last_check
             .as_ref()
@@ -241,7 +241,7 @@ impl Contract {
         }
         check.error = check
             .error
-            .map(|_| "Read-only-Prüfung fehlgeschlagen; Zielzustand unbekannt".into());
+            .map(|_| "Read-only check failed; target state is unknown".into());
         self.last_check = Some(check);
         Ok(())
     }
@@ -255,7 +255,7 @@ impl Contract {
         baseline_valid(&plan, &references, &baseline, now)?;
         ensure!(
             plan.hash()? == self.plan.hash()?,
-            "Neuer Plan benötigt eigenen Vertrag"
+            "A new plan requires its own contract"
         );
         ensure!(
             baseline.rehearsed_at > self.baseline.rehearsed_at
@@ -267,22 +267,22 @@ impl Contract {
                     .last_check
                     .as_ref()
                     .is_none_or(|c| baseline.observed_at >= c.finished),
-            "Neue erfolgreiche Generalprobe erforderlich"
+            "A new successful rehearsal is required"
         );
         ensure!(
             references
                 .iter()
                 .all(|r| !self.references.contains(r) && !self.revoked_references.contains(r)),
-            "Neue Nachweise erforderlich"
+            "New evidence is required"
         );
         ensure!(
             self.revoked_references.len() + self.references.len() <= MAX_REVOKED,
-            "Widerrufsspeicher voll; Vertrag kann nicht erneuert werden"
+            "Revocation store is full; contract cannot be renewed"
         );
         let revision = self
             .revision
             .checked_add(1)
-            .context("Vertragsrevision erschöpft")?;
+            .context("Contract revision exhausted")?;
         self.revoked_references.extend(self.references.clone());
         self.references = references;
         self.plan = plan;
@@ -339,24 +339,24 @@ fn drift(baseline: &[Fingerprint], current: &[Fingerprint]) -> Vec<String> {
     let mut changes = vec![];
     for (i, (a, b)) in baseline.iter().zip(current).enumerate() {
         let fields = [
-            ("OS-Version", a.os_version != b.os_version),
-            ("OS-Build", a.os_build != b.os_build),
-            ("Architektur", a.architecture != b.architecture),
-            ("Binärdatei", a.executable_hash != b.executable_hash),
-            ("Dateiversion", a.executable_version != b.executable_version),
+            ("OS version", a.os_version != b.os_version),
+            ("OS build", a.os_build != b.os_build),
+            ("Architecture", a.architecture != b.architecture),
+            ("Binary", a.executable_hash != b.executable_hash),
+            ("File version", a.executable_version != b.executable_version),
             (
-                "Konfiguration",
+                "Configuration",
                 a.configuration_hash != b.configuration_hash,
             ),
-            ("Startmodus", a.start_mode != b.start_mode),
-            ("Abhängigkeiten", a.dependencies != b.dependencies),
+            ("Startup mode", a.start_mode != b.start_mode),
+            ("Dependencies", a.dependencies != b.dependencies),
         ];
         let names: Vec<_> = fields
             .into_iter()
             .filter_map(|(name, different)| different.then_some(name))
             .collect();
         if !names.is_empty() {
-            changes.push(format!("Ziel {}: {}", i + 1, names.join(", ")));
+            changes.push(format!("Target {}: {}", i + 1, names.join(", ")));
         }
     }
     changes
@@ -372,10 +372,13 @@ pub struct Book {
 }
 impl Book {
     pub fn validate(&self) -> Result<()> {
-        ensure!(self.contracts.len() <= 128, "Maximal 128 Recovery-Verträge");
+        ensure!(
+            self.contracts.len() <= 128,
+            "At most 128 recovery contracts"
+        );
         let mut ids = BTreeSet::new();
         for c in &self.contracts {
-            ensure!(ids.insert(c.id), "Doppelte Vertrags-ID");
+            ensure!(ids.insert(c.id), "Duplicate contract ID");
             c.validate()?;
         }
         Ok(())
@@ -391,12 +394,12 @@ impl Book {
         for c in &self.contracts {
             ensure!(
                 !refs.iter().any(|r| c.revoked_references.contains(r)),
-                "Recovery-Nachweis dauerhaft widerrufen; neue Generalprobe erforderlich"
+                "Recovery evidence permanently revoked; a new rehearsal is required"
             );
             if c.plan.hash()? == hash || refs.iter().any(|r| c.references.contains(r)) {
                 ensure!(
                     c.active_readiness(now) == Readiness::Ready,
-                    "Recovery-Vertrag nicht bereit; aktuelle Prüfung und Generalprobe erforderlich"
+                    "Recovery contract is not ready; a current check and rehearsal are required"
                 );
             }
         }
@@ -412,7 +415,7 @@ impl Book {
         let _lock = lock_store(path)?;
         ensure!(
             !path.with_extension("blocked").try_exists()?,
-            "Recovery-Speicherung fehlgeschlagen; Ausführung gesperrt"
+            "Recovery save failed; execution blocked"
         );
         let mut book = Self::load_main(path)?;
         for (_, pending) in read_pending(path)? {
@@ -427,10 +430,10 @@ impl Book {
             return Ok(Self::default());
         };
         let raw =
-            security::unprotect_secret(&bytes).context("Recovery-Vertragsspeicher nicht lesbar")?;
-        ensure!(raw.len() <= MAX_STORE, "Vertragsspeicher zu groß");
+            security::unprotect_secret(&bytes).context("Cannot read recovery contract store")?;
+        ensure!(raw.len() <= MAX_STORE, "Contract store is too large");
         let mut book: Self = serde_json::from_slice(&raw)
-            .map_err(|_| anyhow::anyhow!("Recovery-Vertragsspeicher beschädigt"))?;
+            .map_err(|_| anyhow::anyhow!("Recovery contract store is corrupted"))?;
         book.validate()?;
         book.sanitize();
         book.source_digest = Some(Sha256::digest(&bytes).to_vec());
@@ -473,7 +476,7 @@ impl Book {
             pending.sanitize();
             pending.validate()?;
             let raw = serde_json::to_vec(&pending)?;
-            ensure!(raw.len() <= MAX_STORE, "Restriktionsjournal zu groß");
+            ensure!(raw.len() <= MAX_STORE, "Restriction journal is too large");
             let directory = path.with_extension("pending");
             std::fs::create_dir_all(&directory)?;
             let target = directory.join(format!("{:x}.dpapi", Sha256::digest(&raw)));
@@ -487,9 +490,12 @@ impl Book {
                     .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "dpapi"))
                     .take(128)
                     .count();
-                ensure!(existing < 128, "Restriktionsjournal voll");
+                ensure!(existing < 128, "Restriction journal is full");
                 let protected = security::protect_secret(&raw)?;
-                ensure!(protected.len() <= MAX_STORE, "Restriktionsjournal zu groß");
+                ensure!(
+                    protected.len() <= MAX_STORE,
+                    "Restriction journal is too large"
+                );
                 security::atomic_write(&target, &protected)?;
             }
             Ok(())
@@ -516,7 +522,7 @@ impl Book {
             };
             ensure!(
                 current.plan.hash()? == source.plan.hash()?,
-                "Restriktionsjournal hat andere Planbindung"
+                "Restriction journal has a different plan binding"
             );
             if let (Some(reason), Some(at)) = (&source.invalidated, source.invalidated_at) {
                 let superseded = current.baseline.rehearsed_at > source.baseline.rehearsed_at
@@ -531,7 +537,7 @@ impl Book {
             }
             for reference in &source.revoked_references {
                 if current.references.contains(reference) {
-                    current.invalidate_at("Nachweis parallel widerrufen", Utc::now());
+                    current.invalidate_at("Evidence revoked concurrently", Utc::now());
                 } else if !current.revoked_references.contains(reference) {
                     current.revoked_references.push(reference.clone());
                 }
@@ -562,7 +568,7 @@ impl Book {
                     finished,
                     fingerprints: vec![],
                     error: Some(
-                        "Parallele Read-only-Prüfung fehlgeschlagen; Zielzustand unbekannt".into(),
+                        "Concurrent read-only check failed; target state is unknown".into(),
                     ),
                 });
             }
@@ -577,7 +583,7 @@ impl Book {
                 check.error = check
                     .error
                     .as_ref()
-                    .map(|_| "Read-only-Prüfung fehlgeschlagen; Zielzustand unbekannt".into());
+                    .map(|_| "Read-only check failed; target state is unknown".into());
             }
         }
     }
@@ -591,13 +597,13 @@ impl Book {
         let _lock = lock_store(path)?;
         ensure!(
             !path.with_extension("blocked").try_exists()?,
-            "Recovery-Speicherung fehlgeschlagen; Ausführung gesperrt"
+            "Recovery save failed; execution blocked"
         );
         let disk = read_store(path)?.map(|bytes| Sha256::digest(bytes).to_vec());
         let conflict = disk != self.source_digest;
         ensure!(
             !conflict || restrictive,
-            "Vertragsspeicher wurde parallel geändert; neu laden erforderlich"
+            "Contract store changed concurrently; reload required"
         );
         let mut clean = if conflict {
             Self::load_main(path)?
@@ -611,9 +617,9 @@ impl Book {
         clean.sanitize();
         clean.validate()?;
         let raw = serde_json::to_vec(&clean)?;
-        ensure!(raw.len() <= MAX_STORE, "Vertragsspeicher zu groß");
+        ensure!(raw.len() <= MAX_STORE, "Contract store is too large");
         let protected = security::protect_secret(&raw)?;
-        ensure!(protected.len() <= MAX_STORE, "Vertragsspeicher zu groß");
+        ensure!(protected.len() <= MAX_STORE, "Contract store is too large");
         security::atomic_write(path, &protected)?;
         clean.source_digest = Some(Sha256::digest(&protected).to_vec());
         clean.source_contracts = clean.contracts.clone();
@@ -625,7 +631,7 @@ impl Book {
         }
         ensure!(
             !conflict,
-            "Restriktive Befunde wurden gespeichert; parallele Änderungen erfordern erneutes Laden"
+            "Restrictive findings saved; concurrent changes require a reload"
         );
         Ok(())
     }
@@ -646,18 +652,18 @@ fn read_pending(path: &Path) -> Result<Vec<(std::path::PathBuf, Book)>> {
         }
         ensure!(
             path.extension().is_some_and(|ext| ext == "dpapi"),
-            "Restriktionsjournal beschädigt"
+            "Restriction journal is corrupted"
         );
-        ensure!(result.len() < 128, "Restriktionsjournal voll");
-        let bytes = read_store(&path)?.context("Restriktionsjournal wurde verändert; neu laden")?;
+        ensure!(result.len() < 128, "Restriction journal is full");
+        let bytes = read_store(&path)?.context("Restriction journal changed; reload")?;
         total = total
             .checked_add(bytes.len())
-            .context("Restriktionsjournal zu groß")?;
-        ensure!(total <= MAX_STORE, "Restriktionsjournal zu groß");
+            .context("Restriction journal is too large")?;
+        ensure!(total <= MAX_STORE, "Restriction journal is too large");
         let raw = security::unprotect_secret(&bytes)?;
-        ensure!(raw.len() <= MAX_STORE, "Restriktionsjournal zu groß");
+        ensure!(raw.len() <= MAX_STORE, "Restriction journal is too large");
         let mut book: Book = serde_json::from_slice(&raw)
-            .map_err(|_| anyhow::anyhow!("Restriktionsjournal beschädigt"))?;
+            .map_err(|_| anyhow::anyhow!("Restriction journal is corrupted"))?;
         book.validate()?;
         book.sanitize();
         result.push((path, book));
@@ -668,15 +674,15 @@ fn read_store(path: &Path) -> Result<Option<Vec<u8>>> {
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => anyhow::bail!("Vertragsspeicher nicht lesbar"),
+        Err(_) => anyhow::bail!("Cannot read contract store"),
     };
     ensure!(
         file.metadata()?.len() <= MAX_STORE as u64,
-        "Vertragsspeicher zu groß"
+        "Contract store is too large"
     );
     let mut bytes = vec![];
     file.take((MAX_STORE + 1) as u64).read_to_end(&mut bytes)?;
-    ensure!(bytes.len() <= MAX_STORE, "Vertragsspeicher zu groß");
+    ensure!(bytes.len() <= MAX_STORE, "Contract store is too large");
     Ok(Some(bytes))
 }
 fn lock_store(path: &Path) -> Result<std::fs::File> {
@@ -690,12 +696,12 @@ fn lock_store(path: &Path) -> Result<std::fs::File> {
             .truncate(false)
             .share_mode(0)
             .open(path.with_extension("lock"))
-            .context("Vertragsspeicher wird bereits aktualisiert")
+            .context("Contract store is already being updated")
     }
     #[cfg(not(windows))]
     {
         let _ = path;
-        anyhow::bail!("Vertragsspeicherung benötigt Windows-Sperre")
+        anyhow::bail!("Contract storage requires a Windows lock")
     }
 }
 pub fn ensure_execution_allowed(

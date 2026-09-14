@@ -35,7 +35,7 @@ impl Default for InsightsState {
                 Store::default(),
                 Library::default(),
                 Some(format!(
-                    "Wissensdaten nicht lesbar; Schreiben gesperrt: {e}"
+                    "Cannot read knowledge data; writes blocked: {e}"
                 )),
             ),
         };
@@ -62,7 +62,7 @@ impl AivanaApp {
             .and_then(|_| app_data_file("relayne-solutions.dpapi"))
             .and_then(|p| self.insights.library.save(&p));
         if let Err(e) = result {
-            self.status = format!("Wissen nicht gespeichert: {e}");
+            self.status = format!("Knowledge not saved: {e}");
             false
         } else {
             true
@@ -88,7 +88,7 @@ impl AivanaApp {
             let Some(result) = result.filter(|r| r.status == JobStatus::Completed && !r.truncated)
             else {
                 self.status =
-                    "Telemetrie/Prüfung fehlgeschlagen oder abgebrochen. Kein Befund abgeleitet."
+                    "Telemetry/check failed or was canceled. No finding inferred."
                         .into();
                 continue;
             };
@@ -111,11 +111,11 @@ impl AivanaApp {
         self.save_insights();
     }
     pub(super) fn insights_view(&mut self, ui: &mut Ui) {
-        ui.heading("Ursachen & passende Lösungen");
+        ui.heading("Causes & matching solutions");
         if let Some(e) = &self.insights.error {
             ui.colored_label(tw::RED_600, e);
         }
-        ui.label("TCP-Beziehungen, Dienstzuordnung und Fehlerzeitpunkte aus ausdrücklich ausgewählten Windows-Rechnern. WinRM nutzt die aktuelle Windows-Identität.");
+        ui.label("TCP relationships, service mappings, and error timestamps from explicitly selected Windows computers. WinRM uses the current Windows identity.");
         ui.horizontal_wrapped(|ui| {
             for p in &self.profiles {
                 if p.protocol != Protocol::Rdp {
@@ -134,7 +134,7 @@ impl AivanaApp {
         if ui
             .add_enabled(
                 self.insights.pending.is_empty() && self.insights.error.is_none(),
-                egui::Button::new("Ausgewählte Rechner untersuchen"),
+                egui::Button::new("Inspect selected computers"),
             )
             .clicked()
         {
@@ -160,10 +160,10 @@ impl AivanaApp {
             ui.horizontal(|ui| {
                 ui.spinner();
                 ui.label(format!(
-                    "{} Erfassungen/Prüfungen offen",
+                    "{} captures/checks pending",
                     self.insights.pending.len()
                 ));
-                if ui.button("Abbrechen").clicked() {
+                if ui.button("Cancel").clicked() {
                     for j in &self.insights.queue.jobs {
                         j.cancel();
                     }
@@ -171,10 +171,10 @@ impl AivanaApp {
             });
         }
         for o in telemetry::latest(&self.insights.store.observations) {
-            ui.collapsing(format!("{} · {} · {}",o.target.name,o.received.format("%H:%M:%S"),if o.fresh(){"aktuell"}else{"veraltet"}),|ui|{ui.label(format!("OS {} · {} Dienste · {} TCP-Einträge · {} Fehlerereignisse",o.payload.os_version,o.payload.services.len(),o.payload.sockets.len(),o.payload.events.len()));ui.small(format!("Beleg {} · Remote-Zeit {}",o.id,o.payload.observed_at));if o.payload.truncated{ui.label("Ausgabe begrenzt: fehlende Einträge erlauben keinen negativen Schluss.");}if !o.payload.events_available{ui.label("Ereignisquelle nicht verfügbar oder keine passenden Ereignisse.");}});
+            ui.collapsing(format!("{} · {} · {}",o.target.name,o.received.format("%H:%M:%S"),if o.fresh(){"current"}else{"outdated"}),|ui|{ui.label(format!("OS {} · {} services · {} TCP entries · {} error events",o.payload.os_version,o.payload.services.len(),o.payload.sockets.len(),o.payload.events.len()));ui.small(format!("Evidence {} · Remote time {}",o.id,o.payload.observed_at));if o.payload.truncated{ui.label("Output limited: missing entries do not support a negative conclusion.");}if !o.payload.events_available{ui.label("Event source unavailable or no matching events.");}});
         }
         ui.separator();
-        ui.heading("Beobachtete Verbindungen");
+        ui.heading("Observed connections");
         for edge in self.insights.store.edges.clone() {
             let identity_ok = self.profiles.iter().any(|p| edge.source.matches(p))
                 && self.profiles.iter().any(|p| edge.destination.matches(p));
@@ -185,22 +185,22 @@ impl AivanaApp {
                 ),
                 |ui| {
                     ui.label(format!(
-                        "Zuordnung: {}",
+                        "Mapping: {}",
                         if edge.services.is_empty() {
-                            "Kein eindeutiger Dienst bekannt".into()
+                            "No unique service identified".into()
                         } else {
                             edge.services.join(", ")
                         }
                     ));
                     ui.label(self.insights.store.explanation(&edge));
                     ui.small(format!(
-                        "Beobachtet {} · Belege {:?}",
+                        "Observed {} · Evidence {:?}",
                         edge.observed, edge.evidence
                     ));
                     if ui
                         .add_enabled(
                             identity_ok && self.insights.pending.is_empty(),
-                            egui::Button::new("Pfad vom betroffenen Rechner aus prüfen"),
+                            egui::Button::new("Check path from the affected computer"),
                         )
                         .clicked()
                     {
@@ -217,8 +217,8 @@ impl AivanaApp {
                 },
             );
         }
-        ui.collapsing("Zeitlicher Verlauf der Fehlerereignisse", |ui| {
-            ui.small("Remote-Uhren können abweichen. Zeitliche Nähe allein belegt keine Ursache.");
+        ui.collapsing("Error event timeline", |ui| {
+            ui.small("Remote clocks may differ. Events occurring close together alone do not establish a cause.");
             let mut events: Vec<_> = self
                 .insights
                 .store
@@ -240,7 +240,7 @@ impl AivanaApp {
             events.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1 && a.2 == b.2 && a.3 == b.3);
             for (at, host, provider, id, evidence) in events.into_iter().rev().take(100) {
                 ui.label(format!("{at} · {host} · {provider} #{id}"));
-                ui.small(format!("Beleg {evidence}"));
+                ui.small(format!("Evidence {evidence}"));
             }
         });
         ui.separator();
@@ -248,41 +248,41 @@ impl AivanaApp {
     }
     fn solution_recommendations_ui(&mut self, ui: &mut Ui) {
         self.learned_repairs_ui(ui);
-        ui.heading("Passende Lösungen aus Erfahrung");
-        ui.collapsing("Automatisch gelernte geprüfte Dienstabläufe", |ui| {
+        ui.heading("Matching solutions from experience");
+        ui.collapsing("Automatically learned verified service workflows", |ui| {
             let lessons=self.execution_lessons();
-            if lessons.is_empty(){ui.label("Nach abgeschlossenen Test-/Produktionsläufen erscheinen hier automatisch deren Lösungen und Ergebnisse.");}
+            if lessons.is_empty(){ui.label("Solutions and outcomes from completed test/production runs appear here automatically.");}
             for lesson in lessons {ui.push_id(&lesson.key,|ui| {
                 ui.strong(format!("{} → {}",lesson.service,lesson.desired.label()));
-                ui.label(format!("Produktion: {} bestätigt, {} fehlgeschlagen, {} wiederhergestellt, {} ungeklärt",lesson.production.successes,lesson.production.failures,lesson.production.restored,lesson.production.unknown));
-                ui.label(format!("Testumgebung: {} bestätigt, {} fehlgeschlagen, {} wiederhergestellt, {} ungeklärt",lesson.rehearsal.successes,lesson.rehearsal.failures,lesson.rehearsal.restored,lesson.rehearsal.unknown));
-                ui.label(format!("Funktionstest: {:?}",lesson.health));
-                ui.collapsing("Belege",|ui|{for e in &lesson.evidence {ui.monospace(format!("Lauf {} · Ziel {} · {:?} · Test {}",e.run_id,e.target_profile_id,e.phase,e.rehearsal));}});
-                if ui.button("Lösung als neuen Prüfplan vorbereiten").clicked(){self.use_execution_lesson(&lesson);self.view=View::Execution;}
+                ui.label(format!("Production: {} confirmed, {} failed, {} restored, {} unresolved",lesson.production.successes,lesson.production.failures,lesson.production.restored,lesson.production.unknown));
+                ui.label(format!("Test environment: {} confirmed, {} failed, {} restored, {} unresolved",lesson.rehearsal.successes,lesson.rehearsal.failures,lesson.rehearsal.restored,lesson.rehearsal.unknown));
+                ui.label(format!("Functional test: {:?}",lesson.health));
+                ui.collapsing("Evidence",|ui|{for e in &lesson.evidence {ui.monospace(format!("Run {} · Target {} · {:?} · Test {}",e.run_id,e.target_profile_id,e.phase,e.rehearsal));}});
+                if ui.button("Prepare solution as a new review plan").clicked(){self.use_execution_lesson(&lesson);self.view=View::Execution;}
             });}
-            ui.small("Jedes neue Ziel benötigt erneut Testzuordnung, Vorprüfung und Freigabe. Fehler werden als Fehler gelernt; eine Lösung wird dadurch nicht als erfolgreich empfohlen.");
+            ui.small("Every new target requires a new test mapping, preflight check, and approval. Failures are learned as failures; they do not cause a solution to be recommended as successful.");
         });
-        ui.label("Ein Auftrag wird als wiederverwendbare Lösung registriert. Die Bewertung folgt seinen tatsächlich belegten Zielergebnissen und den geprüften Voraussetzungen.");
-        ui.collapsing("Ausgewählten Auftrag als Lösung registrieren", |ui| {
+        ui.label("A job is registered as a reusable solution. Its rating follows its documented target outcomes and verified prerequisites.");
+        ui.collapsing("Register selected job as a solution", |ui| {
             ui.label(
                 self.missions
                     .selected
                     .and_then(|id| self.missions.book.missions.iter().find(|m| m.id == id))
                     .map(|m| m.objective.as_str())
-                    .unwrap_or("Zuerst einen Auftrag unter Mission Control auswählen"),
+                    .unwrap_or("Select a job in Mission Control first"),
             );
             ui.add(
                 egui::TextEdit::singleline(&mut self.insights.os_prefix)
-                    .hint_text("Benötigte OS-Version, z. B. 10.0 (optional)"),
+                    .hint_text("Required OS version, e.g., 10.0 (optional)"),
             );
             ui.add(
                 egui::TextEdit::singleline(&mut self.insights.required_services)
-                    .hint_text("Benötigte Dienste, durch Komma getrennt (optional)"),
+                    .hint_text("Required services, separated by commas (optional)"),
             );
             if ui
                 .add_enabled(
                     self.insights.error.is_none(),
-                    egui::Button::new("Lösung mit Voraussetzungen merken"),
+                    egui::Button::new("Save solution with prerequisites"),
                 )
                 .clicked()
             {
@@ -322,14 +322,14 @@ impl AivanaApp {
         });
         ui.add(
             egui::TextEdit::singleline(&mut self.insights.query)
-                .hint_text("Aktuelle Störung beschreiben, z. B. Druckdienst ausgefallen"),
+                .hint_text("Describe the current incident, e.g., print service down"),
         );
         let Some(profile) = self.selected_profile().cloned() else {
-            ui.label("Zielprofil auswählen, um Voraussetzungen abzugleichen.");
+            ui.label("Select a target profile to compare prerequisites.");
             return;
         };
         let target = Target::from_profile(&profile);
-        ui.label(format!("Empfehlungen für {}", profile.name));
+        ui.label(format!("Recommendations for {}", profile.name));
         let ranked = self.insights.library.recommend(
             &self.insights.query,
             &target,
@@ -338,7 +338,7 @@ impl AivanaApp {
         );
         if ranked.is_empty() {
             ui.label(
-                "Noch keine passende registrierte Lösung. Erfasse und prüfe zuerst einen Auftrag.",
+                "No matching registered solution yet. Capture and verify a job first.",
             );
         }
         for suggestion in ranked.into_iter().take(20) {
@@ -354,10 +354,10 @@ impl AivanaApp {
             };
             ui.collapsing(&recipe.title, |ui| {
                 ui.label(format!(
-                    "{} bestätigte · {} fehlgeschlagene · {} unterbrochene Zielergebnisse",
+                    "{} confirmed · {} failed · {} interrupted target outcomes",
                     suggestion.successes, suggestion.failures, suggestion.interrupted
                 ));
-                ui.small("Dokumentierte aktuelle Ergebnisstände, keine Erfolgswahrscheinlichkeit.");
+                ui.small("Documented current outcomes, not a probability of success.");
                 for matched in &suggestion.matches {
                     ui.label(format!("✓ {matched}"));
                 }
@@ -371,13 +371,13 @@ impl AivanaApp {
                     ui.label(format!("{}. {} — {}", index + 1, s.title, s.expectation));
                 }
                 ui.small(format!(
-                    "Quellauftrag {} · Belege {:?}",
+                    "Source job {} · Evidence {:?}",
                     recipe.source, suggestion.evidence
                 ));
                 if ui
                     .add_enabled(
                         suggestion.eligible(),
-                        egui::Button::new("Als neuen Auftrag zur Prüfung übernehmen"),
+                        egui::Button::new("Use as a new job for review"),
                     )
                     .clicked()
                 {

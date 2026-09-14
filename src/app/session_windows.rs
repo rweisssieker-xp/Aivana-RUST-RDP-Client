@@ -138,13 +138,13 @@ impl AivanaApp {
                     if focused && self.selected_session!=Some(id){self.autopilot.abort();self.engine.release_inputs_except(Some(id));self.selected_session=Some(id);self.selected_profile=Some(s.profile_id);}
                     if let Some(rect)=ui.input(|i|i.viewport().outer_rect){let size=ui.input(|i|i.viewport().inner_rect).map(|r|r.size()).unwrap_or(rect.size());self.session_windows.positions.insert((id,monitor),SavedWindow{profile:s.profile_id,monitor,topology:self.session_windows.topology.get(&id).cloned().unwrap_or_default(),x:rect.left(),y:rect.top(),width:size.x,height:size.y});}
                     ui.horizontal_wrapped(|ui|{
-                        ui.strong(&s.title);if let Some(m)=monitor{ui.label(format!("Remote-Monitor {}",m+1));}ui.label(format!("{:?}",s.status));
-                        if ui.button("Fenster schließen").clicked(){close.push((id,monitor));}
-                        if ui.button("Vollbild umschalten").clicked(){let full=ui.input(|i|i.viewport().fullscreen).unwrap_or(false);ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(!full));}
+                        ui.strong(&s.title);if let Some(m)=monitor{ui.label(format!("Remote monitor {}",m+1));}ui.label(format!("{:?}",s.status));
+                        if ui.button("Close window").clicked(){close.push((id,monitor));}
+                        if ui.button("Toggle full screen").clicked(){let full=ui.input(|i|i.viewport().fullscreen).unwrap_or(false);ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(!full));}
                     });
-                    if s.status!=SessionStatus::Connected{ui.label("Letztes empfangenes Bild – Sitzung nicht verbunden");}
+                    if s.status!=SessionStatus::Connected{ui.label("Last received image – session disconnected");}
                     let source=monitor.and_then(|index|self.latest_frames.get(&id).and_then(|frame|self.session_windows.topology.get(&id).and_then(|m|monitor_source(m,index,frame.width,frame.height))));
-                    if monitor.is_some() && source.is_none(){ui.label("Warte auf ein Framebuffer-Bild, das zur konfigurierten Monitoranordnung passt. Eingaben bleiben gesperrt.");return}
+                    if monitor.is_some() && source.is_none(){ui.label("Waiting for a framebuffer image that matches the configured monitor layout. Input remains blocked.");return}
                     ui.add_enabled_ui(focused && s.status==SessionStatus::Connected,|ui|self.remote_canvas_region(ui,id,source));
                 });
             }
@@ -171,7 +171,7 @@ impl AivanaApp {
             match app_data_file("session-layouts.json").and_then(|p| {
                 if p.exists() {
                     if std::fs::metadata(&p)?.len() > 1024 * 1024 {
-                        anyhow::bail!("Layoutdatei ist zu groß")
+                        anyhow::bail!("Layout file is too large")
                     };
                     Ok(serde_json::from_slice::<Vec<SavedLayout>>(&std::fs::read(
                         p,
@@ -183,13 +183,13 @@ impl AivanaApp {
                 Ok(layouts) => self.session_windows.layouts = layouts,
                 Err(e) => {
                     self.session_windows.load_error = Some(format!(
-                        "Gespeicherte Fensteranordnungen nicht lesbar: {e:#}"
+                        "Cannot read saved window layouts: {e:#}"
                     ))
                 }
             }
         }
-        ui.heading("Sitzungsfenster und Monitore");
-        ui.label("Remote-Monitore als eigene native Fenster öffnen, auf lokale Displays verschieben und die Zuordnung als Anordnung speichern.");
+        ui.heading("Session windows and monitors");
+        ui.label("Open remote monitors in separate native windows, move them to local displays, and save the mapping as a layout.");
         for s in self.sessions.clone() {
             let monitors = self
                 .profiles
@@ -199,7 +199,7 @@ impl AivanaApp {
                 .unwrap_or_default();
             ui.horizontal_wrapped(|ui| {
                 ui.label(&s.title);
-                if ui.button("Gesamter Desktop im Fenster").clicked() {
+                if ui.button("Entire desktop in a window").clicked() {
                     if !self.session_windows.open.contains(&s.id) {
                         self.session_windows.open.push(s.id);
                     }
@@ -208,7 +208,7 @@ impl AivanaApp {
                 if ui
                     .add_enabled(
                         monitors.len() > 1,
-                        egui::Button::new("Ein Fenster pro Remote-Monitor"),
+                        egui::Button::new("One window per remote monitor"),
                     )
                     .clicked()
                 {
@@ -229,14 +229,14 @@ impl AivanaApp {
         ui.horizontal_wrapped(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.session_windows.name)
-                    .hint_text("Name der Fensteranordnung"),
+                    .hint_text("Window layout name"),
             );
             if ui
                 .add_enabled(
                     !self.session_windows.name.trim().is_empty()
                         && self.session_windows.name.len() <= 100
                         && !self.session_windows.open.is_empty(),
-                    egui::Button::new("Anordnung speichern"),
+                    egui::Button::new("Save layout"),
                 )
                 .clicked()
             {
@@ -257,14 +257,14 @@ impl AivanaApp {
                     std::fs::write(p, serde_json::to_vec_pretty(&self.session_windows.layouts)?)?;
                     Ok(())
                 }) {
-                    Ok(()) => "Fenster- und Monitorzuordnung gespeichert".into(),
-                    Err(e) => format!("Speichern: {e:#}"),
+                    Ok(()) => "Window and monitor mapping saved".into(),
+                    Err(e) => format!("Save: {e:#}"),
                 };
             }
         });
         for layout in self.session_windows.layouts.clone() {
             ui.horizontal_wrapped(|ui|{
-            ui.label(&layout.name);if ui.button("Für offene Sitzungen anwenden").clicked(){
+            ui.label(&layout.name);if ui.button("Apply to open sessions").clicked(){
                 let mut missing=0;let mut reset=std::collections::HashSet::new();
                 for mut w in layout.windows{
                     if ![w.x,w.y,w.width,w.height].iter().all(|v|v.is_finite()) || w.topology.len()>16 || w.monitor.is_some_and(|i|i>=w.topology.len()){missing+=1;continue}
@@ -275,7 +275,7 @@ impl AivanaApp {
                         w.width=w.width.clamp(320.0,7680.0);w.height=w.height.clamp(240.0,4320.0);w.x=w.x.clamp(-32768.0,32768.0);w.y=w.y.clamp(-32768.0,32768.0);self.session_windows.positions.insert((s.id,w.monitor),w);
                     }else{missing+=1}
                 }
-                self.status=format!("Anordnung angewendet. {missing} Fenster nicht zugeordnet. Es wurde keine Verbindung gestartet.");
+                self.status=format!("Layout applied. {missing} windows not mapped. No connections were started.");
             }
         });
         }

@@ -84,7 +84,7 @@ impl AivanaApp {
                 Ok(r) => Some(r),
                 Err(mpsc::TryRecvError::Disconnected) => Some(RemoteResult::Ticket(
                     String::new(),
-                    Err("Adapter beendet; Zustelljournal prüfen".into()),
+                    Err("Adapter stopped; check the delivery journal".into()),
                 )),
                 Err(mpsc::TryRecvError::Empty) => None,
             });
@@ -103,13 +103,13 @@ impl AivanaApp {
                             Err(e) => self.recovery_extensions.notice = e,
                         }
                     } else {
-                        self.recovery_extensions.notice="Adapterantwort verworfen; Auswahl geändert. Ein eventuell offener Versand bleibt gesperrt.".into();
+                        self.recovery_extensions.notice="Adapter response discarded; selection changed. Any pending delivery remains blocked.".into();
                     }
                 }
                 RemoteResult::Delivery(id, result) => {
                     let ok = result.is_ok();
                     self.recovery_extensions.notice = result
-                        .map(|_| "Bericht als Jira-Kommentar zugestellt.".into())
+                        .map(|_| "Report delivered as a Jira comment.".into())
                         .unwrap_or_else(|e| e);
                     if self.recovery_extensions.tickets.finish(id, ok).is_ok() {
                         let _ = self.recovery_extensions.save_tickets();
@@ -119,22 +119,22 @@ impl AivanaApp {
                 }
             }
         }
-        ui.heading("Recovery-Anbindungen");
+        ui.heading("Recovery integrations");
         ui.horizontal_wrapped(|ui| {
             ui.selectable_value(
                 &mut self.recovery_extensions.tab,
                 0,
-                "Tickets & Ergebnisberichte",
+                "Tickets & outcome reports",
             );
             ui.selectable_value(
                 &mut self.recovery_extensions.tab,
                 1,
-                "Kompatibilitätskatalog",
+                "Compatibility catalog",
             );
             if ui
                 .add_enabled(
                     self.recovery_extensions.pending.is_none(),
-                    egui::Button::new("Speicher neu laden"),
+                    egui::Button::new("Reload storage"),
                 )
                 .clicked()
             {
@@ -163,31 +163,32 @@ impl AivanaApp {
         }
     }
     fn ticket_view(&mut self, ui: &mut Ui) {
+        super::ticket_inbox_panel::view(&mut self.ticket_inbox, ui);
         let s = &mut self.recovery_extensions;
-        ui.label("Ticket lesen → Inhalt prüfen → Recovery-Fall zuordnen → Ergebnisbericht prüfen und separat zustellen.");
-        ui.collapsing("Jira-Verbindung (API v3)",|ui|{
-            ui.label("HTTPS-Ursprung, z. B. https://team.atlassian.net");ui.text_edit_singleline(&mut s.origin);
-            ui.horizontal_wrapped(|ui|{ui.label("Ticket");ui.text_edit_singleline(&mut s.key);ui.label("E-Mail");ui.text_edit_singleline(&mut s.email);});
-            ui.add(egui::TextEdit::singleline(&mut s.token).password(true).hint_text("API-Token, nur Arbeitsspeicher").char_limit(8192));
-            if ui.button("Dieses Ticket jetzt aus Jira lesen").clicked(){
+        ui.label("Read ticket → review content → associate recovery case → review outcome report and deliver separately.");
+        ui.collapsing("Jira connection (API v3)",|ui|{
+            ui.label("HTTPS origin, e.g., https://team.atlassian.net");ui.text_edit_singleline(&mut s.origin);
+            ui.horizontal_wrapped(|ui|{ui.label("Ticket");ui.text_edit_singleline(&mut s.key);ui.label("Email");ui.text_edit_singleline(&mut s.email);});
+            ui.add(egui::TextEdit::singleline(&mut s.token).password(true).hint_text("API token, memory only").char_limit(8192));
+            if ui.button("Read this ticket from Jira now").clicked(){
                 match tickets::jira_origin(&s.origin){Ok(origin)=>{s.origin=origin;let binding=format!("{}|{}",s.origin,s.key);let key=s.key.clone();let origin=s.origin.clone();let email=s.email.clone();let token=std::mem::take(&mut s.token);let(tx,rx)=mpsc::channel();s.pending=Some(rx);s.preview=None;std::thread::spawn(move||{let result=tickets::fetch(&origin,&key,&email,&token).map_err(|e|e.to_string());let _=tx.send(RemoteResult::Ticket(binding,result));});},Err(e)=>s.notice=e.to_string()}
             }
-            ui.small("Lesen sendet die Ticketkennung an diesen Jira-Ursprung. Kein automatischer Import, keine Reparatur. Token nach jeder Anfrage erneut eingeben.");
+            ui.small("Reading sends the ticket ID to this Jira origin. No automatic import or repair. Enter the token again after each request.");
         });
-        ui.collapsing("Ticket als JSON importieren",|ui|{
-            ui.small(r#"Schema: {"origin":"local","key":"SUPPORT-1","title":"Störung","description":"Beschreibung","revision":"1"}"#);
+        ui.collapsing("Import ticket as JSON",|ui|{
+            ui.small(r#"Schema: {"origin":"local","key":"SUPPORT-1","title":"Incident","description":"Description","revision":"1"}"#);
             ui.add(egui::TextEdit::multiline(&mut s.import_text).desired_rows(3).desired_width(720.0).char_limit(8192));
-            if ui.button("Importvorschau prüfen").clicked(){match tickets::parse_import(&s.import_text){Ok(t)=>s.preview=Some(t),Err(e)=>s.notice=e.to_string()}}
+            if ui.button("Review import preview").clicked(){match crate::ticket_intake::normalize_import_json(&s.import_text).and_then(|normalized| tickets::parse_import(&normalized)){Ok(t)=>s.preview=Some(t),Err(e)=>s.notice=e.to_string()}}
         });
         if let Some(preview) = s.preview.clone() {
-            ui.group(|ui|{ui.strong(format!("{} · {}",preview.key,preview.title));ui.label(&preview.origin);ui.label(&preview.description);ui.small("Ungeprüfter externer Inhalt. Aktualisierte Tickets verlieren ihre bisherige Fallzuordnung.");if ui.button("Geprüftes Ticket lokal übernehmen").clicked(){match s.tickets.import(preview).and_then(|i|{s.save_tickets()?;Ok(i)}){Ok(i)=>{s.selected=Some(i);s.preview=None;s.report=None;s.confirm=false;},Err(e)=>s.notice=e.to_string()}}});
+            ui.group(|ui|{ui.strong(format!("{} · {}",preview.key,preview.title));ui.label(&preview.origin);ui.label(&preview.description);ui.small("Unreviewed external content. Updated tickets lose their previous case association.");if ui.button("Adopt reviewed ticket locally").clicked(){match s.tickets.import(preview).and_then(|i|{s.save_tickets()?;Ok(i)}){Ok(i)=>{s.selected=Some(i);s.preview=None;s.report=None;s.confirm=false;},Err(e)=>s.notice=e.to_string()}}});
         }
         egui::ComboBox::from_id_salt("recovery_ticket_select")
             .selected_text(
                 s.selected
                     .and_then(|i| s.tickets.records.get(i))
                     .map(|r| r.ticket.key.as_str())
-                    .unwrap_or("Ticket wählen"),
+                    .unwrap_or("Select ticket"),
             )
             .show_ui(ui, |ui| {
                 for (i, r) in s.tickets.records.iter().enumerate() {
@@ -214,29 +215,29 @@ impl AivanaApp {
         let mut make_report = None;
         if record.case.is_none() {
             ui.horizontal_wrapped(|ui| {
-                ui.label("Geprüfter Windows-Dienst");
+                ui.label("Reviewed Windows service");
                 ui.text_edit_singleline(&mut s.service);
             });
-            if ui.button("Neuen Recovery-Fall vorbereiten").clicked() {
+            if ui.button("Prepare new recovery case").clicked() {
                 create = Some((record.ticket.objective(), s.service.clone()));
             }
         } else {
-            ui.small(format!("Zugeordneter Fall: {}", record.case.unwrap()));
-            if ui.button("Aktuellen Ergebnisbericht erstellen").clicked() {
+            ui.small(format!("Associated case: {}", record.case.unwrap()));
+            if ui.button("Create current outcome report").clicked() {
                 make_report = record.case;
             }
         }
         for d in &record.deliveries {
-            ui.small(format!("Zustellung {} · {} · {}", d.id, d.state, d.at));
+            ui.small(format!("Delivery {} · {} · {}", d.id, d.state, d.at));
             if matches!(d.state.as_str(), "sending" | "unknown") {
-                ui.small("Vor einer Freigabe die Zustell-ID direkt im Jira-Ticket prüfen. Nach zwei Minuten kann das Ergebnis hier dokumentiert werden.");
+                ui.small("Before approving, check the delivery ID directly in the Jira ticket. After two minutes, document the outcome here.");
                 let mut resolved = None;
                 ui.add_enabled_ui(Utc::now() >= d.at + chrono::Duration::minutes(2), |ui| {
                     ui.horizontal_wrapped(|ui| {
-                        if ui.button("In Jira geprüft: zugestellt").clicked() {
+                        if ui.button("Checked in Jira: delivered").clicked() {
                             resolved = Some(true);
                         }
-                        if ui.button("In Jira geprüft: nicht zugestellt").clicked() {
+                        if ui.button("Checked in Jira: not delivered").clicked() {
                             resolved = Some(false);
                         }
                     });
@@ -247,7 +248,7 @@ impl AivanaApp {
                         .resolve_delivery(d.id, delivered, Utc::now())
                         .and_then(|_| s.save_tickets());
                     s.notice = result
-                        .map(|_| "Manuelle Zustellprüfung dokumentiert.".into())
+                        .map(|_| "Manual delivery check documented.".into())
                         .unwrap_or_else(|e| e.to_string());
                 }
             }
@@ -261,7 +262,7 @@ impl AivanaApp {
                     let result = self.recovery_extensions.save_tickets();
                     self.recovery_extensions.notice = result
                         .map(|_| {
-                            "Recovery-Fall vorbereitet. Generalprobe im Recovery Agent öffnen."
+                            "Recovery case prepared. Open the rehearsal in Recovery Agent."
                                 .into()
                         })
                         .unwrap_or_else(|e| e.to_string());
@@ -286,16 +287,16 @@ impl AivanaApp {
                 return;
             }
             ui.separator();
-            ui.strong("Vorschau des Ergebnisberichts");
+            ui.strong("Outcome report preview");
             ui.label(&report);
-            if ui.button("Bericht kopieren").clicked() {
+            if ui.button("Copy report").clicked() {
                 ui.ctx().copy_text(report.clone());
             }
             if record.ticket.origin != "local" {
                 ui.checkbox(
                     &mut self.recovery_extensions.confirm,
                     format!(
-                        "Diesen Bericht als Kommentar an {} / {} senden",
+                        "Send this report as a comment to {} / {}",
                         record.ticket.origin, record.ticket.key
                     ),
                 );
@@ -303,20 +304,20 @@ impl AivanaApp {
                     .add_enabled(
                         self.recovery_extensions.confirm
                             && !self.recovery_extensions.token.is_empty(),
-                        egui::Button::new("Geprüften Bericht jetzt an Jira senden"),
+                        egui::Button::new("Send reviewed report to Jira now"),
                     )
                     .clicked()
                 {
                     let result = (|| -> anyhow::Result<Uuid> {
                         anyhow::ensure!(
                             self.recovery_extensions.origin == record.ticket.origin,
-                            "Jira-Verbindung stimmt nicht mit Ticket-Ursprung überein"
+                            "Jira connection does not match the ticket origin"
                         );
                         let current =
-                            self.recovery_ticket_report(record.case.context("Fall fehlt")?)?;
+                            self.recovery_ticket_report(record.case.context("Case missing")?)?;
                         anyhow::ensure!(
                             current == report,
-                            "Ergebnis geändert; neue Berichtsvorschau erstellen"
+                            "Outcome changed; create a new report preview"
                         );
                         let id = self.recovery_extensions.tickets.reserve(index, &report)?;
                         self.recovery_extensions.save_tickets()?;
@@ -344,7 +345,7 @@ impl AivanaApp {
                         Err(e) => self.recovery_extensions.notice = e.to_string(),
                     }
                 }
-                ui.small("Bei unterbrochener oder ungeklärter Zustellung wird nicht automatisch erneut gesendet. Jira anhand der Zustell-ID prüfen.");
+                ui.small("Interrupted or unresolved deliveries are not automatically retried. Check Jira using the delivery ID.");
             }
         }
     }
@@ -365,15 +366,15 @@ impl AivanaApp {
                 return;
             }
         };
-        ui.label("Signierte Reparaturpakete mit tatsächlich geprobten Dienst-/HTTP-Plänen und Umgebungsfingerprints verbinden.");
-        ui.small("Lokaler kuratierter Katalog. Kompatibilität ist keine Produktionsfreigabe; jede Übernahme führt in eine neue Generalprobe.");
+        ui.label("Link signed repair packages to service/HTTP plans that were actually rehearsed and environment fingerprints.");
+        ui.small("Local curated catalog. Compatibility is not production approval; each adoption starts a new rehearsal.");
         let s = &mut self.recovery_extensions;
         egui::ComboBox::from_id_salt("catalog_contract")
             .selected_text(
                 s.contract
                     .and_then(|id| contracts.contracts.iter().find(|c| c.id == id))
                     .map(|c| c.name.as_str())
-                    .unwrap_or("Geprobten Plan wählen"),
+                    .unwrap_or("Select rehearsed plan"),
             )
             .show_ui(ui, |ui| {
                 for c in &contracts.contracts {
@@ -385,7 +386,7 @@ impl AivanaApp {
             .and_then(|id| contracts.contracts.iter().find(|c| c.id == id))
         {
             if ui
-                .button("Passendes Paket erzeugen und mit lokalem Herausgeberschlüssel signieren")
+                .button("Create matching package and sign with local publisher key")
                 .clicked()
             {
                 match catalog::candidate(contract).and_then(|p| crate::package_trust::sign(&p)) {
@@ -393,7 +394,7 @@ impl AivanaApp {
                     Err(e) => s.notice = e.to_string(),
                 }
             }
-            ui.small("Herausgeberschlüssel und Vertrauen werden im Bereich Workflows verwaltet.");
+            ui.small("Manage publisher keys and trust in Workflows.");
             ui.add(
                 egui::TextEdit::multiline(&mut s.package)
                     .desired_rows(4)
@@ -401,7 +402,7 @@ impl AivanaApp {
                     .char_limit(524288),
             );
             if ui
-                .button("Signatur und frische Belege prüfen; in Katalog aufnehmen")
+                .button("Verify signature and fresh evidence; add to catalog")
                 .clicked()
             {
                 let result =
@@ -412,7 +413,7 @@ impl AivanaApp {
                                 .iter()
                                 .any(|e| e.signed_package == entry.signed_package
                                     && e.contract == entry.contract),
-                            "Paket bereits im Katalog"
+                            "Package already in catalog"
                         );
                         let mut next = s.catalog.clone();
                         next.entries.push(entry);
@@ -421,7 +422,7 @@ impl AivanaApp {
                         Ok(())
                     });
                 s.notice = result
-                    .map(|_| "Paket mit tatsächlichem Generalprobenbeleg registriert.".into())
+                    .map(|_| "Package registered with actual rehearsal evidence.".into())
                     .unwrap_or_else(|e| e.to_string());
             }
         }
@@ -433,30 +434,30 @@ impl AivanaApp {
                 let name = trust
                     .verify(&entry.signed_package)
                     .map(|p| p.plan.name)
-                    .unwrap_or_else(|_| "Signatur nicht mehr vertraut".into());
+                    .unwrap_or_else(|_| "Signature no longer trusted".into());
                 ui.strong(name);
                 ui.label(match status {
                     catalog::Compatibility::Verified => {
-                        "Umgebung stimmt mit geprobtem Paket überein"
+                        "Environment matches rehearsed package"
                     }
                     catalog::Compatibility::Changed => {
-                        "Nicht kompatibel: Plan oder Umgebung geändert"
+                        "Incompatible: plan or environment changed"
                     }
                     catalog::Compatibility::Unknown => {
-                        "Unbekannt: Nachweis abgelaufen, Plan fehlt oder Vertrauen widerrufen"
+                        "Unknown: evidence expired, plan missing, or trust revoked"
                     }
                 });
                 ui.small(format!(
-                    "Belegaufnahme {} · Plan {}",
+                    "Evidence capture {} · Plan {}",
                     entry.recorded_at, entry.plan_hash
                 ));
-                if ui.button("Signiertes Paket kopieren").clicked() {
+                if ui.button("Copy signed package").clicked() {
                     ui.ctx().copy_text(entry.signed_package.clone());
                 }
                 if ui
                     .add_enabled(
                         status == catalog::Compatibility::Verified,
-                        egui::Button::new("Als neue Generalprobe vorbereiten"),
+                        egui::Button::new("Prepare as a new rehearsal"),
                     )
                     .clicked()
                 {

@@ -76,10 +76,10 @@ impl AivanaApp {
         let gateway = &mut profile.options.gateway;
         if gateway.enabled && !gateway.paa && !gateway.use_profile_credentials {
             let id = gateway.credential_id.ok_or_else(|| {
-                anyhow::anyhow!("Gateway-Zugangsdaten fehlen. Bitte im Profil speichern.")
+                anyhow::anyhow!("Gateway credentials missing. Save them in the profile.")
             })?;
             let secret = self.credentials.get(id)?.ok_or_else(|| {
-                anyhow::anyhow!("Gespeicherte Gateway-Zugangsdaten sind nicht verfügbar.")
+                anyhow::anyhow!("Saved gateway credentials are unavailable.")
             })?;
             gateway.password = secret.password;
         }
@@ -87,82 +87,82 @@ impl AivanaApp {
     }
 
     pub(in crate::app) fn workbench_display_settings(&mut self, ui: &mut Ui) {
-        ui.heading("Darstellung");
+        ui.heading("Appearance");
         if ui
             .add(
                 egui::Slider::new(&mut self.desktop.workbench.scale, 0.8..=1.75)
-                    .text("Vergrößerung"),
+                    .text("Zoom"),
             )
             .changed()
         {
             ui.ctx().set_zoom_factor(self.desktop.workbench.scale);
             self.save_desktop_layout();
         }
-        ui.label("Die Vergrößerung gilt für die Bedienoberfläche. Die Remote-Auflösung wird je Verbindung eingestellt.");
+        ui.label("Zoom applies to the user interface. Remote resolution is configured per connection.");
         ui.add_space(16.0);
     }
 
     pub(in crate::app) fn workbench_profile_options(&mut self, ui: &mut Ui) {
         let options = &mut self.draft.options;
-        ui.collapsing("Anzeige & Wiederverbindung", |ui| {
-            ui.checkbox(&mut options.dynamic_resolution, "Auflösung automatisch an das Sitzungsfenster anpassen");
+        ui.collapsing("Display & reconnection", |ui| {
+            ui.checkbox(&mut options.dynamic_resolution, "Automatically fit resolution to the session window");
             ui.horizontal_wrapped(|ui| {
-                ui.label("Startauflösung:");
-                ui.add(egui::DragValue::new(&mut options.width).range(200..=8192).suffix(" px breit"));
-                ui.add(egui::DragValue::new(&mut options.height).range(200..=8192).suffix(" px hoch"));
+                ui.label("Starting resolution:");
+                ui.add(egui::DragValue::new(&mut options.width).range(200..=8192).suffix(" px wide"));
+                ui.add(egui::DragValue::new(&mut options.height).range(200..=8192).suffix(" px high"));
             });
-            ui.checkbox(&mut options.auto_reconnect, "Bei Verbindungsabbruch automatisch erneut verbinden");
-            ui.label("Mehrere Remote-Monitore");
+            ui.checkbox(&mut options.auto_reconnect, "Automatically reconnect after a dropped connection");
+            ui.label("Multiple remote monitors");
             let mut remove = None;
             for (index, monitor) in options.monitors.iter_mut().enumerate() {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(format!("Monitor {}", index + 1));
                     ui.add(egui::DragValue::new(&mut monitor.x).prefix("X "));
                     ui.add(egui::DragValue::new(&mut monitor.y).prefix("Y "));
-                    ui.add(egui::DragValue::new(&mut monitor.width).range(200..=8192).suffix(" breit"));
-                    ui.add(egui::DragValue::new(&mut monitor.height).range(200..=8192).suffix(" hoch"));
-                    ui.checkbox(&mut monitor.primary, "Primär");
-                    if ui.button("Entfernen").clicked() { remove = Some(index); }
+                    ui.add(egui::DragValue::new(&mut monitor.width).range(200..=8192).suffix(" wide"));
+                    ui.add(egui::DragValue::new(&mut monitor.height).range(200..=8192).suffix(" high"));
+                    ui.checkbox(&mut monitor.primary, "Primary");
+                    if ui.button("Remove").clicked() { remove = Some(index); }
                 });
             }
             if let Some(index) = remove { options.monitors.remove(index); }
-            if options.monitors.len() < 8 && ui.button("Monitor hinzufügen").clicked() {
+            if options.monitors.len() < 8 && ui.button("Add monitor").clicked() {
                 let x = options.monitors.iter().map(|m| m.x + m.width as i32).max().unwrap_or(0);
                 options.monitors.push(crate::connection_options::MonitorLayout {
                     x, y: 0, width: u32::from(options.width), height: u32::from(options.height), primary: options.monitors.is_empty(),
                 });
             }
-            ui.label("Ohne Einträge wird ein einzelner Remote-Monitor verwendet. Die Anordnung benötigt Unterstützung durch den Server.");
+            ui.label("With no entries, a single remote monitor is used. The server must support the layout.");
         });
-        ui.collapsing("Zwischenablage, Dateien & Audio", |ui| {
+        ui.collapsing("Clipboard, files & audio", |ui| {
             ui.checkbox(
                 &mut options.clipboard,
-                "Zwischenablage zwischen diesem Rechner und der Sitzung freigeben",
+                "Share clipboard between this computer and the session",
             );
             ui.checkbox(
                 &mut options.audio_playback,
-                "Remote-Audio auf diesem Rechner wiedergeben",
+                "Play remote audio on this computer",
             );
             ui.checkbox(
                 &mut options.microphone,
-                "Lokales Mikrofon an die Sitzung weiterleiten",
+                "Forward local microphone to the session",
             );
-            ui.label("Freigegebene lokale Ordner");
+            ui.label("Shared local folders");
             let mut remove = None;
             for (index, folder) in options.shared_folders.iter_mut().enumerate() {
                 ui.horizontal_wrapped(|ui| {
                     ui.add(
                         egui::TextEdit::singleline(&mut folder.name)
-                            .hint_text("Freigabename")
+                            .hint_text("Share name")
                             .desired_width(100.0),
                     );
                     ui.add(
                         egui::TextEdit::singleline(&mut folder.path)
-                            .hint_text("Lokaler Ordnerpfad")
+                            .hint_text("Local folder path")
                             .desired_width(220.0),
                     );
-                    ui.checkbox(&mut folder.read_only, "Nur lesen");
-                    if ui.button("Entfernen").clicked() {
+                    ui.checkbox(&mut folder.read_only, "Read-only");
+                    if ui.button("Remove").clicked() {
                         remove = Some(index);
                     }
                 });
@@ -170,11 +170,11 @@ impl AivanaApp {
             if let Some(index) = remove {
                 options.shared_folders.remove(index);
             }
-            if ui.button("Ordner hinzufügen").clicked() {
+            if ui.button("Add folder").clicked() {
                 options
                     .shared_folders
                     .push(crate::connection_options::SharedFolder {
-                        name: "Dateien".to_owned(),
+                        name: "Files".to_owned(),
                         path: String::new(),
                         read_only: true,
                     });
@@ -182,40 +182,40 @@ impl AivanaApp {
         });
         ui.collapsing("RD Gateway", |ui| {
             let gateway = &mut options.gateway;
-            ui.checkbox(&mut gateway.enabled, "Über RD Gateway verbinden");
+            ui.checkbox(&mut gateway.enabled, "Connect through RD Gateway");
             ui.add_enabled_ui(gateway.enabled, |ui| {
-                ui.checkbox(&mut gateway.ntlm, "NTLM (SSPI_NTLM); deaktiviert: Basic über TLS");
-                ui.checkbox(&mut gateway.paa, "PAA: Anbieter-Cookie bei jeder Verbindung eingeben");
-                ui.small("PAA hat Vorrang vor NTLM/Basic. Nur einen vom Gateway-Anbieter ausgestellten PAA-Cookie verwenden. Allgemeine OAuth-Token und OTP-Codes werden nicht unterstützt. Gateway-Einwilligungen werden zur Bestätigung angezeigt; externe MFA wird bis zu 120 Sekunden abgewartet.");
-                text_field(ui, "Gateway-Rechner", &mut gateway.host);
+                ui.checkbox(&mut gateway.ntlm, "NTLM (SSPI_NTLM); disabled: Basic over TLS");
+                ui.checkbox(&mut gateway.paa, "PAA: enter provider cookie for each connection");
+                ui.small("PAA takes precedence over NTLM/Basic. Use only a PAA cookie issued by the gateway provider. General OAuth tokens and OTP codes are not supported. Gateway consent prompts are shown for confirmation; external MFA is awaited for up to 120 seconds.");
+                text_field(ui, "Gateway host", &mut gateway.host);
                 ui.add(
                     egui::DragValue::new(&mut gateway.port)
                         .range(1..=65535)
-                        .prefix("HTTPS-Port "),
+                        .prefix("HTTPS port "),
                 );
                 ui.checkbox(
                     &mut gateway.use_profile_credentials,
-                    "Zugangsdaten der RDP-Verbindung verwenden",
+                    "Use RDP connection credentials",
                 );
                 if !gateway.use_profile_credentials {
-                    text_field(ui, "Gateway-Benutzer", &mut gateway.username);
-                    text_field(ui, "Gateway-Domäne", &mut gateway.domain);
+                    text_field(ui, "Gateway user", &mut gateway.username);
+                    text_field(ui, "Gateway domain", &mut gateway.domain);
                     password_field(
                         ui,
-                        "Gateway-Passwort (leer = gespeichertes verwenden)",
+                        "Gateway password (blank = use saved password)",
                         &mut gateway.password,
                     );
                 }
             });
         });
-        ui.label(RichText::new("Änderungen werden mit dem Profil gespeichert und beim nächsten Verbindungsaufbau angewendet.").small().color(MUTED));
-        ui.collapsing("RemoteApp · eingebettetes Windows-Control", |ui| {
-            ui.small("Die Sitzung läuft im integrierten Windows-Control; RemoteApps können eigene Programmfenster öffnen. Benutzerdefinierte Arbeitsverzeichnisse sind dabei noch nicht unterstützt.");
-            text_field(ui, "Veröffentlichtes Programm (z. B. ||Calculator)", &mut options.remote_app.program);
-            text_field(ui, "Anzeigename", &mut options.remote_app.name);
-            text_field(ui, "Argumente", &mut options.remote_app.arguments);
-            text_field(ui, "Arbeitsverzeichnis", &mut options.remote_app.working_directory);
-            ui.small("Mit dem Profil speichern. Start unter Verbindungen; Anmeldung im Windows-RDP-Client.");
+        ui.label(RichText::new("Changes are saved with the profile and applied on the next connection.").small().color(MUTED));
+        ui.collapsing("RemoteApp · embedded Windows control", |ui| {
+            ui.small("The session runs in the integrated Windows control; RemoteApps may open their own application windows. Custom working directories are not yet supported.");
+            text_field(ui, "Published program (e.g., ||Calculator)", &mut options.remote_app.program);
+            text_field(ui, "Display name", &mut options.remote_app.name);
+            text_field(ui, "Arguments", &mut options.remote_app.arguments);
+            text_field(ui, "Working directory", &mut options.remote_app.working_directory);
+            ui.small("Save with the profile. Start under Connections; sign in through the Windows RDP client.");
         });
     }
 
@@ -242,16 +242,16 @@ impl AivanaApp {
 
     pub(super) fn workbench_directory(&mut self, ui: &mut Ui) {
         ui.horizontal_wrapped(|ui| {
-            ui.heading(RichText::new("Rechnerzentrale").size(28.0).color(INK));
+            ui.heading(RichText::new("Computer hub").size(28.0).color(INK));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button("Neue Verbindung").clicked() {
+                if ui.button("New connection").clicked() {
                     self.start_new_profile();
                     self.view = View::Connections;
                 }
                 if ui.button("Import / Export").clicked() {
                     self.desktop.workbench.exchange = true;
                 }
-                if ui.button("Vorschauen").clicked() {
+                if ui.button("Previews").clicked() {
                     self.desktop.workbench.directory = false;
                     self.save_desktop_layout();
                 }
@@ -259,7 +259,7 @@ impl AivanaApp {
         });
         ui.label(
             RichText::new(
-                "Rechner auswählen und verbinden. Aktive Sitzungen bleiben unten erreichbar.",
+                "Select a computer and connect. Active sessions remain accessible below.",
             )
             .color(MUTED),
         );
@@ -267,10 +267,10 @@ impl AivanaApp {
         ui.horizontal_wrapped(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.desktop.workbench.filter)
-                    .hint_text("Rechner, Adresse oder Schlagwort suchen …")
+                    .hint_text("Search computers, addresses, or tags …")
                     .desired_width((ui.available_width() - 180.0).max(180.0)),
             );
-            if ui.button("Suche leeren").clicked() {
+            if ui.button("Clear search").clicked() {
                 self.desktop.workbench.filter.clear();
             }
         });
@@ -291,7 +291,7 @@ impl AivanaApp {
         ui.add_space(8.0);
         ui.label(
             RichText::new(format!(
-                "{} Rechner · {} ausgewählt",
+                "{} computers · {} selected",
                 profiles.len(),
                 self.desktop.workbench.selected.len()
             ))
@@ -300,12 +300,12 @@ impl AivanaApp {
         );
         if !self.desktop.workbench.selected.is_empty() {
             ui.horizontal_wrapped(|ui| {
-                ui.label("Gruppe für Auswahl:");
+                ui.label("Group for selection:");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.desktop.workbench.batch_group)
                         .desired_width(130.0),
                 );
-                if ui.button("Anwenden").clicked() {
+                if ui.button("Apply").clicked() {
                     let group = self.desktop.workbench.batch_group.trim().to_owned();
                     if !group.is_empty() {
                         let edit = crate::profile_exchange::BatchProfileEdit {
@@ -317,13 +317,13 @@ impl AivanaApp {
                             &self.desktop.workbench.selected,
                             &edit,
                         ) {
-                            self.status = format!("Gruppenänderung fehlgeschlagen: {error}");
+                            self.status = format!("Group change failed: {error}");
                             return;
                         }
                         self.save_profiles();
                     }
                 }
-                if ui.button("Als Favoriten markieren").clicked() {
+                if ui.button("Mark as favorites").clicked() {
                     for p in &mut self.profiles {
                         if self.desktop.workbench.selected.contains(&p.id) {
                             p.favorite = true;
@@ -332,7 +332,7 @@ impl AivanaApp {
                     }
                     self.save_profiles();
                 }
-                if ui.button("Auswahl aufheben").clicked() {
+                if ui.button("Clear selection").clicked() {
                     self.desktop.workbench.selected.clear();
                 }
             });
@@ -369,8 +369,8 @@ impl AivanaApp {
         let group_x = width * 0.48;
         let status_x = width * 0.73;
         for (left, right, text) in [
-            (name_x, group_x, "Rechner"),
-            (group_x, status_x, "Umgebung"),
+            (name_x, group_x, "Computer"),
+            (group_x, status_x, "Environment"),
             (status_x, width, "Status"),
         ] {
             label_in(
@@ -386,16 +386,16 @@ impl AivanaApp {
         }
         ui.separator();
         if profiles.is_empty() {
-            ui.label("Keine passenden Rechner. Passe die Suche an oder lege eine Verbindung an.");
+            ui.label("No matching computers. Adjust the search or create a connection.");
             return;
         }
         // At small widths the selected profile actions stay reachable without an inspector.
         if show_actions && self.selected_profile.is_some() {
             ui.horizontal_wrapped(|ui| {
-                if ui.button("Verbinden").clicked() {
+                if ui.button("Connect").clicked() {
                     self.connect_selected();
                 }
-                if ui.button("Profil bearbeiten").clicked() {
+                if ui.button("Edit profile").clicked() {
                     self.edit_selected_profile();
                     self.view = View::Connections;
                 }
@@ -430,7 +430,7 @@ impl AivanaApp {
                     );
                     if check
                         .checkbox(&mut checked, "")
-                        .on_hover_text("Für gemeinsame Bearbeitung auswählen")
+                        .on_hover_text("Select for bulk editing")
                         .changed()
                     {
                         if checked {
@@ -448,7 +448,7 @@ impl AivanaApp {
                         .rev()
                         .find(|s| s.profile_id == profile.id)
                         .map(|s| status_label(s.status))
-                        .unwrap_or("Bereit");
+                        .unwrap_or("Ready");
                     for (left, right, text, strong) in [
                         (name_x, group_x, profile.name.as_str(), true),
                         (group_x, status_x, profile.group.as_str(), false),
@@ -479,16 +479,16 @@ impl AivanaApp {
                         self.selected_profile = Some(profile.id);
                     }
                     response.context_menu(|ui| {
-                        if ui.button("Profil bearbeiten").clicked() {
+                        if ui.button("Edit profile").clicked() {
                             self.load_profile_into_editor(profile.id);
                             self.view = View::Connections;
                             ui.close();
                         }
-                        if ui.button("Duplizieren").clicked() {
+                        if ui.button("Duplicate").clicked() {
                             self.workbench_duplicate(profile);
                             ui.close();
                         }
-                        if ui.button("Verbinden").clicked() {
+                        if ui.button("Connect").clicked() {
                             self.selected_profile = Some(profile.id);
                             self.connect_selected();
                             ui.close();
@@ -508,7 +508,7 @@ impl AivanaApp {
 
     fn workbench_inspector(&mut self, ui: &mut Ui) {
         let Some(profile) = self.selected_profile().cloned() else {
-            ui.label("Wähle einen Rechner aus.");
+            ui.label("Select a computer.");
             return;
         };
         ui.heading(RichText::new(&profile.name).size(23.0).color(INK));
@@ -518,16 +518,16 @@ impl AivanaApp {
                 .strong(),
         );
         ui.add_space(14.0);
-        ui.label("Rechneradresse");
+        ui.label("Computer address");
         ui.label(RichText::new(format!("{}:{}", profile.host, profile.port)).strong());
         ui.add_space(8.0);
-        ui.label(format!("Benutzer: {}", profile.username));
+        ui.label(format!("User: {}", profile.username));
         ui.label(format!(
-            "Geändert: {}",
+            "Modified: {}",
             profile
                 .updated_at
                 .with_timezone(&chrono::Local)
-                .format("%d.%m.%Y %H:%M")
+                .format("%m/%d/%Y %H:%M")
         ));
         ui.add_space(16.0);
         let session = self
@@ -545,7 +545,7 @@ impl AivanaApp {
             ui.painter().text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
-                "Noch keine Sitzung",
+                "No session yet",
                 FontId::proportional(15.0),
                 tw::SLATE_300,
             );
@@ -556,9 +556,9 @@ impl AivanaApp {
                 egui::vec2(ui.available_width(), 40.0),
                 egui::Button::new(
                     RichText::new(if session.is_some() {
-                        "Sitzung öffnen"
+                        "Open session"
                     } else {
-                        "Verbinden"
+                        "Connect"
                     })
                     .color(Color32::WHITE),
                 )
@@ -573,15 +573,15 @@ impl AivanaApp {
             }
         }
         ui.horizontal(|ui| {
-            if ui.button("Bearbeiten").clicked() {
+            if ui.button("Edit").clicked() {
                 self.load_profile_into_editor(profile.id);
                 self.view = View::Connections;
             }
-            if ui.button("Duplizieren").clicked() {
+            if ui.button("Duplicate").clicked() {
                 self.workbench_duplicate(&profile);
             }
             let mut favorite = profile.favorite;
-            if ui.checkbox(&mut favorite, "Favorit").changed() {
+            if ui.checkbox(&mut favorite, "Favorite").changed() {
                 if let Some(p) = self.profiles.iter_mut().find(|p| p.id == profile.id) {
                     p.favorite = favorite;
                 }
@@ -589,15 +589,15 @@ impl AivanaApp {
             }
         });
         ui.add_space(10.0);
-        ui.collapsing("Zertifikat & Zugang", |ui| {
+        ui.collapsing("Certificate & access", |ui| {
             ui.label(&self.certificate_notice);
-            if ui.button("Zertifikat prüfen").clicked() {
+            if ui.button("Check certificate").clicked() {
                 self.probe_selected_certificate();
             }
-            if ui.button("Zertifikat vertrauen").clicked() {
+            if ui.button("Trust certificate").clicked() {
                 self.trust_selected_certificate();
             }
-            if ui.button("Zugangsdaten bearbeiten").clicked() {
+            if ui.button("Edit credentials").clicked() {
                 self.load_profile_into_editor(profile.id);
                 self.view = View::Connections;
             }
@@ -616,7 +616,7 @@ impl AivanaApp {
             .cloned()
             .collect();
         if candidates.is_empty() {
-            ui.label("Öffne eine weitere Sitzung für die Ansicht nebeneinander.");
+            ui.label("Open another session for the side-by-side view.");
             self.remote_canvas(ui, active.id);
             return;
         }
@@ -627,14 +627,14 @@ impl AivanaApp {
             self.desktop.workbench.second = Some(candidates[0].id);
         }
         ui.horizontal_wrapped(|ui| {
-            ui.label("Zweite Sitzung:");
+            ui.label("Second session:");
             egui::ComboBox::from_id_salt("second-session")
                 .selected_text(
                     candidates
                         .iter()
                         .find(|s| Some(s.id) == self.desktop.workbench.second)
                         .map(|s| s.title.as_str())
-                        .unwrap_or("Auswählen"),
+                        .unwrap_or("Select"),
                 )
                 .show_ui(ui, |ui| {
                     for s in &candidates {
@@ -646,7 +646,7 @@ impl AivanaApp {
                     }
                 });
             ui.label(
-                RichText::new("Nur die aktive Sitzung erhält Eingaben.")
+                RichText::new("Only the active session receives input.")
                     .small()
                     .color(tw::SLATE_300),
             );
@@ -670,14 +670,14 @@ impl AivanaApp {
         };
         let mut primary = child(ui, (active.id, "split-active"), left);
         primary.label(
-            RichText::new(format!("{} · Aktiv", active.title))
+            RichText::new(format!("{} · Active", active.title))
                 .strong()
                 .color(Color32::from_rgb(132, 211, 221)),
         );
         self.remote_canvas(&mut primary, active.id);
         let mut secondary = child(ui, (second.id, "split-preview"), right);
         if secondary
-            .button(format!("{} · Aktivieren", second.title))
+            .button(format!("{} · Activate", second.title))
             .clicked()
         {
             self.desktop.workbench.second = Some(active.id);
@@ -698,36 +698,36 @@ impl AivanaApp {
     pub(super) fn workbench_dialogs(&mut self, ctx: &Context) {
         if self.desktop.workbench.transfer {
             let mut open = true;
-            egui::Window::new("Dateiübertragung").open(&mut open).default_width(570.0).show(ctx, |ui| {
-                let Some(session) = self.selected_session().cloned() else { ui.label("Öffne zuerst eine Sitzung."); return; };
-                ui.label(RichText::new(format!("Ziel: {}", session.title)).strong());
+            egui::Window::new("File transfer").open(&mut open).default_width(570.0).show(ctx, |ui| {
+                let Some(session) = self.selected_session().cloned() else { ui.label("Open a session first."); return; };
+                ui.label(RichText::new(format!("Target: {}", session.title)).strong());
                 let enabled = session.status == SessionStatus::Connected && self.profiles.iter().find(|p| p.id == session.profile_id).is_some_and(|p| p.options.clipboard);
-                ui.label("Für Dateien muss die Zwischenablage im Verbindungsprofil freigegeben sein.");
+                ui.label("File transfer requires clipboard sharing enabled in the connection profile.");
                 ui.add_enabled_ui(enabled, |ui| {
-                    ui.label("Lokale Dateien (ein vollständiger Pfad pro Zeile)");
+                    ui.label("Local files (one full path per line)");
                     ui.add(egui::TextEdit::multiline(&mut self.desktop.workbench.upload_paths).desired_rows(3).desired_width(f32::INFINITY));
-                    if ui.button("Dateien zum Einfügen bereitstellen").clicked() {
+                    if ui.button("Make files available to paste").clicked() {
                         let paths: Vec<String> = self.desktop.workbench.upload_paths.lines().map(str::trim).filter(|p| !p.is_empty()).map(str::to_owned).collect();
-                        self.status = if paths.is_empty() { "Wähle mindestens einen Dateipfad.".to_owned() }
+                        self.status = if paths.is_empty() { "Select at least one file path.".to_owned() }
                         else { match self.engine.send_input(session.id, InputAction::ClipboardFiles { paths }) {
-                            Ok(()) => "Dateien angefordert. Nach Bestätigung im Ereignisverlauf im Remote-Explorer einfügen.".to_owned(),
-                            Err(err) => format!("Dateien konnten nicht bereitgestellt werden: {err}"),
+                            Ok(()) => "Files requested. After confirmation in event history, paste them in remote File Explorer.".to_owned(),
+                            Err(err) => format!("Could not make files available: {err}"),
                         }};
                     }
                     ui.separator();
-                    ui.label("Vom Remote-Rechner: Dateien dort kopieren, dann lokal abrufen.");
-                    text_field(ui, "Lokaler Zielordner", &mut self.desktop.workbench.download_directory);
-                    if ui.button("Kopierte Dateien hier speichern").clicked() {
+                    ui.label("From the remote computer: copy files there, then retrieve them locally.");
+                    text_field(ui, "Local destination folder", &mut self.desktop.workbench.download_directory);
+                    if ui.button("Save copied files here").clicked() {
                         let directory = self.desktop.workbench.download_directory.trim().to_owned();
-                        self.status = if directory.is_empty() { "Gib einen lokalen Zielordner an.".to_owned() }
+                        self.status = if directory.is_empty() { "Enter a local destination folder.".to_owned() }
                         else { match self.engine.send_input(session.id, InputAction::ClipboardDownload { directory }) {
-                            Ok(()) => "Dateiabruf angefordert. Ergebnis im Ereignisverlauf.".to_owned(),
-                            Err(err) => format!("Dateiabruf fehlgeschlagen: {err}"),
+                            Ok(()) => "File retrieval requested. See event history for the result.".to_owned(),
+                            Err(err) => format!("File retrieval failed: {err}"),
                         }};
                     }
                 });
                 ui.label(&self.status);
-                if ui.button("Ereignisverlauf anzeigen").clicked() { self.desktop.timeline = true; }
+                if ui.button("Show event history").clicked() { self.desktop.timeline = true; }
             });
             self.desktop.workbench.transfer = open;
         }
@@ -735,16 +735,16 @@ impl AivanaApp {
             return;
         }
         let mut open = true;
-        egui::Window::new("Verbindungen importieren / exportieren")
+        egui::Window::new("Import / export connections")
             .open(&mut open)
             .default_width(540.0)
             .show(ctx, |ui| {
-                ui.label("Dateipfad (.rdp, .csv oder .json)");
+                ui.label("File path (.rdp, .csv, or .json)");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.desktop.workbench.exchange_path)
                         .desired_width(f32::INFINITY),
                 );
-                ui.label("Zugangsdaten werden separat im geschützten Speicher verwaltet.");
+                ui.label("Credentials are managed separately in protected storage.");
                 self.workbench_exchange_actions(ui);
                 ui.label(&self.desktop.workbench.exchange_message);
             });
@@ -753,7 +753,7 @@ impl AivanaApp {
 
     fn workbench_exchange_actions(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            if ui.button("Importieren").clicked() {
+            if ui.button("Import").clicked() {
                 match crate::profile_exchange::import_profiles(std::path::Path::new(
                     self.desktop.workbench.exchange_path.trim(),
                 )) {
@@ -762,15 +762,15 @@ impl AivanaApp {
                         self.profiles.extend(profiles);
                         self.save_profiles();
                         self.desktop.workbench.exchange_message =
-                            format!("{count} Verbindungen importiert.");
+                            format!("{count} connections imported.");
                     }
                     Err(err) => {
                         self.desktop.workbench.exchange_message =
-                            format!("Import fehlgeschlagen: {err}")
+                            format!("Import failed: {err}")
                     }
                 }
             }
-            if ui.button("Auswahl exportieren").clicked() {
+            if ui.button("Export selection").clicked() {
                 let profiles: Vec<_> = self
                     .profiles
                     .iter()
@@ -778,14 +778,14 @@ impl AivanaApp {
                     .cloned()
                     .collect();
                 self.desktop.workbench.exchange_message = if profiles.is_empty() {
-                    "Wähle zuerst Verbindungen über die Kontrollkästchen aus.".to_owned()
+                    "Select connections using the checkboxes first.".to_owned()
                 } else {
                     match crate::profile_exchange::export_profiles(
                         std::path::Path::new(self.desktop.workbench.exchange_path.trim()),
                         &profiles,
                     ) {
-                        Ok(()) => format!("{} Verbindungen exportiert.", profiles.len()),
-                        Err(err) => format!("Export fehlgeschlagen: {err}"),
+                        Ok(()) => format!("{} connections exported.", profiles.len()),
+                        Err(err) => format!("Export failed: {err}"),
                     }
                 };
             }

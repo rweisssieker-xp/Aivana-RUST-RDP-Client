@@ -34,28 +34,28 @@ impl AivanaApp {
         if let Some(prompt) = &self.protocols.prompt {
             let mut decision = None;
             let mut open = true;
-            egui::Window::new("RD Gateway · Bestätigung erforderlich")
+            egui::Window::new("RD Gateway · confirmation required")
                 .id(egui::Id::new("gateway_interaction"))
                 .open(&mut open).collapsible(false).resizable(true).default_width(560.0)
                 .show(ctx, |ui| {
                     match prompt {
                         GatewayInteraction::Consent { gateway, message, .. } => {
                             ui.label(RichText::new(gateway).strong());
-                            ui.label("Der Gateway verlangt Ihre Zustimmung vor dem Verbindungsaufbau.");
+                            ui.label("The gateway requires your consent before connecting.");
                             egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| { ui.label(message); });
                             ui.horizontal(|ui| {
-                                if ui.button("Zustimmen und fortfahren").clicked() { decision = Some(true); }
-                                if ui.button("Ablehnen").clicked() { decision = Some(false); }
+                                if ui.button("Agree and continue").clicked() { decision = Some(true); }
+                                if ui.button("Decline").clicked() { decision = Some(false); }
                             });
                         }
                         GatewayInteraction::PaaToken { gateway, .. } => {
                             ui.label(RichText::new(gateway).strong());
-                            ui.label("PAA-Cookie Ihres Gateway-Anbieters eingeben. Der Cookie wird nur für diese Verbindung verwendet.");
-                            ui.small("Kein allgemeines OAuth-Token und kein OTP-Code. Die Anmeldung im Anbieter-Browser muss über dessen dokumentierten Ablauf erfolgen.");
-                            ui.add(egui::TextEdit::singleline(&mut self.protocols.token).password(true).char_limit(32749).hint_text("PAA-Cookie"));
+                            ui.label("Enter your gateway provider's PAA cookie. The cookie is used only for this connection.");
+                            ui.small("This is not a general OAuth token or OTP code. Sign in through the provider's documented browser flow.");
+                            ui.add(egui::TextEdit::singleline(&mut self.protocols.token).password(true).char_limit(32749).hint_text("PAA cookie"));
                             ui.horizontal(|ui| {
-                                if ui.add_enabled(!self.protocols.token.is_empty(), egui::Button::new("Cookie verwenden")).clicked() { decision = Some(true); }
-                                if ui.button("Abbrechen").clicked() { decision = Some(false); }
+                                if ui.add_enabled(!self.protocols.token.is_empty(), egui::Button::new("Use cookie")).clicked() { decision = Some(true); }
+                                if ui.button("Cancel").clicked() { decision = Some(false); }
                             });
                         }
                     }
@@ -89,15 +89,15 @@ impl AivanaApp {
             if let Some(profile) = self.protocols.launch.take() {
                 if self.protocols.native.is_some() {
                     self.status =
-                        "Bitte die aktive RemoteApp zuerst über ihr Fenster schließen.".into();
+                        "Close the active RemoteApp through its window first.".into();
                 } else {
                     let result =
                         (|| -> anyhow::Result<crate::native_remoteapp::NativeRemoteApp> {
                             let handle = frame
                                 .window_handle()
-                                .map_err(|error| anyhow::anyhow!("Fensterzugriff: {error}"))?;
+                                .map_err(|error| anyhow::anyhow!("Window access: {error}"))?;
                             let RawWindowHandle::Win32(handle) = handle.as_raw() else {
-                                anyhow::bail!("Windows-Fenster erforderlich");
+                                anyhow::bail!("Windows window required");
                             };
                             let host =
                                 crate::native_remoteapp::NativeRemoteApp::new(handle.hwnd.get())?;
@@ -107,7 +107,7 @@ impl AivanaApp {
                     match result {
                         Ok(host) => {
                             self.protocols.native = Some((profile.name, host));
-                            self.status = "RemoteApp-Verbindung gestartet. Anmeldung erfolgt im Windows-Control.".into();
+                            self.status = "RemoteApp connection started. Sign in through the Windows control.".into();
                         }
                         Err(error) => self.status = format!("RemoteApp: {error:#}"),
                     }
@@ -121,10 +121,10 @@ impl AivanaApp {
                 egui::Window::new(format!("RemoteApp · {title}"))
                     .id(egui::Id::new("native_remoteapp"))
                     .open(&mut open).default_size([640.0, 420.0]).show(ctx, |ui| {
-                        let state = match host.state() { Ok(0) => "Getrennt", Ok(1) => "Verbunden", Ok(2) => "Verbindungsaufbau", _ => "Status nicht verfügbar" };
-                        ui.label(format!("Windows-RDP-Control · {state}"));
-                        ui.small("Die RemoteApp kann eigene native Programmfenster öffnen. Schließen dieses Fensters trennt die Sitzung.");
-                        if ui.button("RemoteApp trennen").clicked() { disconnect = true; }
+                        let state = match host.state() { Ok(0) => "Disconnected", Ok(1) => "Connected", Ok(2) => "Connecting", _ => "Status unavailable" };
+                        ui.label(format!("Windows RDP control · {state}"));
+                        ui.small("The RemoteApp may open its own native application windows. Closing this window disconnects the session.");
+                        if ui.button("Disconnect RemoteApp").clicked() { disconnect = true; }
                         let (rect, _) = ui.allocate_exact_size(ui.available_size().max(egui::vec2(100.0, 100.0)), Sense::hover());
                         bounds = Some(rect);
                     });
@@ -138,7 +138,7 @@ impl AivanaApp {
                         (rect.height() * scale) as i32,
                         open && !prompt_visible,
                     ) {
-                        self.status = format!("RemoteApp-Fenster: {error}");
+                        self.status = format!("RemoteApp window: {error}");
                     }
                 } else {
                     let _ = host.place(0, 0, 1, 1, false);
@@ -151,7 +151,7 @@ impl AivanaApp {
         #[cfg(not(windows))]
         if self.protocols.launch.take().is_some() {
             let _ = frame;
-            self.status = "Eingebettete RemoteApps benötigen Windows.".into();
+            self.status = "Embedded RemoteApps require Windows.".into();
         }
     }
 }

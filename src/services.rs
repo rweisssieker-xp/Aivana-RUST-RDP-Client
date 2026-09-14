@@ -482,7 +482,7 @@ impl NativeRdpEngine {
                 .push(EngineEvent::Diagnostic {
                     session_id: session.id,
                     message: format!(
-                        "Automatische Wiederverbindung {}/5 in {} Sekunden",
+                        "Automatic reconnection {}/5 in {} seconds",
                         retry.attempts,
                         delay.as_secs()
                     ),

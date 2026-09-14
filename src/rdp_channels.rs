@@ -93,7 +93,7 @@ impl CliprdrBackend for ClipboardBackend {
     }
     fn on_ready(&mut self) {
         self.state.lock().unwrap().ready = true;
-        self.diagnostic("Zwischenablage ausgehandelt (Text und Dateistreams)");
+        self.diagnostic("Clipboard negotiated (text and file streams)");
     }
     fn on_request_format_list(&mut self) {
         let mut s = self.state.lock().unwrap();
@@ -116,7 +116,7 @@ impl CliprdrBackend for ClipboardBackend {
             .map(|f| f.id());
         if s.remote_file_format.is_some() {
             self.diagnostic(
-                "Remote-Dateien in Zwischenablage verfügbar – mit Dateien empfangen speichern",
+                "Remote clipboard files are available; save them with Receive files",
             );
         } else if formats
             .iter()
@@ -167,7 +167,7 @@ impl CliprdrBackend for ClipboardBackend {
         let mut s = self.state.lock().unwrap();
         if response.is_error() {
             s.receiving_list = false;
-            self.diagnostic("Remote-Zwischenablage hat Daten abgelehnt");
+            self.diagnostic("Remote clipboard rejected data");
             return;
         }
         if s.receiving_list {
@@ -181,10 +181,10 @@ impl CliprdrBackend for ClipboardBackend {
                         .map(|(i, f)| (i as u32, f))
                         .collect();
                     if let Err(e) = start_download(&mut s) {
-                        self.diagnostic(format!("Dateiempfang: {e}"));
+                        self.diagnostic(format!("File reception: {e}"));
                     }
                 }
-                Err(e) => self.diagnostic(format!("Dateiliste ungültig: {e}")),
+                Err(e) => self.diagnostic(format!("Invalid file list: {e}")),
             }
         } else if let Ok(text) = response.to_unicode_string() {
             // Remember remote value before polling to suppress clipboard echo.
@@ -201,14 +201,14 @@ impl CliprdrBackend for ClipboardBackend {
             }
             match arboard::Clipboard::new().and_then(|mut c| c.set_text(text)) {
                 Ok(()) => {}
-                Err(e) => self.diagnostic(format!("Lokale Zwischenablage: {e}")),
+                Err(e) => self.diagnostic(format!("Local clipboard: {e}")),
             }
         }
     }
     fn on_file_contents_request(&mut self, request: FileContentsRequest) {
         let mut s = self.state.lock().unwrap();
         let response = (|| -> Result<FileContentsResponse<'static>> {
-            let path = s.paths.get(request.index as usize).context("Dateiindex")?;
+            let path = s.paths.get(request.index as usize).context("File index")?;
             let mut file = File::open(path)?;
             if request.flags.contains(FileContentsFlags::SIZE) {
                 return Ok(FileContentsResponse::new_size_response(
@@ -217,7 +217,7 @@ impl CliprdrBackend for ClipboardBackend {
                 ));
             }
             if !request.flags.contains(FileContentsFlags::DATA) {
-                bail!("Unbekannte Dateianfrage");
+                bail!("Unknown file request");
             }
             file.seek(SeekFrom::Start(request.position))?;
             let mut data = vec![0; request.requested_size.min(CHUNK) as usize];
@@ -245,18 +245,18 @@ impl CliprdrBackend for ClipboardBackend {
             || bytes.len() > CHUNK as usize
             || bytes.len() as u64 > d.size - d.offset
         {
-            self.diagnostic("Dateiempfang abgebrochen: ungültige oder fehlende Daten; Teildatei bleibt erhalten");
+            self.diagnostic("File reception canceled: invalid or missing data; partial file was retained");
             return;
         }
         if let Err(e) = d.file.write_all(bytes) {
-            self.diagnostic(format!("Datei schreiben: {e}"));
+            self.diagnostic(format!("Write file: {e}"));
             return;
         }
         d.offset += bytes.len() as u64;
         if d.offset == d.size {
-            self.diagnostic(format!("Datei empfangen: {}", d.path.display()));
+            self.diagnostic(format!("File received: {}", d.path.display()));
             if let Err(e) = start_download(&mut s) {
-                self.diagnostic(format!("Dateiempfang: {e}"));
+                self.diagnostic(format!("File reception: {e}"));
             }
         } else {
             let request = download_request(&d);
@@ -275,7 +275,7 @@ fn safe_filename(name: &str) -> Result<&str> {
         || name.contains(['/', '\\', ':', '\0', '*', '?', '<', '>', '|', '"'])
         || name.ends_with(['.', ' '])
     {
-        bail!("Unsicherer Dateiname");
+        bail!("Unsafe filename");
     }
     let base = name.split('.').next().unwrap().to_ascii_uppercase();
     if [
@@ -284,7 +284,7 @@ fn safe_filename(name: &str) -> Result<&str> {
     ]
     .contains(&base.as_str())
     {
-        bail!("Reservierter Dateiname");
+        bail!("Reserved filename");
     }
     Ok(name)
 }
@@ -304,17 +304,17 @@ fn start_download(s: &mut ClipboardState) -> Result<()> {
             .attributes
             .is_some_and(|a| a.contains(ClipboardFileAttributes::DIRECTORY))
         {
-            bail!("Ordner bitte als ZIP übertragen");
+            bail!("Transfer folders as ZIP archives");
         }
         let name = safe_filename(&descriptor.name)?;
-        let destination = s.destination.as_ref().context("Zielordner fehlt")?;
+        let destination = s.destination.as_ref().context("Destination folder is missing")?;
         let path = destination.join(name);
-        let size = descriptor.file_size.context("Remote-Dateigröße fehlt")?;
+        let size = descriptor.file_size.context("Remote file size is missing")?;
         let file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&path)
-            .context("Zieldatei existiert bereits oder ist nicht schreibbar")?;
+            .context("Destination file already exists or is not writable")?;
         s.stream = s.stream.wrapping_add(1);
         let download = Download {
             file,
@@ -326,7 +326,7 @@ fn start_download(s: &mut ClipboardState) -> Result<()> {
         };
         if size == 0 {
             s.notices.push(format!(
-                "Leere Datei empfangen: {}",
+                "Empty file received: {}",
                 download.path.display()
             ));
             continue;
@@ -429,7 +429,7 @@ impl Channels {
             let display = DisplayControlClient::new(move |caps| {
                 let _ = events.send(EngineEvent::Diagnostic {
                     session_id: session,
-                    message: "Dynamische Anzeige vom Server bestätigt".into(),
+                    message: "Dynamic display confirmed by server".into(),
                 });
                 if let Some(layout) = &layout {
                     let area: u64 = monitors
@@ -439,7 +439,7 @@ impl Channels {
                     if area > caps.max_monitor_area() {
                         let _ = events.send(EngineEvent::Diagnostic {
                             session_id: session,
-                            message: "Monitorlayout überschreitet Serverfläche".into(),
+                            message: "Monitor layout exceeds server display area".into(),
                         });
                         return Ok(vec![]);
                     }
@@ -499,21 +499,21 @@ impl Channels {
                 Ok(Some(
                     stage
                         .encode_resize(w, h, Some(100), None)
-                        .context("Display-Control nicht verfügbar")??,
+                        .context("Display control unavailable")??,
                 ))
             }
             InputAction::ClipboardFiles { paths } => {
                 if !self.options.clipboard {
-                    bail!("Zwischenablage ist deaktiviert");
+                    bail!("Clipboard is disabled");
                 }
                 let mut s = self.state.lock().unwrap();
                 if !s.file_stream {
-                    bail!("Server unterstützt keine Datei-Zwischenablage");
+                    bail!("Server does not support file clipboard");
                 }
                 let paths: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
                 for p in &paths {
                     if !p.is_file() {
-                        bail!("Nur vorhandene Dateien übertragen (Ordner als ZIP)");
+                        bail!("Transfer only existing files (archive folders as ZIP)");
                     }
                     let name = p.file_name().context("Dateiname")?.to_string_lossy();
                     safe_filename(&name)?;
@@ -526,20 +526,20 @@ impl Channels {
                     ClipboardFormat::new(FILE_FORMAT)
                         .with_name(ClipboardFormatName::new("FileGroupDescriptorW")),
                 ]));
-                self.diagnostic("Dateien angeboten – im Remote-Explorer Einfügen wählen");
+                self.diagnostic("Files offered – select Paste in remote File Explorer");
                 Ok(Some(vec![]))
             }
             InputAction::ClipboardDownload { directory } => {
                 if !self.options.clipboard {
-                    bail!("Zwischenablage ist deaktiviert");
+                    bail!("Clipboard is disabled");
                 }
                 let mut s = self.state.lock().unwrap();
                 if s.download.is_some() || s.receiving_list {
-                    bail!("Dateiempfang läuft bereits");
+                    bail!("File reception already in progress");
                 }
                 let format = s
                     .remote_file_format
-                    .context("Keine Remote-Dateien in Zwischenablage")?;
+                    .context("No remote files in clipboard")?;
                 let path = Path::new(directory);
                 std::fs::create_dir_all(path)?;
                 s.destination = Some(path.canonicalize()?);

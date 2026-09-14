@@ -22,7 +22,7 @@ impl AivanaApp {
                     self.vision.worker = None;
                     match result {
                         Ok(s) => {
-                            self.vision.notice = format!("{} Wörter lokal erkannt", s.words.len());
+                            self.vision.notice = format!("{} words recognized locally", s.words.len());
                             self.vision.screen = Some(s);
                         }
                         Err(e) => {
@@ -33,7 +33,7 @@ impl AivanaApp {
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     self.vision.worker = None;
-                    self.vision.notice = "OCR-Worker beendet".into();
+                    self.vision.notice = "OCR worker stopped".into();
                 }
                 _ => {}
             }
@@ -48,22 +48,22 @@ impl AivanaApp {
             .and_then(|id| self.latest_frames.get(&id))
             .cloned()
         else {
-            self.vision.notice = "Zuerst eine Sitzung mit Bild auswählen".into();
+            self.vision.notice = "Select a session with an image first".into();
             return;
         };
         let (tx, rx) = std::sync::mpsc::channel();
         self.vision.worker = Some(rx);
         std::thread::spawn(move || {
-            let _ = tx.send(vision::recognize(&frame).map_err(|e| format!("Lokale OCR: {e:#}")));
+            let _ = tx.send(vision::recognize(&frame).map_err(|e| format!("Local OCR: {e:#}")));
         });
     }
     pub(super) fn vision_view(&mut self, ui: &mut Ui) {
-        ui.heading("Bild verstehen · lokal");
-        ui.label("Windows OCR erkennt sichtbare Wörter mit Positionen. Bilder bleiben lokal. Das Archiv enthält nur automatisch und manuell geschwärzte Schlüsselbilder und deren bereinigten Suchtext.");
+        ui.heading("Understand the screen · locally");
+        ui.label("Windows OCR recognizes visible words and their positions. Images stay local. The archive contains only keyframes with automatic and manual redactions and their sanitized search text.");
         if ui
             .add_enabled(
                 self.vision.worker.is_none(),
-                egui::Button::new("Aktuelles Bild lokal lesen"),
+                egui::Button::new("Read current image locally"),
             )
             .clicked()
         {
@@ -78,19 +78,19 @@ impl AivanaApp {
             .and_then(|id| self.latest_frames.get(&id));
         if let Some(s) = &self.vision.screen {
             ui.label(format!(
-                "{} × {} · Bild {:016x} · {}",
+                "{} × {} · Frame {:016x} · {}",
                 s.width,
                 s.height,
                 s.frame_hash,
                 if current.is_some_and(|f| s.matches(f)) {
-                    "aktuell"
+                    "current"
                 } else {
-                    "veraltet – vor Aktion neu lesen"
+                    "outdated – read again before acting"
                 }
             ));
             ui.add(
                 egui::TextEdit::singleline(&mut self.vision.query)
-                    .hint_text("Erkannten Text durchsuchen"),
+                    .hint_text("Search recognized text"),
             );
             ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
                 for w in &s.words {
@@ -112,16 +112,16 @@ impl AivanaApp {
             });
         }
         ui.separator();
-        ui.label("Semantischer Klick für den nächsten Schritt im Ablauf:");
+        ui.label("Semantic click for the next workflow step:");
         ui.add(
             egui::TextEdit::singleline(&mut self.vision.label)
                 .char_limit(256)
-                .hint_text("Exaktes sichtbares Wort, z. B. Speichern"),
+                .hint_text("Exact visible word, e.g., Save"),
         );
         ui.add(
             egui::TextEdit::singleline(&mut self.vision.context)
                 .char_limit(256)
-                .hint_text("Optional: eindeutiges Wort in der Nähe"),
+                .hint_text("Optional: unique nearby word"),
         );
         if let Some(s) = &self.vision.screen {
             match s.resolve(&Anchor {
@@ -130,7 +130,7 @@ impl AivanaApp {
             }) {
                 Ok(b) => {
                     ui.label(format!(
-                        "Eindeutiger Treffer bei {}, {}",
+                        "Unique match at {}, {}",
                         b.center().0,
                         b.center().1
                     ));
@@ -140,6 +140,6 @@ impl AivanaApp {
                 }
             }
         }
-        ui.small("OCR kann Geheimnisse übersehen. Erkannte Geheimnisfelder werden vor Archivierung breit geschwärzt; zusätzliche manuelle Masken bleiben erforderlich. Ein OCR-Fehler stoppt die Aufnahme.");
+        ui.small("OCR may miss secrets. Detected secret fields are broadly redacted before archiving; additional manual masks are still required. An OCR error stops recording.");
     }
 }

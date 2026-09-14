@@ -80,13 +80,13 @@ pub(super) fn needs_attention(status: SessionStatus) -> bool {
 
 fn status_label(status: SessionStatus) -> &'static str {
     match status {
-        SessionStatus::Connected => "Verbunden",
-        SessionStatus::Connecting => "Verbindungsaufbau",
-        SessionStatus::Authenticating => "Anmeldung",
-        SessionStatus::Reconnecting => "Wiederverbinden",
-        SessionStatus::Suspended => "Pausiert",
-        SessionStatus::Disconnected => "Getrennt",
-        SessionStatus::Failed => "Verbindung fehlgeschlagen",
+        SessionStatus::Connected => "Connected",
+        SessionStatus::Connecting => "Connecting",
+        SessionStatus::Authenticating => "Authenticating",
+        SessionStatus::Reconnecting => "Reconnecting",
+        SessionStatus::Suspended => "Paused",
+        SessionStatus::Disconnected => "Disconnected",
+        SessionStatus::Failed => "Connection failed",
     }
 }
 
@@ -100,7 +100,7 @@ fn environment_label(profile: &ConnectionProfile) -> String {
             )
         })
     {
-        "PRODUKTION".to_owned()
+        "PRODUCTION".to_owned()
     } else {
         profile.group.clone()
     }
@@ -191,7 +191,7 @@ impl AivanaApp {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui
                     .button(if focused {
-                        "Aktionen · Strg Umschalt K"
+                        "Actions · Ctrl Shift K"
                     } else {
                         crate::localization::tr(locale, "Suchen & Aktionen · Strg K")
                     })
@@ -254,7 +254,7 @@ impl AivanaApp {
                 if self.desktop.workbench.directory {
                     self.workbench_directory(&mut body);
                 } else {
-                    if body.button("Zur Rechnerzentrale").clicked() {
+                    if body.button("Back to computer hub").clicked() {
                         self.desktop.workbench.directory = true;
                         self.save_desktop_layout();
                     }
@@ -266,13 +266,16 @@ impl AivanaApp {
             if let Some(terminal) = self.terminal.as_mut() {
                 terminal_panel::show(&mut body, terminal);
             } else {
-                body.label("SSH-Profil auswählen und Verbinden starten.");
+                body.label("Select an SSH profile and connect.");
             }
         } else {
             ScrollArea::vertical()
                 .auto_shrink([false, false])
                     .show(&mut body, |ui| match self.view {
-                        View::Release => super::release_panel::draw(ui, self.desktop.locale),
+                        View::Release => {
+                            super::release_panel::draw(ui, self.desktop.locale);
+                            self.commerce.ui(ui);
+                        }
                     View::Missions => self.missions_view(ui),
                     View::Operations => self.operations_view(ui),
                     View::SessionWindows => self.session_layouts_ui(ui),
@@ -397,7 +400,7 @@ impl AivanaApp {
         }
         ui.add_space(30.0);
         ui.label(
-            RichText::new("Lokal. Nativ. In deinem Kontext.")
+            RichText::new("Local. Native. In your context.")
                 .small()
                 .color(MUTED),
         );
@@ -405,8 +408,8 @@ impl AivanaApp {
 
     fn save_desktop_layout(&mut self) {
         self.status = match self.desktop.save() {
-            Ok(()) => "Ansicht gespeichert".to_owned(),
-            Err(err) => format!("Ansicht konnte nicht gespeichert werden: {err}"),
+            Ok(()) => "View saved".to_owned(),
+            Err(err) => format!("Could not save view: {err}"),
         };
     }
 
@@ -416,12 +419,12 @@ impl AivanaApp {
             if self.selected_session != Some(id) {
                 self.autopilot.abort();
                 self.computer_use_status =
-                    "Neue Sitzung ausgewählt. KI-Aufgabe bei Bedarf neu starten.".to_owned();
+                    "New session selected. Restart the AI task if needed.".to_owned();
                 self.diagnostics.clear();
                 self.ai_diagnosis = session
                     .last_error
                     .clone()
-                    .unwrap_or_else(|| "Noch keine Diagnose für diese Sitzung.".to_owned());
+                    .unwrap_or_else(|| "No diagnosis for this session yet.".to_owned());
             }
             self.selected_session = Some(id);
             self.selected_profile = Some(session.profile_id);
@@ -437,32 +440,32 @@ impl AivanaApp {
         ui.horizontal_wrapped(|ui| {
             ui.heading(
                 RichText::new(if self.desktop.group.is_empty() {
-                    "Dein Arbeitsbereich"
+                    "Your workspace"
                 } else {
                     &self.desktop.group
                 })
                 .size(28.0)
                 .color(INK),
             );
-            if ui.button("Neue Verbindung").clicked() {
+            if ui.button("New connection").clicked() {
                 self.start_new_profile();
                 self.view = View::Connections;
             }
-            if ui.button("Ansicht speichern").clicked() {
+            if ui.button("Save view").clicked() {
                 self.save_desktop_layout();
             }
         });
         ui.horizontal_wrapped(|ui| {
-            ui.label("Ansicht:");
+            ui.label("View:");
             let changed = ui
-                .selectable_value(&mut self.desktop.compact, false, "Raster")
+                .selectable_value(&mut self.desktop.compact, false, "Grid")
                 .changed()
-                | ui.selectable_value(&mut self.desktop.compact, true, "Liste")
+                | ui.selectable_value(&mut self.desktop.compact, true, "List")
                     .changed();
             if changed {
                 self.save_desktop_layout();
             }
-            if self.desktop.featured.is_some() && ui.button("Hervorhebung aufheben").clicked() {
+            if self.desktop.featured.is_some() && ui.button("Clear highlight").clicked() {
                 self.desktop.featured = None;
                 self.save_desktop_layout();
             }
@@ -486,11 +489,11 @@ impl AivanaApp {
             .collect();
         if profiles.is_empty() {
             ui.add_space(60.0);
-            ui.heading("Platz für deinen nächsten Remote-Desktop.");
+            ui.heading("Room for your next remote desktop.");
             ui.label(
-                "Lege eine Verbindung an. Nach dem Verbinden erscheint hier die Live-Vorschau.",
+                "Create a connection. A live preview appears here once connected.",
             );
-            if ui.button("Verbindung anlegen").clicked() {
+            if ui.button("Create connection").clicked() {
                 self.start_new_profile();
                 self.view = View::Connections;
             }
@@ -508,7 +511,7 @@ impl AivanaApp {
             .count();
         ui.label(
             RichText::new(format!(
-                "{} Verbindungen · {live} verbunden · Am Griff ziehen zum Anordnen",
+                "{} connections · {live} connected · Drag the handle to arrange",
                 profiles.len()
             ))
             .small()
@@ -606,7 +609,7 @@ impl AivanaApp {
         header.horizontal(|ui| {
             let grip = ui
                 .add(egui::Label::new(RichText::new("::").color(MUTED)).sense(Sense::drag()))
-                .on_hover_text("Ziehen zum Anordnen");
+                .on_hover_text("Drag to arrange");
             if grip.drag_started() {
                 self.desktop.dragging = Some(profile.id);
             }
@@ -620,9 +623,9 @@ impl AivanaApp {
                     let featured = self.desktop.featured == Some(profile.id);
                     if ui
                         .button(if featured {
-                            "Hervorhebung aufheben"
+                            "Clear highlight"
                         } else {
-                            "Groß hervorheben"
+                            "Enlarge highlight"
                         })
                         .clicked()
                     {
@@ -633,12 +636,12 @@ impl AivanaApp {
                         self.save_desktop_layout();
                         ui.close();
                     }
-                    if ui.button("Profil bearbeiten").clicked() {
+                    if ui.button("Edit profile").clicked() {
                         self.load_profile_into_editor(profile.id);
                         self.view = View::Connections;
                         ui.close();
                     }
-                    if ui.button("Nach vorne").clicked() {
+                    if ui.button("Move to front").clicked() {
                         if let Some(first) = self.desktop.order.first().copied() {
                             self.desktop.move_before(profile.id, first);
                             self.save_desktop_layout();
@@ -654,7 +657,7 @@ impl AivanaApp {
                     session
                         .as_ref()
                         .map(|s| status_label(s.status))
-                        .unwrap_or("Bereit zum Verbinden"),
+                        .unwrap_or("Ready to connect"),
                 )
                 .size(12.0)
                 .color(
@@ -684,7 +687,7 @@ impl AivanaApp {
                 ui.painter().text(
                     preview.center(),
                     egui::Align2::CENTER_CENTER,
-                    "Noch keine Sitzung",
+                    "No session yet",
                     FontId::proportional(16.0),
                     tw::SLATE_300,
                 );
@@ -728,9 +731,9 @@ impl AivanaApp {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui
                     .button(if session.is_some() {
-                        "Fokussieren"
+                        "Focus"
                     } else {
-                        "Profil öffnen"
+                        "Open profile"
                     })
                     .clicked()
                 {
@@ -767,7 +770,7 @@ impl AivanaApp {
                 ui.painter().text(
                     band.center(),
                     egui::Align2::CENTER_CENTER,
-                    "LETZTES BILD · NICHT LIVE",
+                    "LAST IMAGE · NOT LIVE",
                     FontId::proportional(12.0),
                     Color32::from_rgb(255, 196, 113),
                 );
@@ -816,29 +819,29 @@ impl AivanaApp {
                         .color(Color32::from_rgb(255, 196, 113)),
                 );
             }
-            ui.selectable_value(&mut self.remote_view_mode, RemoteViewMode::Fit, "Anpassen");
+            ui.selectable_value(&mut self.remote_view_mode, RemoteViewMode::Fit, "Fit");
             ui.selectable_value(
                 &mut self.remote_view_mode,
                 RemoteViewMode::ActualSize,
                 "100 %",
             );
-            ui.toggle_value(&mut self.desktop.workbench.split, "Nebeneinander");
-            if ui.button("Dateien").clicked() {
+            ui.toggle_value(&mut self.desktop.workbench.split, "Side by side");
+            if ui.button("Files").clicked() {
                 self.workbench_open_transfer();
             }
-            if ui.button("Eigenes Fenster").clicked()
+            if ui.button("Separate window").clicked()
                 && !self.session_windows.open.contains(&session.id)
             {
                 self.session_windows.open.push(session.id);
             }
-            ui.toggle_value(&mut self.desktop.assistant, "KI & Diagnose");
-            ui.toggle_value(&mut self.desktop.timeline, "Zeitleiste");
-            if ui.button("Vollbild").clicked() {
+            ui.toggle_value(&mut self.desktop.assistant, "AI & diagnostics");
+            ui.toggle_value(&mut self.desktop.timeline, "Timeline");
+            if ui.button("Full screen").clicked() {
                 self.remote_fullscreen = !self.remote_fullscreen;
                 ui.ctx()
                     .send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.remote_fullscreen));
             }
-            if ui.button("Trennen").clicked() {
+            if ui.button("Disconnect").clicked() {
                 self.disconnect_selected_session();
                 return;
             }
@@ -849,11 +852,11 @@ impl AivanaApp {
                 ui.colored_label(
                     AMBER,
                     format!(
-                        "Wiederverbindung · Versuch {attempt} · in {} s",
+                        "Reconnecting · Attempt {attempt} · in {} s",
                         delay.as_secs()
                     ),
                 );
-                if ui.button("Wiederverbindung abbrechen").clicked() {
+                if ui.button("Cancel reconnection").clicked() {
                     self.engine.cancel_reconnect(session.id);
                     if let Some(s) = self.sessions.iter_mut().find(|s| s.id == session.id) {
                         s.status = SessionStatus::Disconnected;
@@ -865,8 +868,8 @@ impl AivanaApp {
             return;
         }
         if self.session_windows.open.contains(&session.id) {
-            ui.label("Diese Sitzung ist in einem eigenen Fenster geöffnet.");
-            if ui.button("Hier anzeigen").clicked() {
+            ui.label("This session is open in a separate window.");
+            if ui.button("Show here").clicked() {
                 self.session_windows.open.retain(|id| *id != session.id);
             }
             return;
@@ -906,9 +909,9 @@ impl AivanaApp {
                         "{} · {}",
                         status_label(session.status),
                         if self.latest_frames.contains_key(&session.id) {
-                            "Letztes Bild, nicht live"
+                            "Last image, not live"
                         } else {
-                            "Noch kein Bild empfangen"
+                            "No image received yet"
                         }
                     ),
                 );
@@ -954,16 +957,16 @@ impl AivanaApp {
         ui.style_mut().visuals = egui::Visuals::light();
         ui.horizontal(|ui| {
             ui.heading(if needs_attention(session.status) {
-                "Was ist passiert?"
+                "What happened?"
             } else {
-                "KI-Begleiter"
+                "AI companion"
             });
-            if ui.small_button("Schließen").clicked() {
+            if ui.small_button("Close").clicked() {
                 self.desktop.assistant = false;
             }
         });
         ui.label(
-            RichText::new(format!("Kontext: {}", session.title))
+            RichText::new(format!("Context: {}", session.title))
                 .small()
                 .color(MUTED),
         );
@@ -980,7 +983,7 @@ impl AivanaApp {
         }
         if let Some(frame) = self.latest_frames.get(&session.id) {
             ui.label(format!(
-                "Letztes Bild: {} · {} × {}",
+                "Last image: {} · {} × {}",
                 frame
                     .captured_at
                     .with_timezone(&chrono::Local)
@@ -991,27 +994,27 @@ impl AivanaApp {
         }
         ui.add_space(8.0);
         if needs_attention(session.status) {
-            ui.label("Die Ursache ist erst durch weitere Befunde gesichert. Die Zeitleiste zeigt die empfangenen Sitzungsereignisse.");
-            if ui.button("Erneut verbinden").clicked() {
+            ui.label("Additional findings are needed to establish the cause. The timeline shows the session events received.");
+            if ui.button("Reconnect").clicked() {
                 self.reconnect_selected_session();
             }
         } else {
-            ui.label("Beschreibe eine Aufgabe oder untersuche die bisherigen Sitzungsereignisse.");
+            ui.label("Describe a task or investigate the session events so far.");
         }
-        if ui.button("Ereignisse zusammenfassen").clicked() {
+        if ui.button("Summarize events").clicked() {
             let messages = self.session_messages(session.id);
             self.computer_use_status = self.ai.write_incident_report(&messages).customer_text;
         }
         ui.label(redact_secret_text(&self.computer_use_status));
         ui.add_space(12.0);
-        ui.collapsing("Aufgabe, Runbooks & KI-Aktionen", |ui| {
+        ui.collapsing("Task, runbooks & AI actions", |ui| {
             self.ai_session_panel(ui, session.id)
         });
-        ui.collapsing("Technische Sitzungsdaten",|ui| {
-            ui.label(format!("Sitzung: {}",session.id));
-            ui.label(format!("Sitzungsbeginn: {}", session.connected_at.with_timezone(&chrono::Local).format("%d.%m.%Y %H:%M:%S")));
+        ui.collapsing("Technical session data",|ui| {
+            ui.label(format!("Session: {}",session.id));
+            ui.label(format!("Session started: {}", session.connected_at.with_timezone(&chrono::Local).format("%m/%d/%Y %H:%M:%S")));
             ui.label(self.canvas_status(session.id));
-            ui.label("Qualitätsmesswerte werden hier erst angezeigt, wenn reale Messdaten verfügbar sind.");
+            ui.label("Quality metrics appear here only when actual measurements are available.");
         });
     }
 
@@ -1019,22 +1022,22 @@ impl AivanaApp {
         ui.separator();
         ui.horizontal(|ui| {
             ui.label(
-                RichText::new("Ereignisverlauf")
+                RichText::new("Event history")
                     .strong()
                     .color(tw::SLATE_100),
             );
             ui.label(
-                RichText::new("Sitzungsprotokoll · keine Video-Wiedergabe")
+                RichText::new("Session log · no video playback")
                     .small()
                     .color(tw::SLATE_300),
             );
-            if ui.small_button("Schließen").clicked() {
+            if ui.small_button("Close").clicked() {
                 self.desktop.timeline = false;
             }
         });
         let events = self.timeline.events_for_session(id);
         if events.is_empty() {
-            ui.label("Noch keine Ereignisse für diese Sitzung.");
+            ui.label("No events for this session yet.");
             return;
         }
         ScrollArea::horizontal()
@@ -1088,7 +1091,7 @@ impl AivanaApp {
             return;
         }
         let mut open = true;
-        egui::Window::new(RichText::new("Suchen & Aktionen").size(18.0))
+        egui::Window::new(RichText::new("Search & actions").size(18.0))
             .collapsible(false)
             .resizable(false)
             .open(&mut open)
@@ -1097,7 +1100,7 @@ impl AivanaApp {
             .show(ctx, |ui| {
                 let query = ui.add(
                     egui::TextEdit::singleline(&mut self.desktop.query)
-                        .hint_text("Rechner, Sitzung oder Aktion suchen …")
+                        .hint_text("Search computers, sessions, or actions …")
                         .desired_width(f32::INFINITY),
                 );
                 if self.desktop.palette_focus {
@@ -1109,34 +1112,34 @@ impl AivanaApp {
                 ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
                     for (label, view) in [
                         ("Mission Control", View::Missions),
-                        ("Remote-Werkzeuge", View::Operations),
-                        ("Sitzungsfenster", View::SessionWindows),
-                        ("Inventar & Vault", View::Integrations),
-                        ("Aufzeichnungen", View::Recordings),
-                        ("Vormachen & Lernen", View::Teaching),
+                        ("Remote tools", View::Operations),
+                        ("Session windows", View::SessionWindows),
+                        ("Inventory & vault", View::Integrations),
+                        ("Recordings", View::Recordings),
+                        ("Demonstrate & learn", View::Teaching),
                         ("Team", View::Team),
-                        ("Bildschirm verstehen", View::Vision),
-                        ("Planen & Lernen", View::Intelligence),
+                        ("Understand the screen", View::Vision),
+                        ("Plan & learn", View::Intelligence),
                         ("Recovery Agent", View::Recovery),
-                        ("Wiederherstellungspläne", View::RecoveryPlans),
-                        ("Recovery-Hintergrundbetrieb", View::RecoveryDaemon),
+                        ("Recovery plans", View::RecoveryPlans),
+                        ("Background recovery", View::RecoveryDaemon),
                         (
-                            "Tickets und Kompatibilitätskatalog",
+                            "Tickets and compatibility catalog",
                             View::RecoveryExtensions,
                         ),
-                        ("Ursachen & Lösungen", View::Insights),
-                        ("Prüfen & Ausführen", View::Execution),
-                        ("Klon → Produktion", View::Promotion),
-                        ("Änderungen & Rückkehr", View::ChangeHistory),
-                        ("Isoliertes Testlabor", View::TestLab),
-                        ("Aufträge & Pakete", View::Workflow),
-                        ("Störung rekonstruieren", View::Incident),
+                        ("Causes & solutions", View::Insights),
+                        ("Review & run", View::Execution),
+                        ("Clone → production", View::Promotion),
+                        ("Changes & rollback", View::ChangeHistory),
+                        ("Isolated test lab", View::TestLab),
+                        ("Jobs & packages", View::Workflow),
+                        ("Reconstruct an incident", View::Incident),
                         ("SSH-Terminal", View::Terminal),
-                        ("Arbeitsbereich", View::Sessions),
-                        ("Verbindungen", View::Connections),
-                        ("Freigaben", View::Approvals),
-                        ("Abläufe & Wissen", View::Workspaces),
-                        ("Einstellungen", View::Settings),
+                        ("Workspace", View::Sessions),
+                        ("Connections", View::Connections),
+                        ("Approvals", View::Approvals),
+                        ("Workflows & knowledge", View::Workspaces),
+                        ("Settings", View::Settings),
                     ] {
                         if label.to_lowercase().contains(&needle) && ui.button(label).clicked() {
                             self.view = view;
@@ -1147,7 +1150,7 @@ impl AivanaApp {
                     for session in self.sessions.clone() {
                         if session.title.to_lowercase().contains(&needle)
                             && ui
-                                .button(format!("Sitzung öffnen · {}", session.title))
+                                .button(format!("Open session · {}", session.title))
                                 .clicked()
                         {
                             self.focus_session(session.id);
@@ -1159,7 +1162,7 @@ impl AivanaApp {
                             .to_lowercase()
                             .contains(&needle)
                             && ui
-                                .button(format!("Profil · {} · {}", profile.name, profile.host))
+                                .button(format!("Profile · {} · {}", profile.name, profile.host))
                                 .clicked()
                         {
                             self.load_profile_into_editor(profile.id);
@@ -1270,7 +1273,7 @@ mod tests {
             let size = egui::vec2(width, 900.0);
             render(&mut app, &ctx, size, vec![]);
             let output = render(&mut app, &ctx, size, vec![]);
-            assert!(text_center(&output, "Rechnerzentrale").is_some());
+            assert!(text_center(&output, "Computer hub").is_some());
             let host = text_center(&output, "APP-SERVER-02").expect("host visible");
             click(&mut app, &ctx, size, host);
             assert_eq!(app.selected_profile, Some(app.profiles[1].id));
@@ -1278,9 +1281,9 @@ mod tests {
             assert!(!app.desktop.focus);
             let output = render(&mut app, &ctx, size, vec![]);
             let action = if width < 900.0 {
-                "Profil bearbeiten"
+                "Edit profile"
             } else {
-                "Sitzung öffnen"
+                "Open session"
             };
             let center = text_center(&output, action).expect("selected profile actions visible");
             assert!(center.y < size.y && center.x < size.x);
@@ -1296,7 +1299,7 @@ mod tests {
         let size = egui::vec2(1440.0, 1024.0);
         render(&mut app, &ctx, size, vec![]);
         let output = render(&mut app, &ctx, size, vec![]);
-        let activate = text_center(&output, "APP-SERVER-02 · Aktivieren").unwrap();
+        let activate = text_center(&output, "APP-SERVER-02 · Activate").unwrap();
         click(&mut app, &ctx, size, activate);
         assert_eq!(app.selected_session, Some(app.sessions[1].id));
         assert!(app.desktop.workbench.split);
@@ -1338,7 +1341,7 @@ mod tests {
         }
         let size = egui::vec2(640.0, 900.0);
         let output = render(&mut app, &ctx, size, vec![]);
-        let button = text_center(&output, "Fokussieren").unwrap();
+        let button = text_center(&output, "Focus").unwrap();
         click(&mut app, &ctx, size, button);
         assert!(app.desktop.focus);
     }
@@ -1381,12 +1384,12 @@ mod tests {
         let size = egui::vec2(1440.0, 1024.0);
         render(&mut app, &ctx, size, vec![]);
         let output = render(&mut app, &ctx, size, vec![]);
-        let button = text_center(&output, "Fokussieren").expect("visible focus action");
+        let button = text_center(&output, "Focus").expect("visible focus action");
         click(&mut app, &ctx, size, button);
         assert!(app.desktop.focus);
         assert!(app.selected_session.is_some());
         let output = render(&mut app, &ctx, size, vec![]);
-        let back = text_center(&output, "Arbeitsbereich").expect("visible back action");
+        let back = text_center(&output, "Workspace").expect("visible back action");
         click(&mut app, &ctx, size, back);
         assert!(!app.desktop.focus);
         assert_eq!(app.sessions.len(), 3);
@@ -1409,8 +1412,8 @@ mod tests {
         assert!(app.desktop.assistant && app.desktop.timeline);
         for width in [1440.0, 800.0, 640.0] {
             let output = render(&mut app, &ctx, egui::vec2(width, 800.0), vec![]);
-            assert!(text_center(&output, "Was ist passiert?").is_some());
-            assert!(text_center(&output, "Ereignisverlauf").is_some());
+            assert!(text_center(&output, "What happened?").is_some());
+            assert!(text_center(&output, "Event history").is_some());
         }
     }
 
@@ -1526,6 +1529,6 @@ mod tests {
         app.connect_selected();
         assert!(app.terminal.is_none());
         assert!(app.sessions.is_empty());
-        assert!(app.status.contains("Ungültiger Host"));
+        assert!(app.status.contains("Invalid host"));
     }
 }

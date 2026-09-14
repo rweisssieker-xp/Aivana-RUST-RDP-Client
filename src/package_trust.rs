@@ -25,7 +25,7 @@ pub struct TrustStore {
 }
 fn decoded_key(key: &str) -> Result<Vec<u8>> {
     let b = STANDARD.decode(key.trim())?;
-    ensure!(b.len() == 32, "Ed25519-Schlüssel muss 32 Bytes haben");
+    ensure!(b.len() == 32, "An Ed25519 key must contain 32 bytes");
     Ok(b)
 }
 pub fn fingerprint(key: &str) -> Result<String> {
@@ -42,22 +42,22 @@ fn bounded_read(path: &Path) -> Result<Vec<u8>> {
     std::fs::File::open(path)?
         .take((LIMIT + 1) as u64)
         .read_to_end(&mut b)?;
-    ensure!(b.len() <= LIMIT, "Datei zu groß");
+    ensure!(b.len() <= LIMIT, "File too large");
     Ok(b)
 }
 pub fn create_key() -> Result<String> {
     let path = crate::security::app_data_file("publisher-key.dpapi")?;
     let key = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new())
-        .map_err(|_| anyhow::anyhow!("Schlüsselerzeugung fehlgeschlagen"))?;
+        .map_err(|_| anyhow::anyhow!("Key generation failed"))?;
     let pair = Ed25519KeyPair::from_pkcs8(key.as_ref())
-        .map_err(|_| anyhow::anyhow!("Schlüssel ungültig"))?;
+        .map_err(|_| anyhow::anyhow!("Invalid key"))?;
     let encrypted = crate::security::protect_secret(key.as_ref())?;
     use std::io::Write;
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)
-        .context("Signierschlüssel besteht bereits oder kann nicht gespeichert werden")?;
+        .context("The signing key already exists or cannot be saved")?;
     file.write_all(&encrypted)?;
     file.sync_all()?;
     Ok(STANDARD.encode(pair.public_key().as_ref()))
@@ -66,7 +66,7 @@ fn local_key() -> Result<Ed25519KeyPair> {
     let bytes = crate::security::unprotect_secret(&bounded_read(
         &crate::security::app_data_file("publisher-key.dpapi")?,
     )?)?;
-    Ed25519KeyPair::from_pkcs8(&bytes).map_err(|_| anyhow::anyhow!("Signierschlüssel nicht lesbar"))
+    Ed25519KeyPair::from_pkcs8(&bytes).map_err(|_| anyhow::anyhow!("Cannot read the signing key"))
 }
 pub fn public_key() -> Result<String> {
     Ok(STANDARD.encode(local_key()?.public_key().as_ref()))
@@ -83,7 +83,7 @@ fn sign_with(package: &crate::workflow::Package, key: &Ed25519KeyPair) -> Result
         package,
     };
     let text = serde_json::to_string_pretty(&bundle)?;
-    ensure!(text.len() <= LIMIT, "Signiertes Paket zu groß");
+    ensure!(text.len() <= LIMIT, "Signed package too large");
     Ok(text)
 }
 impl TrustStore {
@@ -94,14 +94,14 @@ impl TrustStore {
         }
         let s: Self =
             serde_json::from_slice(&crate::security::unprotect_secret(&bounded_read(&p)?)?)?;
-        ensure!(s.publishers.len() <= 128, "Zu viele Herausgeber");
+        ensure!(s.publishers.len() <= 128, "Too many publishers");
         for (k, v) in &s.publishers {
-            ensure!(*k == fingerprint(v)?, "Vertrauensspeicher beschädigt");
+            ensure!(*k == fingerprint(v)?, "The trust store is corrupted");
         }
         Ok(s)
     }
     pub fn save(&self) -> Result<()> {
-        ensure!(self.publishers.len() <= 128, "Maximal 128 Herausgeber");
+        ensure!(self.publishers.len() <= 128, "At most 128 publishers are allowed");
         crate::security::atomic_write(
             &crate::security::app_data_file("publisher-trust.dpapi")?,
             &crate::security::protect_secret(&serde_json::to_vec(self)?)?,
@@ -111,28 +111,28 @@ impl TrustStore {
         let id = fingerprint(key)?;
         ensure!(
             self.publishers.contains_key(&id) || self.publishers.len() < 128,
-            "Herausgebergrenze erreicht"
+            "Publisher limit reached"
         );
         self.publishers
             .insert(id.clone(), STANDARD.encode(decoded_key(key)?));
         Ok(id)
     }
     pub fn verify(&self, text: &str) -> Result<crate::workflow::Package> {
-        ensure!(text.len() <= LIMIT, "Paket überschreitet 512 KiB");
+        ensure!(text.len() <= LIMIT, "Package exceeds 512 KiB");
         let b: SignedPackage = serde_json::from_str(text)?;
-        ensure!(b.schema == 1, "Unbekanntes Signaturschema");
+        ensure!(b.schema == 1, "Unknown signature schema");
         let key = decoded_key(&b.public_key)?;
         let id = fingerprint(&b.public_key)?;
         ensure!(
             self.publishers
                 .get(&id)
                 .is_some_and(|v| v == &STANDARD.encode(&key)),
-            "Herausgeber nicht explizit vertraut oder widerrufen"
+            "The publisher is not explicitly trusted or its trust was revoked"
         );
         let sig = STANDARD.decode(&b.signature)?;
         signature::UnparsedPublicKey::new(&signature::ED25519, &key)
             .verify(&message(&b.package), &sig)
-            .map_err(|_| anyhow::anyhow!("Ungültige Herausgebersignatur"))?;
+            .map_err(|_| anyhow::anyhow!("Invalid publisher signature"))?;
         crate::workflow::Package::import(&b.package).map_err(anyhow::Error::msg)
     }
 }

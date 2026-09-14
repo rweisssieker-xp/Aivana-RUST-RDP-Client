@@ -37,7 +37,7 @@ impl Default for MissionState {
             Err(e) => (
                 MissionBook::default(),
                 Some(format!(
-                    "Auftragsspeicher nicht lesbar: {e:#}. Datei bleibt unverändert."
+                    "Cannot read job storage: {e:#}. File remains unchanged."
                 )),
             ),
         };
@@ -65,7 +65,7 @@ impl AivanaApp {
             return false;
         }
         if let Err(e) = app_data_file("missions.dpapi").and_then(|p| self.missions.book.save(&p)) {
-            self.status = format!("Auftrag konnte nicht gespeichert werden: {e:#}");
+            self.status = format!("Could not save job: {e:#}");
             false
         } else {
             true
@@ -87,7 +87,7 @@ impl AivanaApp {
                             j.status.terminal().then(|| crate::operations::JobResult {
                                 status: j.status.clone(),
                                 stdout: String::new(),
-                                stderr: "Auftrag beendet ohne Ausgabe; Remote-Zustand prüfen"
+                                stderr: "Job ended without output; check remote state"
                                     .into(),
                                 truncated: false,
                                 finished: std::time::SystemTime::now(),
@@ -100,14 +100,14 @@ impl AivanaApp {
                 if let Some(m) = self.missions.book.missions.iter_mut().find(|m| m.id == id) {
                     if let Some(t) = m.targets.iter().find(|t| t.profile_id == target).cloned() {
                         let mut facts = mission::structured_facts(&r.stdout);
-                        facts.insert("Auftrag · Prozessstatus".into(), format!("{:?}", r.status));
-                        facts.insert("Auftrag · Ausgabe begrenzt".into(), r.truncated.to_string());
+                        facts.insert("Job · process status".into(), format!("{:?}", r.status));
+                        facts.insert("Job · output limited".into(), r.truncated.to_string());
                         let notes = format!(
-                            "Standardausgabe:\n{}\nFehlerausgabe:\n{}",
+                            "Standard output:\n{}\nStandard error:\n{}",
                             r.stdout, r.stderr
                         );
                         let e =
-                            Evidence::new(t, &format!("Remote-Werkzeug · {source}"), facts, &notes);
+                            Evidence::new(t, &format!("Remote tool · {source}"), facts, &notes);
                         if let Err(e) = m.record(target, step, e) {
                             self.status = e.to_string();
                         }
@@ -120,7 +120,7 @@ impl AivanaApp {
                     m.pause();
                 }
                 self.status =
-                    "Werkzeugauftrag nicht mehr vorhanden. Mission wurde pausiert.".into();
+                    "Tool job no longer exists. Mission paused.".into();
                 self.save_missions();
             }
         }
@@ -130,11 +130,11 @@ impl AivanaApp {
             .as_ref()
             .and_then(|p| match p.rx.try_recv() {
                 Ok(result) => Some(result),
-                Err(mpsc::TryRecvError::Disconnected) => Some((false, "Prüfworker beendet".into())),
+                Err(mpsc::TryRecvError::Disconnected) => Some((false, "Check worker stopped".into())),
                 Err(mpsc::TryRecvError::Empty) if p.started.elapsed() > Duration::from_secs(12) => {
                     Some((
                         false,
-                        "Zeitlimit nach 12 Sekunden; DNS/TCP-Ergebnis nicht verfügbar".into(),
+                        "Timed out after 12 seconds; DNS/TCP result unavailable".into(),
                     ))
                 }
                 _ => None,
@@ -143,10 +143,10 @@ impl AivanaApp {
             let mut p = self.missions.pending.take().unwrap();
             p.evidence
                 .facts
-                .insert("TCP erreichbar".into(), ok.to_string());
+                .insert("TCP reachable".into(), ok.to_string());
             p.evidence
                 .notes
-                .push_str(&format!("\nTCP-Prüfung: {message}"));
+                .push_str(&format!("\nTCP check: {message}"));
             if let Some(m) = self
                 .missions
                 .book
@@ -164,18 +164,18 @@ impl AivanaApp {
     fn mission_evidence(&self, t: Target) -> Evidence {
         let mut facts = BTreeMap::new();
         if let Some(p) = self.profiles.iter().find(|p| t.matches(p)) {
-            facts.insert("Profil · Gruppe".into(), p.group.clone());
-            facts.insert("Profil · Protokoll".into(), p.protocol.label().into());
+            facts.insert("Profile · group".into(), p.group.clone());
+            facts.insert("Profile · protocol".into(), p.protocol.label().into());
             facts.insert(
-                "Profil · Gateway".into(),
+                "Profile · gateway".into(),
                 if p.options.gateway.enabled {
                     p.options.gateway.host.clone()
                 } else {
-                    "Direkt".into()
+                    "Direct".into()
                 },
             );
             facts.insert(
-                "Profil · Auflösung".into(),
+                "Profile · resolution".into(),
                 format!("{} × {}", p.options.width, p.options.height),
             );
         }
@@ -185,13 +185,13 @@ impl AivanaApp {
                 .get(&s.id)
                 .is_some_and(|source| source.same_endpoint(&t))
         }) {
-            facts.insert("Sitzung · Status".into(), format!("{:?}", s.status));
+            facts.insert("Session · status".into(), format!("{:?}", s.status));
             if let Some(e) = &s.last_error {
-                facts.insert("Sitzung · letzter Fehler".into(), e.clone());
+                facts.insert("Session · last error".into(), e.clone());
             }
             if let Some(f) = self.latest_frames.get(&s.id) {
-                facts.insert("Bild · Größe".into(), format!("{} × {}", f.width, f.height));
-                facts.insert("Bild · Hash".into(), f.frame_hash.to_string());
+                facts.insert("Image · size".into(), format!("{} × {}", f.width, f.height));
+                facts.insert("Image · hash".into(), f.frame_hash.to_string());
             }
             for e in self
                 .timeline
@@ -205,15 +205,15 @@ impl AivanaApp {
             }
         } else {
             facts.insert(
-                "Sitzung · Status".into(),
-                "Kein Sitzungskontext mit passender Endpunkt-Identität vorhanden".into(),
+                "Session · status".into(),
+                "No session context with a matching endpoint identity".into(),
             );
         }
-        Evidence::new(t, "Profil und lokaler Sitzungsverlauf", facts, &notes)
+        Evidence::new(t, "Profile and local session history", facts, &notes)
     }
     fn start_mission_step(&mut self, id: Uuid, target: Uuid, step: usize) {
         if self.missions.pending.is_some() || self.missions.remote.is_some() {
-            self.status = "Ein Missionsschritt läuft bereits".into();
+            self.status = "A mission step is already running".into();
             return;
         }
         let Some(m) = self.missions.book.missions.iter().find(|m| m.id == id) else {
@@ -224,7 +224,7 @@ impl AivanaApp {
         };
         let Some(p) = self.profiles.iter().find(|p| t.matches(p)) else {
             self.status =
-                "Profil fehlt oder Endpunkt hat sich geändert. Neuen Auftrag anlegen.".into();
+                "Profile missing or endpoint changed. Create a new job.".into();
             return;
         };
         let endpoint = if p.options.gateway.enabled {
@@ -234,7 +234,7 @@ impl AivanaApp {
         };
         let kind = m.steps[step].kind;
         if kind == StepKind::SshCommand && p.protocol != Protocol::Ssh {
-            self.status="SSH-Schritte benötigen ein SSH-Profil mit geprüftem Benutzer und Port (über Inventar importierbar).".into();
+            self.status="SSH steps require an SSH profile with a verified user and port (can be imported through Inventory).".into();
             return;
         }
         if !matches!(kind, StepKind::Observe | StepKind::Operator) {
@@ -318,22 +318,22 @@ impl AivanaApp {
             return;
         }
         if kind == StepKind::Operator {
-            evidence.source = "Manuelle Durchführung · Kontext erfasst".into();
-            evidence.notes.push_str("\nDie Aktion wird vom Bediener im Remote-Desktop oder unter Werkzeuge durchgeführt. Diese Erfassung führt keine Änderung aus.");
+            evidence.source = "Manual execution · context captured".into();
+            evidence.notes.push_str("\nThe operator performs the action in the remote desktop or under Tools. This capture does not make changes.");
             if let Err(e) = m.record(target, step, evidence) {
                 self.status = e.to_string();
             }
         } else {
             evidence.facts.insert(
-                "TCP · geprüftes Ziel".into(),
+                "TCP · verified target".into(),
                 format!("{}:{}", endpoint.0, endpoint.1),
             );
             let (tx, rx) = mpsc::channel();
             std::thread::spawn(move || {
                 use std::net::{TcpStream, ToSocketAddrs};
                 let result=(endpoint.0.as_str(),endpoint.1).to_socket_addrs().map_err(|e|e.to_string()).and_then(|addresses|{
-                    let mut last="Keine Adresse gefunden".to_owned();
-                    for a in addresses.take(3){match TcpStream::connect_timeout(&a,Duration::from_secs(2)){Ok(_)=>return Ok("TCP-Verbindung hergestellt; Anmeldung und Dienstfunktion sind damit nicht geprüft".into()),Err(e)=>last=e.to_string()}}
+                    let mut last="No address found".to_owned();
+                    for a in addresses.take(3){match TcpStream::connect_timeout(&a,Duration::from_secs(2)){Ok(_)=>return Ok("TCP connection established; this does not verify sign-in or service functionality".into()),Err(e)=>last=e.to_string()}}
                     Err(last)
                 });
                 let _ = tx.send(match result {
@@ -354,11 +354,11 @@ impl AivanaApp {
     }
     pub(super) fn missions_view(&mut self, ui: &mut Ui) {
         ui.heading("Mission Control");
-        ui.label("Auftrag planen · am ersten Rechner prüfen · kontrolliert fortsetzen");
+        ui.label("Plan a job · verify on the first computer · continue with approval");
         ui.add_space(12.0);
         ui.horizontal_wrapped(|ui| {
             for (number, label) in [
-                (self.profiles.len(), "Rechner im Inventar"),
+                (self.profiles.len(), "Computers in inventory"),
                 (
                     self.missions
                         .book
@@ -366,7 +366,7 @@ impl AivanaApp {
                         .iter()
                         .filter(|m| !m.completed())
                         .count(),
-                    "Offene Aufträge",
+                    "Open jobs",
                 ),
                 (
                     self.missions
@@ -375,7 +375,7 @@ impl AivanaApp {
                         .iter()
                         .map(|m| m.evidence.len())
                         .sum(),
-                    "Erfasste Befunde",
+                    "Captured findings",
                 ),
             ] {
                 ui.group(|ui| {
@@ -396,11 +396,11 @@ impl AivanaApp {
         }
         ui.horizontal_wrapped(|ui| {
             for (i, label) in [
-                "Aufträge",
-                "Neuer Auftrag",
-                "Befunde durchsuchen",
-                "Rechner & Zeitvergleich",
-                "Erprobte Abläufe",
+                "Jobs",
+                "New job",
+                "Search findings",
+                "Compare computers & times",
+                "Proven workflows",
             ]
             .iter()
             .enumerate()
@@ -418,14 +418,14 @@ impl AivanaApp {
         }
     }
     fn mission_create_ui(&mut self, ui: &mut Ui) {
-        ui.label("Gewünschtes Ergebnis");
+        ui.label("Desired outcome");
         ui.add(
             egui::TextEdit::multiline(&mut self.missions.objective)
                 .desired_rows(2)
                 .desired_width(f32::INFINITY)
-                .hint_text("Zum Beispiel: Ursache der Verbindungsabbrüche eingrenzen"),
+                .hint_text("For example: narrow down the cause of dropped connections"),
         );
-        ui.label("Rechner auswählen – der zuerst ausgewählte Rechner wird der Probelauf");
+        ui.label("Select computers – the first selected computer is the trial run");
         for p in &self.profiles {
             let mut selected = self.missions.targets.contains(&p.id);
             if ui
@@ -436,7 +436,7 @@ impl AivanaApp {
                         p.name,
                         p.host,
                         if self.missions.targets.first() == Some(&p.id) {
-                            " · PROBELAUF"
+                            " · TRIAL RUN"
                         } else {
                             ""
                         }
@@ -452,15 +452,15 @@ impl AivanaApp {
             }
         }
         ui.separator();
-        ui.label("Ablauf und Änderungsvorschau");
+        ui.label("Workflow and change preview");
         let mut remove = None;
         for (i, s) in self.missions.steps.iter_mut().enumerate() {
             ui.push_id(i, |ui| {
                 ui.group(|ui| {
                     ui.horizontal_wrapped(|ui| {
-                        ui.label(format!("{}. Schritt", i + 1));
+                        ui.label(format!("Step {}", i + 1));
                         ui.text_edit_singleline(&mut s.title);
-                        if ui.small_button("Entfernen").clicked() {
+                        if ui.small_button("Remove").clicked() {
                             remove = Some(i);
                         }
                     });
@@ -480,7 +480,7 @@ impl AivanaApp {
                             }
                         });
                     if s.kind == StepKind::SshCommand {
-                        ui.label("SSH-Befehl – wird auf dem ausgewählten Rechner ausgeführt:");
+                        ui.label("SSH command – runs on the selected computer:");
                         ui.add(
                             egui::TextEdit::multiline(&mut s.command)
                                 .code_editor()
@@ -488,11 +488,11 @@ impl AivanaApp {
                         );
                     }
                     ui.horizontal_wrapped(|ui| {
-                        ui.label("Erfolgskriterium:");
+                        ui.label("Success criterion:");
                         ui.text_edit_singleline(&mut s.expectation);
                     });
                     ui.horizontal_wrapped(|ui| {
-                        ui.label("Rückweg bei Problemen:");
+                        ui.label("Rollback if problems occur:");
                         ui.text_edit_singleline(&mut s.recovery);
                     });
                 });
@@ -502,16 +502,16 @@ impl AivanaApp {
             self.missions.steps.remove(i);
         }
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Schritt ergänzen").clicked() {
+            if ui.button("Add step").clicked() {
                 self.missions.steps.push(Step {
-                    title: "Manuelle Aufgabe".into(),
+                    title: "Manual task".into(),
                     kind: StepKind::Operator,
                     expectation: String::new(),
                     recovery: String::new(),
                     command: String::new(),
                 });
             }
-            if ui.button("Auftrag anlegen").clicked() {
+            if ui.button("Create job").clicked() {
                 let targets = self
                     .missions
                     .targets
@@ -534,7 +534,7 @@ impl AivanaApp {
                         self.missions.tab = 0;
                         if self.save_missions() {
                             self.status =
-                                "Auftrag angelegt. Es wurde noch keine Verbindung gestartet."
+                                "Job created. No connection has started yet."
                                     .into();
                         }
                     }
@@ -542,28 +542,28 @@ impl AivanaApp {
                 }
             }
         });
-        ui.label("Befunderfassung prüft TCP und lokalen Sitzungskontext. WinRM verwendet die aktuelle Windows-Identität; SSH benötigt bekannte Hostschlüssel und Schlüssel/Agent. SSH-Befehle können Änderungen ausführen. Jeder Schritt startet erst per Klick. Rückwege sind Anweisungen, kein System-Snapshot.");
+        ui.label("Evidence capture checks TCP and local session context. WinRM uses the current Windows identity; SSH requires known host keys and a key/agent. SSH commands may make changes. Each step starts only when clicked. Rollbacks are instructions, not system snapshots.");
     }
     fn mission_detail_ui(&mut self, ui: &mut Ui) {
         if self.missions.book.missions.is_empty() {
             ui.add_space(14.0);
-            ui.heading("Was möchtest du herausfinden?");
-            ui.label("Beginne mit einem Ablauf. Wähle danach die betroffenen Rechner und passe die Prüfkriterien an.");
+            ui.heading("What would you like to investigate?");
+            ui.label("Start with a workflow. Then select the affected computers and adjust the verification criteria.");
             ui.add_space(10.0);
             for (title, description, kind) in [
                 (
-                    "Verbindungsproblem eingrenzen",
-                    "TCP-Erreichbarkeit und vorhandene Sitzungsereignisse sammeln.",
+                    "Narrow down a connection problem",
+                    "Collect TCP reachability and existing session events.",
                     StepKind::Observe,
                 ),
                 (
-                    "Dienste zwischen Rechnern vergleichen",
-                    "Dienstzustände per WinRM erfassen und die Unterschiede prüfen.",
+                    "Compare services across computers",
+                    "Capture service states using WinRM and review differences.",
                     StepKind::WinRmServices,
                 ),
                 (
-                    "Systemzustand untersuchen",
-                    "Betriebssystem und Arbeitsspeicher per WinRM abfragen.",
+                    "Inspect system state",
+                    "Query operating system and memory using WinRM.",
                     StepKind::WinRmInventory,
                 ),
             ] {
@@ -574,9 +574,9 @@ impl AivanaApp {
                             self.missions.steps = vec![Step {
                                 title: title.into(),
                                 kind,
-                                expectation: "Befunde prüfen und Schlussfolgerung dokumentieren"
+                                expectation: "Review findings and document the conclusion"
                                     .into(),
-                                recovery: "Nur lesende Abfrage; keine Änderung vorgesehen".into(),
+                                recovery: "Read-only query; no change planned".into(),
                                 command: String::new(),
                             }];
                             self.missions.targets.clear();
@@ -587,7 +587,7 @@ impl AivanaApp {
                 });
             }
             ui.add_space(18.0);
-            ui.small("Deine Befunde und Aufträge bleiben lokal und werden unter Windows verschlüsselt gespeichert. Es startet keine Verbindung automatisch.");
+            ui.small("Your findings and jobs stay local and are stored encrypted on Windows. No connection starts automatically.");
         }
         let choices: Vec<_> = self
             .missions
@@ -602,7 +602,7 @@ impl AivanaApp {
                     .iter()
                     .find(|c| Some(c.0) == self.missions.selected)
                     .map(|c| c.1.as_str())
-                    .unwrap_or("Auftrag auswählen"),
+                    .unwrap_or("Select job"),
             )
             .show_ui(ui, |ui| {
                 for (id, name, done) in choices {
@@ -634,14 +634,14 @@ impl AivanaApp {
             .count();
         ui.add(
             egui::ProgressBar::new(confirmed as f32 / m.outcomes.len().max(1) as f32).text(
-                format!("{confirmed} / {} Schritte bestätigt", m.outcomes.len()),
+                format!("{confirmed} / {} steps confirmed", m.outcomes.len()),
             ),
         );
         ui.horizontal_wrapped(|ui| {
             if ui
                 .add_enabled(
                     m.paused,
-                    egui::Button::new("Identische lokale Profile zuordnen"),
+                    egui::Button::new("Map identical local profiles"),
                 )
                 .clicked()
             {
@@ -657,7 +657,7 @@ impl AivanaApp {
                     Ok(()) => {
                         if self.save_missions() {
                             self.status =
-                                "Lokale Profile zugeordnet. Endpunkte und Identitäten unverändert."
+                                "Local profiles mapped. Endpoints and identities unchanged."
                                     .into();
                         }
                     }
@@ -666,9 +666,9 @@ impl AivanaApp {
             }
             if ui
                 .button(if m.paused {
-                    "Fortsetzen"
+                    "Resume"
                 } else {
-                    "Pausieren / Erfassung abbrechen"
+                    "Pause / cancel capture"
                 })
                 .clicked()
             {
@@ -706,7 +706,7 @@ impl AivanaApp {
             if ui
                 .add_enabled(
                     !m.rollout && m.pilot_passed() && !m.paused,
-                    egui::Button::new("Weitere Rechner freigeben"),
+                    egui::Button::new("Approve additional computers"),
                 )
                 .clicked()
             {
@@ -726,7 +726,7 @@ impl AivanaApp {
             if ui
                 .add_enabled(
                     m.completed(),
-                    egui::Button::new("Als erprobten Ablauf speichern"),
+                    egui::Button::new("Save as a proven workflow"),
                 )
                 .clicked()
             {
@@ -736,7 +736,7 @@ impl AivanaApp {
                 self.save_missions();
             }
         });
-        ui.label("Prüfnotiz für den nächsten zu bestätigenden Schritt:");
+        ui.label("Verification note for the next step to confirm:");
         ui.add(
             egui::TextEdit::multiline(&mut self.missions.note)
                 .desired_rows(2)
@@ -744,24 +744,24 @@ impl AivanaApp {
         );
         for t in &m.targets {
             ui.push_id(t.profile_id,|ui|{ui.group(|ui|{
-            ui.strong(format!("{} · {}:{}{}",t.name,t.host,t.port,if t.profile_id==m.pilot{" · Probelauf"}else{""}));
+            ui.strong(format!("{} · {}:{}{}",t.name,t.host,t.port,if t.profile_id==m.pilot{" · Trial run"}else{""}));
             for o in m.outcomes.iter().filter(|o|o.target==t.profile_id){ui.push_id(o.step,|ui|{
                 let s=&m.steps[o.step];ui.label(format!("{}. {} · {}",o.step+1,s.title,o.status.label()));
-                ui.small(format!("Prüfen: {} | Rückweg: {}",s.expectation,s.recovery));
-                ui.small(step_kind_label(s.kind));if s.kind==StepKind::SshCommand{ui.monospace(&s.command);ui.colored_label(tw::RED_600,"Ausführen startet diesen Befehl auf diesem Rechner. Abbruch kann bereits erfolgte Änderungen nicht rückgängig machen.");}
+                ui.small(format!("Verify: {} | Rollback: {}",s.expectation,s.recovery));
+                ui.small(step_kind_label(s.kind));if s.kind==StepKind::SshCommand{ui.monospace(&s.command);ui.colored_label(tw::RED_600,"Run starts this command on this computer. Canceling cannot undo changes already made.");}
                 ui.horizontal_wrapped(|ui|{
                     let allowed=!m.paused&&self.missions.pending.is_none()&&self.missions.remote.is_none()&&(t.profile_id==m.pilot||m.rollout)&&(o.step==0||m.outcomes.iter().filter(|prev|prev.target==t.profile_id&&prev.step<o.step).all(|prev|prev.status==Status::Passed));
-                    if ui.add_enabled(allowed&&matches!(o.status,Status::Pending|Status::Failed|Status::Interrupted),egui::Button::new(if s.kind==StepKind::Observe{"Befund erfassen"}else if s.kind==StepKind::Operator{"Durchführung beginnen"}else{"Auf diesem Rechner ausführen"})).clicked(){self.start_mission_step(id,t.profile_id,o.step);}
-                    for (passed,label)in [(true,"Erfolg bestätigen"),(false,"Nicht erfüllt")]{if ui.add_enabled(!m.paused&&o.status==Status::Review&&!self.missions.note.trim().is_empty(),egui::Button::new(label)).clicked(){let note=self.missions.note.clone();let result=self.missions.book.missions.iter_mut().find(|m|m.id==id).unwrap().verify(t.profile_id,o.step,passed,&note);match result{Ok(())=>self.missions.note.clear(),Err(e)=>self.status=e.to_string()};self.save_missions();}}
-                    if ui.button("Rechner öffnen").clicked(){if self.profiles.iter().any(|p|t.matches(p)){self.selected_profile=Some(t.profile_id);self.connect_selected();}else{self.status="Endpunkt wurde geändert; keine Verbindung gestartet.".into();}}
+                    if ui.add_enabled(allowed&&matches!(o.status,Status::Pending|Status::Failed|Status::Interrupted),egui::Button::new(if s.kind==StepKind::Observe{"Capture finding"}else if s.kind==StepKind::Operator{"Begin execution"}else{"Run on this computer"})).clicked(){self.start_mission_step(id,t.profile_id,o.step);}
+                    for (passed,label)in [(true,"Confirm success"),(false,"Not met")]{if ui.add_enabled(!m.paused&&o.status==Status::Review&&!self.missions.note.trim().is_empty(),egui::Button::new(label)).clicked(){let note=self.missions.note.clone();let result=self.missions.book.missions.iter_mut().find(|m|m.id==id).unwrap().verify(t.profile_id,o.step,passed,&note);match result{Ok(())=>self.missions.note.clear(),Err(e)=>self.status=e.to_string()};self.save_missions();}}
+                    if ui.button("Open computer").clicked(){if self.profiles.iter().any(|p|t.matches(p)){self.selected_profile=Some(t.profile_id);self.connect_selected();}else{self.status="Endpoint changed; no connection started.".into();}}
                 });
                 if !o.verification.is_empty(){ui.label(&o.verification);}
-                for e in m.evidence.iter().filter(|e|o.evidence.contains(&e.id)){ui.collapsing(format!("Befund {} · {}",e.at.format("%d.%m. %H:%M:%S"),e.source),|ui|{for(k,v)in &e.facts{ui.label(format!("{k}: {v}"));}ui.label(&e.notes);});}
+                for e in m.evidence.iter().filter(|e|o.evidence.contains(&e.id)){ui.collapsing(format!("Finding {} · {}",e.at.format("%m/%d %H:%M:%S"),e.source),|ui|{for(k,v)in &e.facts{ui.label(format!("{k}: {v}"));}ui.label(&e.notes);});}
             });}
         });});
         }
         ui.separator();
-        ui.label("Übergabenotiz / nächster Schritt");
+        ui.label("Handoff note / next step");
         let current = self
             .missions
             .book
@@ -782,22 +782,22 @@ impl AivanaApp {
         self.mission_exchange_ui(ui);
     }
     fn mission_exchange_ui(&mut self, ui: &mut Ui) {
-        ui.collapsing("Übergabe importieren / exportieren",|ui|{
-            ui.label("Export enthält Rechnernamen und Befunde als lesbare Datei. Vor Weitergabe prüfen. Vorhandene Dateien werden nicht überschrieben.");
-            ui.add(egui::TextEdit::singleline(&mut self.missions.path).hint_text("Absoluter Dateipfad (.json oder .md)").desired_width(f32::INFINITY));
+        ui.collapsing("Import / export handoff",|ui|{
+            ui.label("Export includes computer names and findings in a readable file. Review before sharing. Existing files are not overwritten.");
+            ui.add(egui::TextEdit::singleline(&mut self.missions.path).hint_text("Absolute file path (.json or .md)").desired_width(f32::INFINITY));
             ui.horizontal_wrapped(|ui|{
-                if ui.button("JSON importieren").clicked(){let result=(||{let p=Path::new(&self.missions.path);if std::fs::metadata(p)?.len()>16*1024*1024{anyhow::bail!("Datei größer als 16 MiB");}let json=std::fs::read_to_string(p)?;self.missions.book.import(&json)})();match result{Ok(id)=>{self.missions.selected=Some(id);if self.save_missions(){self.status="Übergabe importiert; Auftrag pausiert. Ziele vor Fortsetzung prüfen.".into();}},Err(e)=>self.status=format!("Import: {e:#}")}}
-                for(markdown,label)in [(false,"JSON exportieren"),(true,"Bericht exportieren")]{if ui.button(label).clicked(){if let Some(m)=self.missions.book.missions.iter().find(|m|Some(m.id)==self.missions.selected){let text=if markdown{Ok(m.markdown())}else{serde_json::to_string_pretty(m)};self.status=match text.map_err(anyhow::Error::from).and_then(|s|mission::export_new(Path::new(&self.missions.path),s.as_bytes())){Ok(p)=>format!("Gespeichert: {}",p.display()),Err(e)=>format!("Export: {e:#}")};}}}
+                if ui.button("Import JSON").clicked(){let result=(||{let p=Path::new(&self.missions.path);if std::fs::metadata(p)?.len()>16*1024*1024{anyhow::bail!("File larger than 16 MiB");}let json=std::fs::read_to_string(p)?;self.missions.book.import(&json)})();match result{Ok(id)=>{self.missions.selected=Some(id);if self.save_missions(){self.status="Handoff imported; job paused. Review targets before resuming.".into();}},Err(e)=>self.status=format!("Import: {e:#}")}}
+                for(markdown,label)in [(false,"Export JSON"),(true,"Export report")]{if ui.button(label).clicked(){if let Some(m)=self.missions.book.missions.iter().find(|m|Some(m.id)==self.missions.selected){let text=if markdown{Ok(m.markdown())}else{serde_json::to_string_pretty(m)};self.status=match text.map_err(anyhow::Error::from).and_then(|s|mission::export_new(Path::new(&self.missions.path),s.as_bytes())){Ok(p)=>format!("Saved: {}",p.display()),Err(e)=>format!("Export: {e:#}")};}}}
             });
         });
     }
     fn mission_search_ui(&mut self, ui: &mut Ui) {
         ui.add(
             egui::TextEdit::singleline(&mut self.missions.query)
-                .hint_text("Fehlermeldung, Rechner oder Befund suchen …")
+                .hint_text("Search error message, computer, or finding …")
                 .desired_width(f32::INFINITY),
         );
-        ui.small("Sucht erfasste Befunde und Sitzungsereignisse im lokalen Auftragsspeicher. Keine flächendeckende Bildschirm-OCR.");
+        ui.small("Searches captured findings and session events in local job storage. No comprehensive screen OCR.");
         for (m, e) in self.missions.book.search(&self.missions.query) {
             ui.group(|ui| {
                 ui.strong(format!("{} · {}", e.target.name, m.objective));
@@ -810,7 +810,7 @@ impl AivanaApp {
         }
     }
     fn mission_compare_ui(&mut self, ui: &mut Ui) {
-        ui.label("Zwei Befunde desselben Rechners oder unterschiedlicher Rechner auswählen. Verglichen werden vorhandene Mess- und Profilfelder.");
+        ui.label("Select two findings from the same computer or different computers. Existing measurement and profile fields are compared.");
         let all: Vec<_> = self
             .missions
             .book
@@ -824,7 +824,7 @@ impl AivanaApp {
                     all.iter()
                         .find(|e| Some(e.id) == self.missions.comparison[i])
                         .map(|e| format!("{} · {}", e.target.name, e.at))
-                        .unwrap_or_else(|| format!("Befund {} auswählen", i + 1)),
+                        .unwrap_or_else(|| format!("Select finding {}", i + 1)),
                 )
                 .show_ui(ui, |ui| {
                     for e in &all {
@@ -843,36 +843,36 @@ impl AivanaApp {
                 .find(|e| Some(e.id) == self.missions.comparison[1]),
         ) {
             let changes = mission::diff(a, b);
-            ui.strong(format!("{} Unterschiede", changes.len()));
+            ui.strong(format!("{} differences", changes.len()));
             egui::Grid::new("evidence-diff")
                 .striped(true)
                 .num_columns(3)
                 .show(ui, |ui| {
-                    ui.strong("Feld");
-                    ui.strong("Vorher / A");
-                    ui.strong("Nachher / B");
+                    ui.strong("Field");
+                    ui.strong("Before / A");
+                    ui.strong("After / B");
                     ui.end_row();
                     for c in changes {
                         ui.label(c.key);
-                        ui.label(c.before.as_deref().unwrap_or("Nicht erfasst"));
-                        ui.label(c.after.as_deref().unwrap_or("Nicht erfasst"));
+                        ui.label(c.before.as_deref().unwrap_or("Not captured"));
+                        ui.label(c.after.as_deref().unwrap_or("Not captured"));
                         ui.end_row();
                     }
                 });
             if a.source != b.source {
-                ui.colored_label(tw::RED_600,"Unterschiedliche Quellen: Fehlende Felder sind keine nachgewiesenen Änderungen am Server.");
+                ui.colored_label(tw::RED_600,"Different sources: missing fields are not verified server changes.");
             }
         }
     }
     fn mission_procedures_ui(&mut self, ui: &mut Ui) {
-        ui.label("Aus vollständig bestätigten Aufträgen übernommene Schritte. Neue Ausführungen beginnen wieder mit einem Probelauf.");
+        ui.label("Steps adopted from fully confirmed jobs. New executions start with another trial run.");
         for p in self.missions.book.procedures.clone() {
             ui.group(|ui| {
                 ui.strong(&p.name);
                 for s in &p.steps {
                     ui.label(format!("{} → {}", s.title, s.expectation));
                 }
-                if ui.button("Für neue Rechner verwenden").clicked() {
+                if ui.button("Use for new computers").clicked() {
                     self.missions.objective = p.name;
                     self.missions.steps = p.steps;
                     self.missions.targets.clear();
@@ -884,12 +884,12 @@ impl AivanaApp {
 }
 fn step_kind_label(kind: StepKind) -> &'static str {
     match kind {
-        StepKind::Observe => "Befunde + TCP erfassen",
-        StepKind::Operator => "Manuelle Durchführung",
-        StepKind::WinRmInventory => "WinRM · Systeminventar",
-        StepKind::WinRmServices => "WinRM · Dienste",
-        StepKind::WinRmProcesses => "WinRM · Prozesse",
-        StepKind::WinRmEvents => "WinRM · Systemereignisse",
-        StepKind::SshCommand => "SSH · Eigener Befehl",
+        StepKind::Observe => "Capture findings + TCP",
+        StepKind::Operator => "Manual execution",
+        StepKind::WinRmInventory => "WinRM · system inventory",
+        StepKind::WinRmServices => "WinRM · services",
+        StepKind::WinRmProcesses => "WinRM · processes",
+        StepKind::WinRmEvents => "WinRM · system events",
+        StepKind::SshCommand => "SSH · custom command",
     }
 }

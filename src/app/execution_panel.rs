@@ -9,16 +9,16 @@ pub(super) fn edit_http_steps(ui: &mut Ui, steps: &mut Vec<crate::execution::Htt
     let mut remove = None;
     for (index, step) in steps.iter_mut().enumerate() {
         ui.horizontal(|ui| {
-            ui.label(format!("Schritt {}", index + 2));
+            ui.label(format!("Step {}", index + 2));
             ui.add(egui::TextEdit::singleline(&mut step.path).char_limit(1024));
             ui.label("Status");
             ui.add(egui::DragValue::new(&mut step.status).range(200..=599));
-            if ui.small_button("Entfernen").clicked() {
+            if ui.small_button("Remove").clicked() {
                 remove = Some(index);
             }
         });
         ui.horizontal(|ui| {
-            ui.label("Antwort enthält");
+            ui.label("Response contains");
             ui.add(egui::TextEdit::singleline(&mut step.contains).char_limit(1024));
         });
         use crate::execution::http_health::Method;
@@ -27,15 +27,15 @@ pub(super) fn edit_http_steps(ui: &mut Ui, steps: &mut Vec<crate::execution::Htt
             ui.selectable_value(&mut step.options.method, Method::Post, "POST");
         });
         if step.options.method == Method::Post {
-            edit_http_fields(ui, &mut step.options.form, "Öffentliches Formularfeld", 32);
+            edit_http_fields(ui, &mut step.options.form, "Public form field", 32);
             edit_http_fields(
                 ui,
                 &mut step.options.secret_fields,
-                "Secret-Feld → Laufzeit-Slot",
+                "Secret field → runtime slot",
                 32,
             );
         }
-        ui.collapsing(format!("JSON-Assertions Schritt {}", index + 2), |ui| {
+        ui.collapsing(format!("JSON assertions, step {}", index + 2), |ui| {
             let mut revised = std::collections::BTreeMap::new();
             for (pointer, value) in &step.options.json_equals {
                 let mut pointer = pointer.clone();
@@ -87,7 +87,7 @@ pub(super) fn edit_http_steps(ui: &mut Ui, steps: &mut Vec<crate::execution::Htt
     if ui
         .add_enabled(
             steps.len() < 3,
-            egui::Button::new("Weiteren HTTP-Prüfschritt hinzufügen"),
+            egui::Button::new("Add another HTTP check step"),
         )
         .clicked()
     {
@@ -98,8 +98,8 @@ pub(super) fn edit_http_steps(ui: &mut Ui, steps: &mut Vec<crate::execution::Htt
             options: Default::default(),
         });
     }
-    ui.small("Bis zu vier Prüfungen: erster GET, danach GET/POST mit hosteigenen Path=/-Session-Cookies. JSON-Pointer: String/Bool/null. Secret-Slots nur über HTTPS; niemals Passwörter in feste Formularwerte eintragen.");
-    ui.small("POST kann Anwendungsdaten ändern. Automatische Wiederherstellung betrifft den Dienstzustand, nicht diese Anwendungsänderungen.");
+    ui.small("Up to four checks: first GET, then GET/POST with host-only Path=/ session cookies. JSON Pointer: string/bool/null. Secret slots require HTTPS; never enter passwords in fixed form values.");
+    ui.small("POST may change application data. Automatic rollback restores the service state, not these application changes.");
 }
 fn edit_http_fields(
     ui: &mut Ui,
@@ -124,7 +124,7 @@ fn edit_http_fields(
         }
         *fields = revised;
         if ui
-            .add_enabled(fields.len() < limit, egui::Button::new("Feld hinzufügen"))
+            .add_enabled(fields.len() < limit, egui::Button::new("Add field"))
             .clicked()
         {
             fields.insert(format!("field{}", fields.len() + 1), String::new());
@@ -165,7 +165,7 @@ impl Default for ExecutionState {
                 Err(e) => (
                     Journal::default(),
                     Some(format!(
-                        "Journal nicht lesbar; Datei bleibt unverändert: {e}"
+                        "Cannot read journal; file remains unchanged: {e}"
                     )),
                 ),
             };
@@ -215,26 +215,26 @@ impl AivanaApp {
             self.validate_recovery_action(id, plan.restart)?;
             anyhow::ensure!(
                 plan.desired == ServiceState::Running,
-                "Recovery unterstützt ausschließlich Dienststart"
+                "Recovery supports only starting a service"
             );
         }
         anyhow::ensure!(
             self.execution.error.is_none(),
-            "Ausführungsjournal gesperrt"
+            "Execution journal locked"
         );
         anyhow::ensure!(
             !self
                 .execution
                 .selected
                 .is_some_and(|i| self.execution.book.runs[i].finished.is_none()),
-            "Zuerst laufenden Auftrag abschließen oder abbrechen"
+            "Complete or cancel the running job first"
         );
         crate::promotion::check_receipts(&plan, &references, Utc::now())?;
         anyhow::ensure!(
             plan.mappings
                 .iter()
                 .all(|m| self.profiles.iter().any(|p| m.production.matches(p))),
-            "Produktionsprofil geändert oder entfernt"
+            "Production profile changed or removed"
         );
         let mut run = Run::new(plan, false)?;
         run.lab_receipts = references;
@@ -244,7 +244,7 @@ impl AivanaApp {
         self.execution.reviewed = false;
         anyhow::ensure!(
             self.execution_save(),
-            "Auftrag konnte nicht dauerhaft gespeichert werden"
+            "Could not persist job"
         );
         self.view = View::Execution;
         self.execution_drive();
@@ -285,11 +285,11 @@ impl AivanaApp {
                         at,
                         kind: Kind::Observation,
                         title: format!(
-                            "{} · {}: Ausgangszustand {:?}{}",
+                            "{} · {}: Initial state {:?}{}",
                             target.target.name,
                             run.plan.service,
                             target.before,
-                            if run.rehearsal { " (Testlauf)" } else { "" }
+                            if run.rehearsal { " (test run)" } else { "" }
                         ),
                         evidence: vec![run.id.to_string(), run.hash.clone()],
                     });
@@ -339,7 +339,7 @@ impl AivanaApp {
             .is_some_and(|i| self.execution.book.runs[i].finished.is_none())
         {
             self.status =
-                "Zuerst den laufenden Ausführungsauftrag abschließen oder abbrechen.".into();
+                "Complete or cancel the running execution job first.".into();
             return;
         }
         self.execution.service = lesson.service.clone();
@@ -377,7 +377,7 @@ impl AivanaApp {
         self.execution.staging = None;
         self.execution.reviewed = false;
         self.execution.distinct = false;
-        self.status = "Lösung als Entwurf übernommen. Neue Produktions-/Testziele zuordnen und Testlauf prüfen.".into();
+        self.status = "Solution adopted as a draft. Map new production/test targets and review the test run.".into();
     }
     fn execution_save(&mut self) -> bool {
         if self.execution.error.is_some() {
@@ -387,7 +387,7 @@ impl AivanaApp {
             app_data_file("relayne-execution.dpapi").and_then(|p| self.execution.book.save(&p))
         {
             self.execution.error = Some(format!(
-                "Journal konnte nicht gesichert werden. Ausführung gesperrt; laufenden Host manuell prüfen: {e}"
+                "Could not save journal. Execution blocked; manually check the active host: {e}"
             ));
             return false;
         }
@@ -400,12 +400,12 @@ impl AivanaApp {
                 .profiles
                 .iter()
                 .find(|v| v.id == *p)
-                .ok_or_else(|| anyhow::anyhow!("Produktionsprofil fehlt"))?;
+                .ok_or_else(|| anyhow::anyhow!("Production profile missing"))?;
             let staging = self
                 .profiles
                 .iter()
                 .find(|v| v.id == *s)
-                .ok_or_else(|| anyhow::anyhow!("Testprofil fehlt"))?;
+                .ok_or_else(|| anyhow::anyhow!("Test profile missing"))?;
             mappings.push(Mapping {
                 production: Target::from_profile(production),
                 staging: Target::from_profile(staging),
@@ -464,7 +464,7 @@ impl AivanaApp {
             self.execution.queue.clear_finished();
             let Some(result) = result.filter(|r| r.status == JobStatus::Completed && !r.truncated)
             else {
-                self.execution_fail("Job fehlgeschlagen/abgebrochen: entfernter Zustand unbekannt, keine Wiederholung".into());
+                self.execution_fail("Job failed/canceled: remote state unknown, no retry".into());
                 return;
             };
             let r = &mut self.execution.book.runs[i];
@@ -497,7 +497,7 @@ impl AivanaApp {
                 Err(mpsc::TryRecvError::Disconnected) => Some(HealthEvidence {
                     at: Utc::now(),
                     passed: false,
-                    detail: "Healthcheck-Worker unterbrochen".into(),
+                    detail: "Health check worker interrupted".into(),
                 }),
             };
             self.execution.health = None;
@@ -550,13 +550,13 @@ impl AivanaApp {
             ) {
                 Ok(values) => values,
                 Err(_) => {
-                    self.execution_fail("HTTP-Laufzeitwerte benötigen ein JSON-Objekt aus Strings; Ausführung nicht gestartet".into());
+                    self.execution_fail("HTTP runtime values require a JSON object of strings; execution not started".into());
                     return;
                 }
             };
             if r.plan.health.validate_values(&values).is_err() {
                 self.execution_fail(
-                    "HTTP-Secret-Slots fehlen oder sind ungültig; Ausführung nicht gestartet"
+                    "HTTP secret slots missing or invalid; execution not started"
                         .into(),
                 );
                 return;
@@ -574,25 +574,25 @@ impl AivanaApp {
                     .captured
                     .is_some_and(|at| (0..120).contains(&(Utc::now() - at).num_seconds())))
         {
-            self.execution_fail("Ausgangsbefund fehlt oder ist veraltet; Änderung gesperrt".into());
+            self.execution_fail("Initial finding missing or outdated; change blocked".into());
             return;
         }
         if phase == Phase::Restore && t.before.is_none() {
             self.execution_fail(
-                "Ausgangszustand unbekannt; Wiederherstellung benötigt manuelle Prüfung".into(),
+                "Initial state unknown; restoration requires manual review".into(),
             );
             return;
         }
         // Rehearsal proof authorizes initial production run; each mutation also checks freshness.
         if phase == Phase::Apply && !r.rehearsal && !self.execution_has_proof(r) {
             self.execution_fail(
-                "Testnachweis abgelaufen oder verändert; kein Produktionsstart".into(),
+                "Test evidence expired or changed; production not started".into(),
             );
             return;
         }
         if phase != Phase::Restore && !self.profiles.iter().any(|p| t.target.matches(p)) {
             self.execution_fail(
-                "Profil geändert oder entfernt; unveränderlicher Ziel-Snapshot passt nicht mehr"
+                "Profile changed or removed; immutable target snapshot no longer matches"
                     .into(),
             );
             return;
@@ -647,8 +647,8 @@ impl AivanaApp {
         self.execution_content(ui, true);
     }
     fn execution_content(&mut self, ui: &mut Ui, recovery_only: bool) {
-        ui.heading("Geprüfte Ausführung & Testlauf");
-        ui.label("HTTP-Laufzeit-Slots als JSON (nur Arbeitsspeicher, für Produktionszugang erneut eingeben)");
+        ui.heading("Reviewed execution & test run");
+        ui.label("HTTP runtime slots as JSON (memory only; enter again for production access)");
         let runtime_editable = self.execution.http_runtime.is_none()
             && self.execution.remote.is_none()
             && self.execution.health.is_none();
@@ -661,17 +661,17 @@ impl AivanaApp {
         if ui
             .add_enabled(
                 runtime_editable,
-                egui::Button::new("HTTP-Laufzeitwerte löschen"),
+                egui::Button::new("Clear HTTP runtime values"),
             )
             .clicked()
         {
             self.execution.http_values = "{}".into();
         }
         if self.execution.http_runtime.is_some() {
-            ui.small("Laufzeitwerte unveränderlich an diesen Auftrag gebunden; verbleiben bis Abschluss im Arbeitsspeicher.");
+            ui.small("Runtime values bound immutably to this job; remain in memory until completion.");
         }
-        ui.label("Diagnose → geprüfte Dienständerung → Funktionstest → Wiederherstellung bei Fehler. Erst Testumgebung, dann ein Pilot und einzeln freigegebene weitere Ziele.");
-        ui.small("WinRM verwendet die aktuelle Windows-Identität. Healthchecks laufen vom Relayne-Rechner aus. Testlauf verändert echte, selbst ausgewählte Testsysteme.");
+        ui.label("Diagnosis → reviewed service change → functional test → rollback on failure. Test environment first, then a pilot and individually approved additional targets.");
+        ui.small("WinRM uses the current Windows identity. Health checks run from the Relayne computer. Test runs modify real test systems you select.");
         if let Some(e) = &self.execution.error {
             ui.colored_label(tw::RED_600, e);
         }
@@ -682,36 +682,36 @@ impl AivanaApp {
                 .is_some_and(|i| self.execution.book.runs[i].finished.is_none());
             ui.add_enabled_ui(!busy, |ui| {
             ui.horizontal(|ui| {
-                ui.checkbox(&mut self.execution.restart, "Kontrollierter Neustart (Running + fehlerhafter HTTP-Test)");
-                  ui.label("Dienst"); ui.text_edit_singleline(&mut self.execution.service);
+                ui.checkbox(&mut self.execution.restart, "Controlled restart (Running + failed HTTP test)");
+                  ui.label("Service"); ui.text_edit_singleline(&mut self.execution.service);
                 ui.selectable_value(&mut self.execution.desired, ServiceState::Running, "Running");
                 ui.selectable_value(&mut self.execution.desired, ServiceState::Stopped, "Stopped");
             });
             ui.horizontal_wrapped(|ui| {
-                ui.checkbox(&mut self.execution.http, "HTTP-Funktionstest (sonst TCP)");
+                ui.checkbox(&mut self.execution.http, "HTTP functional test (otherwise TCP)");
                 ui.label("Port"); ui.add(egui::DragValue::new(&mut self.execution.port).range(1..=65535));
                 if self.execution.http { ui.checkbox(&mut self.execution.tls, "HTTPS"); ui.label("Status"); ui.add(egui::DragValue::new(&mut self.execution.status).range(200..=599)); }
             });
             if self.execution.http {
-                ui.horizontal(|ui| { ui.label("Pfad"); ui.text_edit_singleline(&mut self.execution.path); });
+                ui.horizontal(|ui| { ui.label("Path"); ui.text_edit_singleline(&mut self.execution.path); });
                 edit_http_steps(ui, &mut self.execution.followups);
-                ui.horizontal(|ui| { ui.label("Antwort enthält (öffentliches Muster)"); ui.text_edit_singleline(&mut self.execution.contains); });
-                ui.small("Keine Zugangsdaten in feste Werte. GET/POST und Sitzungscookies, keine Redirects oder Antwortspeicherung, 64 KiB Antwortlimit. Laufzeit-Slots benötigen HTTPS.");
+                ui.horizontal(|ui| { ui.label("Response contains (public pattern)"); ui.text_edit_singleline(&mut self.execution.contains); });
+                ui.small("No credentials in fixed values. GET/POST and session cookies, no redirects or response storage, 64 KiB response limit. Runtime slots require HTTPS.");
             }
-            for (label, slot) in [("Produktion", &mut self.execution.production), ("Test/Staging", &mut self.execution.staging)] {
+            for (label, slot) in [("Production", &mut self.execution.production), ("Test/Staging", &mut self.execution.staging)] {
                 egui::ComboBox::from_id_salt(label).selected_text(slot.and_then(|id| self.profiles.iter().find(|p| p.id==id)).map(|p| p.name.as_str()).unwrap_or(label))
                     .show_ui(ui, |ui| { for p in &self.profiles { if p.protocol == Protocol::Rdp { ui.selectable_value(slot, Some(p.id), format!("{} · {}",p.name,p.host)); } } });
             }
-            if ui.button("Zielzuordnung hinzufügen").clicked() {
+            if ui.button("Add target mapping").clicked() {
                 if let (Some(p),Some(s))=(self.execution.production,self.execution.staging) { self.execution.mappings.push((p,s)); self.execution.reviewed=false; }
             }
             let mut remove=None;
             for (i,(p,s)) in self.execution.mappings.iter().enumerate() {
-                let name=|id| self.profiles.iter().find(|p| p.id==id).map(|p|format!("{} ({})",p.name,p.host)).unwrap_or_else(||"Profil fehlt".into());
-                ui.horizontal(|ui| { ui.label(format!("{}: {} → {}", if i==0 {"Pilot"} else {"Rollout"},name(*p),name(*s))); if ui.small_button("Entfernen").clicked(){remove=Some(i);} });
+                let name=|id| self.profiles.iter().find(|p| p.id==id).map(|p|format!("{} ({})",p.name,p.host)).unwrap_or_else(||"Profile missing".into());
+                ui.horizontal(|ui| { ui.label(format!("{}: {} → {}", if i==0 {"Pilot"} else {"Rollout"},name(*p),name(*s))); if ui.small_button("Remove").clicked(){remove=Some(i);} });
             }
             if let Some(i)=remove {self.execution.mappings.remove(i);self.execution.reviewed=false;}
-            ui.checkbox(&mut self.execution.distinct,"Ich habe geprüft: Testhosts sind eigene Systeme, keine DNS-Aliase der Produktion; dort sind echte Änderungen erlaubt.");
+            ui.checkbox(&mut self.execution.distinct,"I verified that test hosts are separate systems, not production DNS aliases, and actual changes are permitted there.");
         });
             let plan = self.execution_plan();
             if let Ok(p) = &plan {
@@ -723,16 +723,16 @@ impl AivanaApp {
                     .iter()
                     .any(|r| r.proof_for(p, Utc::now()));
                 ui.label(if proof {
-                    "Passender erfolgreicher Testlauf vorhanden (maximal 1 Stunde)."
+                    "Matching successful test run available (up to 1 hour old)."
                 } else {
-                    "Kein gültiger Testnachweis für genau diesen Plan und diese Zielzuordnungen."
+                    "No valid test evidence for this exact plan and target mapping."
                 });
                 let mut start = None;
                 ui.horizontal(|ui| {
                     if ui
                         .add_enabled(
                             !busy && self.execution.error.is_none() && self.execution.distinct,
-                            egui::Button::new("Testlauf vorbereiten"),
+                            egui::Button::new("Prepare test run"),
                         )
                         .clicked()
                     {
@@ -744,7 +744,7 @@ impl AivanaApp {
                                 && proof
                                 && self.execution.error.is_none()
                                 && self.execution.distinct,
-                            egui::Button::new("Produktionspilot vorbereiten"),
+                            egui::Button::new("Prepare production pilot"),
                         )
                         .clicked()
                     {
@@ -776,34 +776,34 @@ impl AivanaApp {
         ui.label(format!(
             "{} · {}",
             if run.rehearsal {
-                "Testlauf"
+                "Test run"
             } else {
-                "Produktion"
+                "Production"
             },
             run.id
         ));
         if !run.lab_receipts.is_empty() {
-            ui.label("Dieser Produktionsauftrag basiert auf einer gebundenen Klon-Generalprobe. Jede Dienständerung prüft die verschlüsselten Nachweise erneut; Produktion verwendet eigene aktuelle Ausgangsbefunde.");
+            ui.label("This production job is based on a bound clone rehearsal. Each service change rechecks the encrypted evidence; production uses its own current initial findings.");
             for reference in &run.lab_receipts {
-                ui.small(format!("Klonnachweis: {reference}"));
+                ui.small(format!("Clone evidence: {reference}"));
             }
-            ui.label(if self.execution_has_proof(&run){"Klonnachweise aktuell und passend."}else{"Klonnachweise fehlen, sind verändert oder abgelaufen; weitere Änderungen sind gesperrt."});
+            ui.label(if self.execution_has_proof(&run){"Clone evidence current and matching."}else{"Clone evidence missing, changed, or expired; further changes are blocked."});
         }
         for (n, t) in run.targets.iter().enumerate() {
             ui.collapsing(format!("{} · {} · {:?}",n+1,t.target.name,t.phase),|ui| {
-                ui.label(format!("Host {} · Domain {} · Profilbenutzer {} · Auth: aktuelle Windows-Identität",t.target.host,t.target.domain,t.target.username));
-                ui.label(format!("Dienst: {:?} → {}",t.before,run.plan.desired.label()));
-                if let Some(b)=&t.baseline{ui.label(format!("Vorher: {} · {} · {}",b.passed,b.detail,b.at));}
-                if let Some(b)=&t.health{ui.label(format!("Nachher: {} · {} · {}",b.passed,b.detail,b.at));}
+                ui.label(format!("Host {} · Domain {} · Profile user {} · Auth: current Windows identity",t.target.host,t.target.domain,t.target.username));
+                ui.label(format!("Service: {:?} → {}",t.before,run.plan.desired.label()));
+                if let Some(b)=&t.baseline{ui.label(format!("Before: {} · {} · {}",b.passed,b.detail,b.at));}
+                if let Some(b)=&t.health{ui.label(format!("After: {} · {} · {}",b.passed,b.detail,b.at));}
                 for e in &t.evidence {ui.monospace(e);}
             });
         }
         let t = &run.targets[run.current];
         if t.phase == Phase::Review && run.finished.is_none() {
             if run.plan.restart {
-                ui.strong("Neustart: laufenden Dienst stoppen, Stopped nachweisen, wieder starten. Rückweg kann nur den Dienstzustand Running herstellen, keinen Prozesszustand.");
+                ui.strong("Restart: stop the running service, verify Stopped, then start it again. Rollback can restore only the Running service state, not process state.");
             }
-            ui.label(format!("Änderung prüfen: {} / {} / {:?} → {}. Bei Funktionsfehler Wiederherstellung auf {:?}.",t.target.host,run.plan.service,t.before,run.plan.desired.label(),t.before));
+            ui.label(format!("Review change: {} / {} / {:?} → {}. On functional failure, restore to {:?}.",t.target.host,run.plan.service,t.before,run.plan.desired.label(),t.before));
             if let Some(before) = t.before {
                 if let Ok(spec) = if run.plan.restart {
                     intelligence::restart_spec(&t.target, &run.plan.service)
@@ -814,23 +814,23 @@ impl AivanaApp {
                         Some((before, run.plan.desired)),
                     )
                 } {
-                    ui.collapsing("Exakter Befehl mit Schutzprüfungen und Rückweg", |ui| {
+                    ui.collapsing("Exact command with safeguards and rollback", |ui| {
                         ui.monospace(spec.preview());
                     });
                 }
             }
-            ui.checkbox(&mut self.execution.reviewed,"Dieses Ziel, Ausgangslage, Funktionstest und automatische Wiederherstellung geprüft und freigegeben");
+            ui.checkbox(&mut self.execution.reviewed,"Reviewed and approved this target, initial state, functional test, and automatic rollback");
             let fresh = t
                 .captured
                 .is_some_and(|at| (0..120).contains(&(Utc::now() - at).num_seconds()));
             let change = run.plan.restart || t.before != Some(run.plan.desired);
             if !fresh {
                 ui.label(
-                    "Vorprüfung älter als 120 Sekunden: abbrechen und neuen Lauf vorbereiten.",
+                    "Preflight check older than 120 seconds: cancel and prepare a new run.",
                 );
             }
             if run.rehearsal && !change {
-                ui.label("Test benötigt einen echten Zustandswechsel. Testsystem manuell vorbereiten und neuen Lauf starten.");
+                ui.label("Test requires an actual state change. Prepare the test system manually and start a new run.");
             }
             if ui
                 .add_enabled(
@@ -843,9 +843,9 @@ impl AivanaApp {
                         && (run.recovery_case.is_none() || self.recovery_actions_allowed())
                         && self.execution.error.is_none(),
                     egui::Button::new(if run.current == 0 {
-                        "Pilot freigeben und prüfen"
+                        "Approve and verify pilot"
                     } else {
-                        "Nächstes Rolloutziel freigeben"
+                        "Approve next rollout target"
                     }),
                 )
                 .clicked()
@@ -860,7 +860,7 @@ impl AivanaApp {
         }
         if run.finished.is_none()
             && ui
-                .button("Abbrechen; entfernten Zustand als unbekannt markieren")
+                .button("Cancel; mark remote state as unknown")
                 .clicked()
         {
             if let Some(id) = self.execution.remote.take() {
@@ -869,20 +869,20 @@ impl AivanaApp {
                 }
             }
             self.execution.health = None;
-            self.execution_fail("Vom Operator abgebrochen. Kein automatischer Neustart; entfernte Ausführung kann weiterlaufen.".into());
+            self.execution_fail("Canceled by operator. No automatic restart; remote execution may continue.".into());
         }
         if run.successful() && !recovery_only {
-            ui.label("Alle Ziele funktional bestätigt. Testlauf behält den angezeigten geänderten Dienstzustand bei.");
+            ui.label("All targets functionally verified. Test run retains the displayed changed service state.");
         }
         if matches!(t.phase, Phase::Unknown | Phase::Restored | Phase::Failed) {
-            ui.label("Rollout angehalten. Befunde prüfen und Infrastruktur bei Bedarf manuell wiederherstellen. Dieser Lauf wird nicht wiederholt.");
+            ui.label("Rollout stopped. Review findings and restore infrastructure manually if needed. This run will not be retried.");
         }
-        ui.collapsing("Frühere Läufe", |ui| {
+        ui.collapsing("Previous runs", |ui| {
             for r in self.execution.book.runs.iter().rev().skip(1).take(20) {
                 ui.label(format!(
-                    "{} · {} · Erfolg {}",
+                    "{} · {} · Success {}",
                     r.id,
-                    if r.rehearsal { "Test" } else { "Produktion" },
+                    if r.rehearsal { "Test" } else { "Production" },
                     r.successful()
                 ));
                 for t in &r.targets {
@@ -896,7 +896,7 @@ impl AivanaApp {
 impl ExecutionState {
     fn select_recovery(&mut self, case: Uuid) -> anyhow::Result<()> {
         let index = self.book.runs.iter().rposition(|r| r.recovery_case == Some(case) && !r.rehearsal)
-            .ok_or_else(|| anyhow::anyhow!("Noch kein Produktionslauf für diesen Fall. Zuerst Generalprobe abschließen und Produktion vorbereiten."))?;
+            .ok_or_else(|| anyhow::anyhow!("No production run for this case yet. Complete the rehearsal and prepare production first."))?;
         if self.selected == Some(index) {
             return Ok(());
         }
@@ -905,7 +905,7 @@ impl ExecutionState {
                 && self.health.is_none()
                 && !self.book.runs.iter().any(|r| r.finished.is_none())
                 && self.queue.jobs.iter().all(|j| j.status.terminal()),
-            "Ein anderer Auftrag läuft. Dort zuerst abschließen oder abbrechen."
+            "Another job is running. Complete or cancel it there first."
         );
         self.selected = Some(index);
         self.reviewed = false;

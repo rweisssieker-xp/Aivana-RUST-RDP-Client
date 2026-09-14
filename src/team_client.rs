@@ -14,6 +14,31 @@ pub struct TeamClient {
     token: String,
 }
 impl TeamClient {
+    pub fn escalation(&self, action: &str, body: serde_json::Value) -> Result<serde_json::Value> {
+        match action {
+            "config" => self.request("/v1/escalations/config", None::<()>),
+            "list" => self.request("/v1/escalations", None::<()>),
+            "enqueue" | "cancel" | "reconcile" | "retry" => {
+                self.request(&format!("/v1/escalations/{action}"), Some(body))
+            }
+            _ => bail!("Unknown escalation action"),
+        }
+    }
+    pub fn ticket_inbox(&self) -> Result<Vec<crate::ticket_intake::InboxItem>> {
+        self.request("/v1/tickets/inbox", None::<()>)
+    }
+    pub fn billing(&self, action: &str, attempt: uuid::Uuid) -> Result<serde_json::Value> {
+        match action {
+            "checkout" => self.request(
+                "/v1/billing/checkout",
+                Some(serde_json::json!({"attempt":attempt})),
+            ),
+            "portal" => self.request("/v1/billing/portal", Some(serde_json::json!({}))),
+            "refresh" => self.request("/v1/billing/refresh", Some(serde_json::json!({}))),
+            "entitlement" => self.request("/v1/billing/entitlement", None::<()>),
+            _ => bail!("Unknown billing action"),
+        }
+    }
     pub fn new(endpoint: &str, token: &str) -> Result<Self> {
         let url = Url::parse(endpoint.trim()).context("Invalid team URL")?;
         let local = matches!(

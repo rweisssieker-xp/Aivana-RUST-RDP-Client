@@ -35,7 +35,7 @@ impl RunbookEngine {
             .map(|runbook| RunbookRecommendation {
                 runbook_id: runbook.id,
                 name: runbook.name.clone(),
-                reason: "Lokale Runbook-Regel passt zum aktuellen Diagnosekontext.".to_owned(),
+                reason: "Local runbook rule matches the current diagnostic context.".to_owned(),
                 confidence: 0.74,
             })
     }
@@ -93,9 +93,9 @@ impl RunbookEngine {
 
 fn default_runbooks() -> Vec<Runbook> {
     [
-        ("RDP Login haengt", RunbookCategory::Authentication),
-        ("DNS/TCP/RDP-Port Diagnose", RunbookCategory::Connectivity),
-        ("NLA/CredSSP Problem", RunbookCategory::Authentication),
+        ("RDP sign-in hangs", RunbookCategory::Authentication),
+        ("DNS/TCP/RDP port diagnostics", RunbookCategory::Connectivity),
+        ("NLA/CredSSP issue", RunbookCategory::Authentication),
         (
             "Certificate Changed Investigation",
             RunbookCategory::Certificate,
@@ -115,14 +115,14 @@ fn default_runbooks() -> Vec<Runbook> {
         steps: vec![
             RunbookStep {
                 id: Uuid::new_v4(),
-                title: "Screenshot erfassen".to_owned(),
+                title: "Capture screenshot".to_owned(),
                 action: InputAction::Screenshot,
                 risk: RiskLevel::ReadOnly,
                 requires_approval: false,
             },
             RunbookStep {
                 id: Uuid::new_v4(),
-                title: "Aktuellen Bildschirmzustand verifizieren".to_owned(),
+                title: "Verify current screen state".to_owned(),
                 action: InputAction::Verify {
                     expectation: name.to_owned(),
                 },

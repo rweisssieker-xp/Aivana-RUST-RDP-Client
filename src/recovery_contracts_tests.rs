@@ -97,7 +97,7 @@ fn drift_is_sticky_and_revokes_guard_even_paused() {
         ..Default::default()
     };
     assert!(book.ensure_allowed(&c.plan, &c.references, at).is_err());
-    assert!(c.invalidated.unwrap().contains("OS-Build"));
+    assert!(c.invalidated.unwrap().contains("OS build"));
 }
 #[test]
 fn errors_are_unknown_and_retry_is_bounded() {

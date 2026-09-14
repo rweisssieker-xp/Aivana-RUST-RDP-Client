@@ -29,7 +29,7 @@ impl Endpoint {
                 .all(|b| b.is_ascii_alphanumeric() || b".-:".contains(&b))
             || port == 0
         {
-            return Err("Ungültiger Host oder Port (DNS-Name oder IP erforderlich).".into());
+            return Err("Invalid host or port (a DNS name or IP address is required).".into());
         }
         if user.len() > 128
             || !user
@@ -38,7 +38,7 @@ impl Endpoint {
             || user.starts_with('-')
         {
             return Err(
-                "SSH-Benutzer darf nur Buchstaben, Zahlen, Punkt, _ und - enthalten.".into(),
+                "SSH usernames may contain only letters, digits, periods, underscores, and hyphens.".into(),
             );
         }
         Ok(Self {
@@ -105,7 +105,7 @@ pub fn sftp_path(value: &str) -> Result<String, String> {
             .chars()
             .any(|c| c.is_control() || "\"*?[]{}!`".contains(c))
     {
-        return Err("Dateipfad ist leer oder enthält Steuerzeichen/SFTP-Muster.".into());
+        return Err("The file path is empty or contains control characters or SFTP patterns.".into());
     }
     Ok(format!("\"{}\"", value.replace('\\', "/")))
 }
@@ -152,7 +152,7 @@ impl Request {
         }
         if let Self::Upload { local, .. } | Self::Download { local, .. } = self {
             if !std::path::Path::new(local).is_absolute() {
-                return Err("Lokaler Dateipfad muss absolut sein.".into());
+                return Err("The local file path must be absolute.".into());
             }
         }
         let mut spec = CommandSpec {
@@ -165,7 +165,7 @@ impl Request {
             Self::Transfer { .. } => unreachable!("Transfer options handled before base request"),
             Self::Ssh { command } => {
                 if command.trim().is_empty() || command.len() > 8192 || command.contains('\0') {
-                    return Err("SSH-Befehl ist leer oder zu lang.".into());
+                    return Err("The SSH command is empty or too long.".into());
                 }
                 spec.args = ssh_options();
                 spec.args.extend(["-p".into(), endpoint.port.to_string()]);
@@ -198,7 +198,7 @@ impl Request {
                         .bytes()
                         .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
                 {
-                    return Err("Ungültiger Dienstname.".into());
+                    return Err("Invalid service name.".into());
                 }
                 let (verb, expected) = match action {
                     ServiceAction::Start => ("Start", "Running"),
@@ -280,7 +280,7 @@ pub(crate) fn winrm(spec: &mut CommandSpec, endpoint: &Endpoint, body: &str) {
 impl CommandSpec {
     pub fn preview(&self) -> String {
         format!(
-            "Quelle: {}\n{} {:?}\n{}",
+            "Source: {}\n{} {:?}\n{}",
             self.source, self.program, self.args, self.stdin
         )
     }
@@ -350,7 +350,7 @@ impl JobQueue {
     }
     pub fn enqueue(&mut self, spec: CommandSpec) -> Result<u64, String> {
         if self.jobs.len() >= JOB_LIMIT {
-            return Err("Auftragsliste voll; abgeschlossene Aufträge entfernen.".into());
+            return Err("The job list is full; remove completed jobs.".into());
         }
         self.next += 1;
         self.jobs.push(Job {
@@ -374,7 +374,7 @@ impl JobQueue {
                         job.receiver = None;
                     }
                     Err(mpsc::TryRecvError::Disconnected) => {
-                        job.status = JobStatus::Failed("Worker beendet ohne Ergebnis".into());
+                        job.status = JobStatus::Failed("The worker ended without a result".into());
                         job.receiver = None;
                     }
                     Err(_) => {}
@@ -575,7 +575,7 @@ fn run(spec: CommandSpec, cancel: Arc<AtomicBool>, timeout: Duration) -> JobResu
                 result.status = if exit.success() {
                     JobStatus::Completed
                 } else {
-                    JobStatus::Failed(format!("Prozess beendet: {exit}"))
+                    JobStatus::Failed(format!("Process ended: {exit}"))
                 };
                 break;
             }

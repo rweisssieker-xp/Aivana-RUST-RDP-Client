@@ -78,7 +78,7 @@ fn words(text: &str) -> BTreeSet<String> {
 impl Library {
     pub fn remember(&mut self, m: &Mission, requirements: Requirements) -> Result<Uuid> {
         if self.recipes.len() >= 256 || m.objective.trim().is_empty() || m.steps.is_empty() {
-            bail!("Lösungsbibliothek voll oder Auftrag unvollständig");
+            bail!("The solution library is full or the job is incomplete");
         }
         if requirements.services.len() > 32
             || requirements.os_prefix.len() > 128
@@ -90,7 +90,7 @@ impl Library {
                         .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
             })
         {
-            bail!("Ungültige Voraussetzungen");
+            bail!("Invalid prerequisites");
         }
         let hash = plan_hash(&m.steps);
         if self
@@ -98,7 +98,7 @@ impl Library {
             .iter()
             .any(|r| r.source == m.id && r.plan_hash == hash)
         {
-            bail!("Dieser Auftragsstand ist bereits in der Bibliothek");
+            bail!("This job revision is already in the library");
         }
         let id = Uuid::new_v4();
         self.recipes.push(Recipe {
@@ -156,10 +156,10 @@ impl Library {
                         r.matches.push(format!("OS {}", o.payload.os_version))
                     }
                     Some(o) => r.conflicts.push(format!(
-                        "OS {} passt nicht zu {}",
+                        "OS {} does not match {}",
                         o.payload.os_version, recipe.requirements.os_prefix
                     )),
-                    None => r.missing.push("Frische OS-Telemetrie fehlt".into()),
+                    None => r.missing.push("Fresh OS telemetry is missing".into()),
                 }
             }
             for service in &recipe.requirements.services {
@@ -170,14 +170,14 @@ impl Library {
                             .iter()
                             .any(|s| s.name.eq_ignore_ascii_case(service)) =>
                     {
-                        r.matches.push(format!("Dienst {service} vorhanden"))
+                        r.matches.push(format!("Service {service} is present"))
                     }
                     Some(o) if !o.payload.truncated => {
-                        r.conflicts.push(format!("Dienst {service} fehlt"))
+                        r.conflicts.push(format!("Service {service} is missing"))
                     }
                     _ => r
                         .missing
-                        .push(format!("Vorhandensein von {service} ungeprüft")),
+                        .push(format!("The presence of {service} has not been checked")),
                 }
             }
             for m in &book.missions {
@@ -235,11 +235,11 @@ impl Library {
     }
     pub fn save(&self, p: &Path) -> Result<()> {
         if !cfg!(windows) {
-            bail!("Windows DPAPI erforderlich");
+            bail!("Windows DPAPI is required");
         }
         let raw = serde_json::to_vec(self)?;
         if raw.len() > 8 * 1024 * 1024 {
-            bail!("Lösungsbibliothek zu groß");
+            bail!("Solution library too large");
         }
         security::atomic_write(p, &security::protect_secret(&raw)?)
     }
@@ -248,7 +248,7 @@ impl Library {
             return Ok(Self::default());
         }
         if std::fs::metadata(p)?.len() > 10 * 1024 * 1024 {
-            bail!("Lösungsbibliothek zu groß");
+            bail!("Solution library too large");
         }
         Ok(serde_json::from_slice(&security::unprotect_secret(
             &std::fs::read(p)?,

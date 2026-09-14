@@ -84,15 +84,15 @@ impl CertificateTrustStore {
     pub fn explain_risk(&self, status: CertificateTrustStatus) -> String {
         match status {
             CertificateTrustStatus::Unknown => {
-                "Unbekanntes Zertifikat: bei neuen Hosts normal, bei bestehenden Hosts pruefen."
+                "Unknown certificate: expected for new hosts; investigate for existing hosts."
                     .to_owned()
             }
-            CertificateTrustStatus::Trusted => "Zertifikat ist lokal vertraut.".to_owned(),
+            CertificateTrustStatus::Trusted => "The certificate is locally trusted.".to_owned(),
             CertificateTrustStatus::Rejected => {
-                "Zertifikat wurde abgelehnt; Verbindung sollte blockiert bleiben.".to_owned()
+                "The certificate was rejected; the connection should remain blocked.".to_owned()
             }
             CertificateTrustStatus::Changed => {
-                "Zertifikat hat sich geaendert; moeglicher Reinstall oder MITM-Risiko.".to_owned()
+                "The certificate changed; this may indicate a reinstall or a man-in-the-middle risk.".to_owned()
             }
         }
     }

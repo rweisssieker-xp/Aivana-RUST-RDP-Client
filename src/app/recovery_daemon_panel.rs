@@ -26,22 +26,22 @@ impl Default for RecoveryDaemonState {
 }
 impl AivanaApp {
     pub(super) fn recovery_daemon_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Hintergrund & geplante Generalproben");
-        ui.label("Prüft alle fünf Minuten fällige Verträge, auch bei geschlossener App. Läuft nur, solange dieser Windows-Benutzer angemeldet ist. Produktion wird ausschließlich gelesen.");
-        ui.label("Klonproben benötigen vorhandene gestartete Hyper-V-Klone, PowerShell-Direct-Rechte und Gastzugang. Die Aufgabe erhöht keine Rechte. HTTP-Prüfungen mit zusätzlichen Geheimwerten benötigen weiterhin eine manuelle Generalprobe.");
-        ui.label("Vor jeder erneuten Probe muss der Klon wieder den passenden Fehlerzustand zeigen. Gesunde Klone liefern keinen Reparaturnachweis; automatisches Zurücksetzen oder Erzeugen von Fehlern ist nicht eingerichtet.");
+        ui.heading("Background work & scheduled rehearsals");
+        ui.label("Checks for due contracts every five minutes, even when the app is closed. Runs only while this Windows user is signed in. Production is read-only.");
+        ui.label("Clone rehearsals require existing running Hyper-V clones, PowerShell Direct privileges, and guest credentials. The task does not elevate privileges. HTTP checks with additional secrets still require a manual rehearsal.");
+        ui.label("Before each new rehearsal, the clone must show the matching failure state again. Healthy clones provide no repair evidence; automatic rollback or failure injection is not configured.");
         let state = &mut self.recovery_daemon;
         if let Some(rx) = &state.worker {
             match rx.try_recv() {
                 Ok(result) => {
                     state.notice = match result {
-                        Ok(n) => format!("Hintergrunddurchlauf beendet: {n} Vorgänge"),
+                        Ok(n) => format!("Background run completed: {n} operations"),
                         Err(e) => e,
                     };
                     state.worker = None;
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    state.notice = "Hintergrundworker unerwartet beendet".into();
+                    state.notice = "Background worker ended unexpectedly".into();
                     state.worker = None;
                 }
                 Err(_) => {
@@ -56,51 +56,51 @@ impl AivanaApp {
             Err(_) => {
                 ui.colored_label(
                     egui::Color32::RED,
-                    "Hintergrundspeicher nicht lesbar; Konfiguration gesperrt",
+                    "Cannot read background storage; configuration locked",
                 );
                 return;
             }
         };
         ui.label(if settings.enabled {
-            "Gespeicherte Hintergrundfreigaben aktiv (Aufgabe separat installieren)"
+            "Saved background approvals active (install the task separately)"
         } else {
-            "Hintergrundarbeit ausgeschaltet"
+            "Background work disabled"
         });
         if ui
             .checkbox(
                 &mut settings.windows_hints,
-                "Lokale Windows-Hinweise für neue Meldungen (auch bei geschlossener App)",
+                "Local Windows notifications for new messages (even when the app is closed)",
             )
             .changed()
         {
             state.notice = settings.save().map_or_else(
                 |e| e.to_string(),
-                |_| "Hinweiseinstellung gespeichert".into(),
+                |_| "Notification setting saved".into(),
             );
         }
         ui.horizontal(|ui| {
             if ui
-                .button("Windows-Aufgabe installieren / aktualisieren")
+                .button("Install / update Windows task")
                 .clicked()
             {
                 state.notice = match recovery_daemon::install_task() {
-                    Ok(()) => "Aufgabe für diesen Benutzer installiert".into(),
+                    Ok(()) => "Task installed for this user".into(),
                     Err(e) => e.to_string(),
                 };
             }
             if ui
-                .button("Alles deaktivieren & Aufgabe entfernen")
+                .button("Disable everything & remove task")
                 .clicked()
             {
                 state.notice = match recovery_daemon::remove_task() {
-                    Ok(()) => "Deaktiviert; Gastzugänge entfernt; Aufgabe gelöscht".into(),
-                    Err(e) => format!("Entfernen prüfen: {e}"),
+                    Ok(()) => "Disabled; guest credentials removed; task deleted".into(),
+                    Err(e) => format!("Check removal: {e}"),
                 };
             }
             if ui
                 .add_enabled(
                     state.worker.is_none() && settings.enabled,
-                    egui::Button::new("Freigegebenen Durchlauf starten"),
+                    egui::Button::new("Start approved run"),
                 )
                 .clicked()
             {
@@ -108,7 +108,7 @@ impl AivanaApp {
                 state.worker = Some(rx);
                 std::thread::spawn(move || {
                     let _ = tx.send(recovery_daemon::run_once().map_err(|_| {
-                        "Durchlauf fehlgeschlagen; Meldungen und Speicher prüfen".into()
+                        "Run failed; check messages and storage".into()
                     }));
                 });
             }
@@ -120,7 +120,7 @@ impl AivanaApp {
             Err(_) => {
                 ui.colored_label(
                     egui::Color32::RED,
-                    "Vertragsspeicher gesperrt oder nicht lesbar",
+                    "Contract storage locked or unreadable",
                 );
                 return;
             }
@@ -131,7 +131,7 @@ impl AivanaApp {
                 book.contracts
                     .iter()
                     .find(|c| Some(c.id) == state.selected)
-                    .map_or("Vertrag wählen", |c| c.name.as_str()),
+                    .map_or("Select contract", |c| c.name.as_str()),
             )
             .show_ui(ui, |ui| {
                 for c in &book.contracts {
@@ -145,47 +145,47 @@ impl AivanaApp {
             });
         if let Some(c) = book.contracts.iter().find(|c| Some(c.id) == state.selected) {
             ui.label(format!(
-                "Dienst: {} · Zielzustand: {} · Plan: {}",
+                "Service: {} · Desired state: {} · Plan: {}",
                 c.plan.service,
                 c.plan.desired.label(),
                 c.plan.hash().unwrap_or_default()
             ));
             for m in &c.plan.mappings {
                 ui.label(format!(
-                    "Produktion (lesen): {} → Klon: {} / VM {}",
+                    "Production (read-only): {} → Clone: {} / VM {}",
                     m.production.host, m.staging.profile_id, m.staging.host
                 ));
             }
             if let Some(existing) = settings.consents.iter().find(|s| s.contract_id == c.id) {
                 ui.label(format!(
-                    "Freigabe bis {} · Klonproben: {}",
+                    "Approved until {} · Clone rehearsals: {}",
                     existing
                         .expires
                         .with_timezone(&chrono::Local)
-                        .format("%d.%m.%Y %H:%M"),
+                        .format("%m/%d/%Y %H:%M"),
                     existing.drill
                 ));
                 if ui
-                    .button("Diesen Vertrag deaktivieren / Gastzugang löschen")
+                    .button("Disable this contract / delete guest credentials")
                     .clicked()
                 {
                     settings.consents.retain(|s| s.contract_id != c.id);
                     state.notice = settings
                         .save()
-                        .map_or_else(|e| e.to_string(), |_| "Freigabe entfernt".into());
+                        .map_or_else(|e| e.to_string(), |_| "Approval removed".into());
                 }
             }
             if ui
                 .checkbox(
                     &mut state.drill,
-                    "Auch echte Dienständerungen ausschließlich in diesen Klonen planen",
+                    "Also schedule actual service changes exclusively in these clones",
                 )
                 .changed()
             {
                 state.confirmed = false;
             }
             ui.horizontal(|ui| {
-                ui.label("Freigabe für Stunden");
+                ui.label("Approval duration in hours");
                 if ui
                     .add(egui::DragValue::new(&mut state.hours).range(1..=168))
                     .changed()
@@ -194,11 +194,11 @@ impl AivanaApp {
                 }
             });
             if state.drill {
-                ui.label("Gastkonto für alle ausgewählten Klone (DOMAIN\\Benutzer oder Benutzer)");
+                ui.label("Guest account for all selected clones (DOMAIN\\user or user)");
                 if ui.text_edit_singleline(&mut state.user).changed() {
                     state.confirmed = false;
                 }
-                ui.label("Gastpasswort · verschlüsselt mit CurrentUser-DPAPI gespeichert");
+                ui.label("Guest password · stored encrypted with CurrentUser DPAPI");
                 if ui
                     .add(egui::TextEdit::singleline(&mut state.password).password(true))
                     .changed()
@@ -206,11 +206,11 @@ impl AivanaApp {
                     state.confirmed = false;
                 }
             }
-            ui.checkbox(&mut state.confirmed, "Ich autorisiere genau diesen Plan, diese Ziele und die gewählte Laufzeit; bei Klonproben auch deren Dienständerungen und Zugangsspeicherung.");
+            ui.checkbox(&mut state.confirmed, "I authorize exactly this plan, these targets, and the selected duration; for clone rehearsals, also their service changes and credential storage.");
             if ui
                 .add_enabled(
                     state.confirmed,
-                    egui::Button::new("Freigabe speichern und aktivieren"),
+                    egui::Button::new("Save and activate approval"),
                 )
                 .clicked()
             {
@@ -218,7 +218,7 @@ impl AivanaApp {
                     anyhow::ensure!(
                         !state.drill
                             || (!state.user.trim().is_empty() && !state.password.is_empty()),
-                        "Gastkonto und Passwort fehlen"
+                        "Guest account and password missing"
                     );
                     let consent = Consent {
                         contract_id: c.id,
@@ -245,7 +245,7 @@ impl AivanaApp {
                 state.notice = result.map_or_else(
                     |e| e.to_string(),
                     |_| {
-                        "Freigabe gespeichert. Windows-Aufgabe bei Bedarf oben installieren.".into()
+                        "Approval saved. Install the Windows task above if needed.".into()
                     },
                 );
                 state.password.clear();
@@ -254,8 +254,8 @@ impl AivanaApp {
         }
         ui.label(&state.notice);
         ui.separator();
-        ui.heading("Dauerhafte Meldungen");
-        if ui.button("Alle als gelesen markieren").clicked() {
+        ui.heading("Persistent notifications");
+        if ui.button("Mark all as read").clicked() {
             if let Err(e) = Notices::mark_read() {
                 state.notice = e.to_string();
             }
@@ -266,14 +266,14 @@ impl AivanaApp {
                     ui.label(format!(
                         "{} {} · {} · {}",
                         if n.read { "" } else { "●" },
-                        n.at.with_timezone(&chrono::Local).format("%d.%m. %H:%M"),
+                        n.at.with_timezone(&chrono::Local).format("%m/%d %H:%M"),
                         n.contract_id,
                         n.message
                     ));
                 }
             }
             Err(_) => {
-                ui.colored_label(egui::Color32::RED, "Meldungsspeicher nicht lesbar");
+                ui.colored_label(egui::Color32::RED, "Cannot read notification storage");
             }
         }
     }

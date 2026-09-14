@@ -11,7 +11,7 @@ pub fn show(ui: &mut egui::Ui, terminal: &mut Terminal) {
                 .map(|s| s.clone())
                 .unwrap_or_default(),
         );
-        if ui.button("Trennen").clicked() {
+        if ui.button("Disconnect").clicked() {
             terminal.close();
         }
     });

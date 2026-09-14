@@ -50,7 +50,7 @@ impl HealthProbe {
         if self.url.is_empty() {
             anyhow::ensure!(
                 self.followups.is_empty(),
-                "Folgeprüfungen benötigen eine Basis-URL"
+                "Follow-up checks require a base URL"
             );
             return Ok(());
         }
@@ -78,7 +78,7 @@ impl HealthProbe {
             || u.fragment().is_some()
         {
             bail!(
-                "HTTP(S)-Probe: nur localhost oder Loopback-IP, ohne Zugangsdaten/Query/Fragment; gültiges TLS-Zertifikat erforderlich"
+                "HTTP(S) probe: localhost or loopback IP only, without credentials/query/fragment; valid TLS certificate required"
             );
         }
         Ok(())
@@ -91,7 +91,7 @@ fn read_journal(path: &std::path::Path) -> Result<Journal> {
         .take(1024 * 1024 + 1)
         .read_to_end(&mut bytes)?;
     if bytes.len() > 1024 * 1024 {
-        bail!("Lab-Journal überschreitet 1 MiB");
+        bail!("Lab journal exceeds 1 MiB");
     }
     Ok(serde_json::from_slice(&crate::security::unprotect_secret(
         &bytes,
@@ -133,12 +133,12 @@ pub fn journals() -> Result<Vec<Journal>> {
     Ok(result)
 }
 pub fn new_lab(template: &str) -> Result<Journal> {
-    let p = std::fs::canonicalize(template).context("Offline-VHDX nicht gefunden")?;
+    let p = std::fs::canonicalize(template).context("Offline VHDX not found")?;
     if p.extension()
         .and_then(|s| s.to_str())
         .is_none_or(|s| !s.eq_ignore_ascii_case("vhdx"))
     {
-        bail!("Eine VHDX-Vorlage ist erforderlich");
+        bail!("A VHDX template is required");
     }
     let id = uuid::Uuid::new_v4().to_string();
     Ok(Journal {
@@ -165,9 +165,7 @@ pub fn execute(
     let _lab_lock = if action == Action::Preflight {
         None
     } else {
-        Some(lock_lab(
-            &journal.as_ref().context("Kein Lab ausgewählt")?.id,
-        )?)
+        Some(lock_lab(&journal.as_ref().context("No lab selected")?.id)?)
     };
     execute_with_binding(
         action,
@@ -194,15 +192,15 @@ fn execute_with_binding(
     http_values: crate::execution::http_health::Values,
 ) -> Result<String> {
     if !cfg!(windows) {
-        bail!("Hyper-V-Labs benötigen Windows");
+        bail!("Hyper-V labs require Windows");
     }
     if action != Action::Preflight {
-        let j = journal.as_ref().context("Kein Lab ausgewählt")?;
+        let j = journal.as_ref().context("No lab selected")?;
         let id = uuid::Uuid::parse_str(&j.id)?;
         if j.directory != root()?.join(id.to_string()).to_string_lossy()
             || j.name != format!("Relayne-Lab-{id}")
         {
-            bail!("Ungültiger Lab-Besitznachweis");
+            bail!("Invalid lab ownership evidence");
         }
     }
     if action == Action::Test
@@ -217,7 +215,7 @@ fn execute_with_binding(
                 .bytes()
                 .all(|c| c.is_ascii_alphanumeric() || b"_- .".contains(&c)))
     {
-        bail!("Gastzugang und gültiger Dienstname erforderlich");
+        bail!("Guest credentials and a valid service name required");
     }
     if action == Action::Test {
         health.validate()?;
@@ -226,10 +224,10 @@ fn execute_with_binding(
         }
     }
     let journal = if matches!(action, Action::Test | Action::Cleanup) {
-        let j = journal.context("Kein Lab")?;
+        let j = journal.context("No lab")?;
         let current = read_journal(&PathBuf::from(&j.directory).join("journal.dpapi"))?;
         if current.id != j.id || current.directory != j.directory || current.name != j.name {
-            bail!("Journal-Identität geändert");
+            bail!("Journal identity changed");
         }
         Some(current)
     } else {
@@ -238,7 +236,8 @@ fn execute_with_binding(
     let payload = serde_json::json!({"action":action.key(),"lab":journal,"user":user,"password":password,"service":service,"desiredRunning":desired_running,"health":health,"boundRequest":bound_request,"httpValues":http_values});
     let output = run_script(SCRIPT, payload)?;
     if action == Action::Preflight {
-        let _: Preflight = serde_json::from_str(&output).context("Ungültiger Hyper-V-Preflight-Bericht")?;
+        let _: Preflight =
+            serde_json::from_str(&output).context("Invalid Hyper-V preflight report")?;
     }
     Ok(output)
 }
@@ -289,7 +288,7 @@ fn run_script(script: &str, payload: serde_json::Value) -> Result<String> {
         if start.elapsed() > Duration::from_secs(180) {
             let _ = child.kill();
             let _ = child.wait();
-            bail!("Zeitlimit: Lab-Journal prüfen; Ressourcen können bestehen bleiben.");
+            bail!("Timeout: review the lab journal; resources may remain.");
         }
         std::thread::sleep(Duration::from_millis(100));
     };
@@ -419,11 +418,11 @@ fn assert_plain_path(path: &std::path::Path) -> Result<()> {
 pub(crate) fn lock_lab(lab_id: &str) -> Result<std::fs::File> {
     let id = Uuid::parse_str(lab_id)?;
     if id.is_nil() || id.to_string() != lab_id {
-        bail!("Ungültige oder nicht kanonische Lab-ID");
+        bail!("Invalid or noncanonical lab ID");
     }
     #[cfg(not(windows))]
     {
-        bail!("Hyper-V-Labs benötigen Windows");
+        bail!("Hyper-V labs require Windows");
     }
     #[cfg(windows)]
     {
@@ -442,9 +441,7 @@ pub(crate) fn lock_lab(lab_id: &str) -> Result<std::fs::File> {
             .truncate(false)
             .share_mode(0)
             .open(path)
-            .context(
-                "Lab ist durch eine andere Aktion belegt oder die Sperrdatei ist nicht zugänglich",
-            )
+            .context("Lab is in use by another action or the lock file is inaccessible")
     }
 }
 fn receipt_directory(lab_id: &str) -> Result<PathBuf> {

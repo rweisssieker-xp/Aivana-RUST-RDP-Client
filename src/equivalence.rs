@@ -34,17 +34,17 @@ impl Fingerprint {
                     self.start_mode.as_str(),
                     "Auto" | "Manual" | "Disabled" | "Boot" | "System"
                 ),
-            "OS-Beobachtung unvollständig"
+            "OS observation is incomplete"
         );
         for hash in [&self.executable_hash, &self.configuration_hash] {
             ensure!(
                 hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()),
-                "Fingerprint unvollständig"
+                "Fingerprint is incomplete"
             );
         }
         ensure!(
             self.dependencies.len() <= 128 && serde_json::to_vec(self)?.len() <= 32768,
-            "Fingerprint überschreitet Grenze"
+            "Fingerprint exceeds limit"
         );
         Ok(())
     }
@@ -70,7 +70,7 @@ pub fn rehearsal_baseline(
     references: &[String],
     now: DateTime<Utc>,
 ) -> Result<RehearsalBaseline> {
-    ensure!(references.len() <= 32, "Zu viele Nachweise");
+    ensure!(references.len() <= 32, "Too many evidence records");
     let receipts = references
         .iter()
         .map(|reference| crate::test_lab::load_receipt(reference))
@@ -85,7 +85,7 @@ pub fn rehearsal_baseline(
                 r.lab_id == mapping.staging.profile_id.to_string()
                     && r.vm_id == mapping.staging.host
             })
-            .context("Passender Lab-/VM-Nachweis fehlt")?;
+            .context("Matching lab/VM evidence is missing")?;
         check(plan, receipt, now)?;
         let observation = load_observation(plan, receipt)?;
         // Validate the same loaded object used for the baseline, including on concurrent replacement.
@@ -98,8 +98,8 @@ pub fn rehearsal_baseline(
             .iter()
             .map(|o| o.started)
             .min()
-            .context("Beobachtung fehlt")?,
-        rehearsed_at: rehearsed.into_iter().min().context("Nachweis fehlt")?,
+            .context("Observation is missing")?,
+        rehearsed_at: rehearsed.into_iter().min().context("Evidence is missing")?,
         fingerprints: observations.into_iter().map(|o| o.production).collect(),
     })
 }
@@ -121,23 +121,23 @@ pub fn observe_production(
     }
     ensure!(
         !cancel.load(std::sync::atomic::Ordering::Relaxed),
-        "Beobachtung abgebrochen"
+        "Observation canceled"
     );
     Ok(fingerprints)
 }
 fn decode_production(raw: &[u8]) -> Result<Fingerprint> {
     let fingerprint: Fingerprint = serde_json::from_slice(raw)
-        .map_err(|_| anyhow::anyhow!("Fingerprint-Antwort unvollständig oder ungültig"))?;
+        .map_err(|_| anyhow::anyhow!("Fingerprint response is incomplete or invalid"))?;
     fingerprint.validate()?;
     Ok(fingerprint)
 }
 fn path(hash: &str, lab: &str) -> Result<std::path::PathBuf> {
     ensure!(
         hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()),
-        "Plan-Hash ungültig"
+        "Invalid plan hash"
     );
     let id = uuid::Uuid::parse_str(lab)?;
-    ensure!(!id.is_nil() && id.to_string() == lab, "Lab-ID ungültig");
+    ensure!(!id.is_nil() && id.to_string() == lab, "Invalid lab ID");
     Ok(security::app_data_file("equivalence")?.join(format!("{hash}-{id}.dpapi")))
 }
 fn compare(production: &Fingerprint, guest: &Fingerprint) -> Result<()> {
@@ -146,7 +146,7 @@ fn compare(production: &Fingerprint, guest: &Fingerprint) -> Result<()> {
     // Explicit tolerance: machine identity and runtime state are excluded. Everything collected must match.
     ensure!(
         production == guest,
-        "Vorlage/Produktion weichen ab: OS, Dienstbinärdatei, Startkonfiguration oder Abhängigkeiten. Vorlage aktualisieren und erneut prüfen."
+        "Template and production differ: OS, service binary, startup configuration, or dependencies. Update the template and check again."
     );
     Ok(())
 }
@@ -156,11 +156,12 @@ pub(crate) fn check(plan: &ExecutionPlan, receipt: &LabReceipt, now: DateTime<Ut
 fn load_observation(plan: &ExecutionPlan, receipt: &LabReceipt) -> Result<Observation> {
     let hash = plan.hash()?;
     let file = std::fs::File::open(path(&hash, &receipt.lab_id)?)
-        .context("Automatischer Vorlage-/Produktionsvergleich fehlt")?;
+        .context("Automatic template/production comparison is missing")?;
     let mut raw = Vec::new();
     file.take(131073).read_to_end(&mut raw)?;
-    ensure!(raw.len() <= 131072, "Vergleichsbeleg zu groß");
-    serde_json::from_slice(&security::unprotect_secret(&raw)?).context("Vergleichsbeleg ungültig")
+    ensure!(raw.len() <= 131072, "Comparison evidence is too large");
+    serde_json::from_slice(&security::unprotect_secret(&raw)?)
+        .context("Invalid comparison evidence")
 }
 fn validate_observation(
     plan: &ExecutionPlan,
@@ -173,7 +174,7 @@ fn validate_observation(
         observation.plan_hash == hash
             && observation.lab_id == receipt.lab_id
             && observation.vm_id == receipt.vm_id,
-        "Vergleich gehört zu anderem Plan oder Klon"
+        "Comparison belongs to another plan or clone"
     );
     ensure!(
         observation.started <= observation.finished
@@ -181,7 +182,7 @@ fn validate_observation(
             && receipt.started - observation.finished <= chrono::Duration::minutes(10)
             && observation.finished <= now
             && now - observation.started <= chrono::Duration::hours(1),
-        "Vergleich veraltet oder zeitlich ungültig"
+        "Comparison is stale or temporally invalid"
     );
     compare(&observation.production, &observation.guest)
 }
@@ -192,18 +193,18 @@ pub fn observe(plan: &ExecutionPlan, lab: &Journal, user: &str, password: &str) 
             && user.len() <= 256
             && !password.is_empty()
             && password.len() <= 4096,
-        "Gastzugang erforderlich"
+        "Guest credentials required"
     );
     let mapping = plan
         .mappings
         .iter()
         .find(|m| m.staging.profile_id.to_string() == lab.id && m.staging.host == lab.vm_id)
-        .context("Lab-Zuordnung fehlt")?;
+        .context("Lab mapping is missing")?;
     let _lock = crate::test_lab::lock_lab(&lab.id)?;
     let current = crate::test_lab::journals()?
         .into_iter()
         .find(|j| j.id == lab.id && j.vm_id == lab.vm_id && j.directory == lab.directory)
-        .context("Lab-Identität geändert")?;
+        .context("Lab identity changed")?;
     crate::promotion::lab_target(&current)?;
     let started = Utc::now();
     let payload = serde_json::json!({"host":mapping.production.host,"vm":lab.vm_id,"name":lab.name,"switch":lab.switch_id,"user":user,"password":password,"service":plan.service});
@@ -219,7 +220,7 @@ pub fn observe(plan: &ExecutionPlan, lab: &Journal, user: &str, password: &str) 
         guest,
     };
     let target = path(&observation.plan_hash, &observation.lab_id)?;
-    std::fs::create_dir_all(target.parent().context("Vergleichspfad")?)?;
+    std::fs::create_dir_all(target.parent().context("Comparison path")?)?;
     security::atomic_write(
         &target,
         &security::protect_secret(&serde_json::to_vec(&observation)?)?,
@@ -241,7 +242,7 @@ fn run_script(script: &str, payload: serde_json::Value) -> Result<(Fingerprint, 
         guest: Fingerprint,
     }
     let pair: Pair = serde_json::from_slice(&raw)
-        .map_err(|_| anyhow::anyhow!("Fingerprint-Antwort unvollständig oder ungültig"))?;
+        .map_err(|_| anyhow::anyhow!("Fingerprint response is incomplete or invalid"))?;
     pair.production.validate()?;
     pair.guest.validate()?;
     Ok((pair.production, pair.guest))
@@ -254,7 +255,7 @@ fn run_raw(
 ) -> Result<Vec<u8>> {
     ensure!(
         !cancel.load(std::sync::atomic::Ordering::Relaxed),
-        "Beobachtung abgebrochen"
+        "Observation canceled"
     );
     use base64::Engine;
     let bootstrap = format!(
@@ -303,7 +304,7 @@ fn run_raw(
         if cancel.load(std::sync::atomic::Ordering::Relaxed) || deadline.elapsed() > timeout {
             let _ = child.kill();
             let _ = child.wait();
-            anyhow::bail!("Beobachtung abgebrochen oder Zeitgrenze überschritten");
+            anyhow::bail!("Observation canceled or time limit exceeded");
         }
         if status.is_none() {
             status = child.try_wait()?;
@@ -314,22 +315,19 @@ fn run_raw(
         if output.as_ref().is_some_and(|(_, raw)| raw.len() > 131072) {
             let _ = child.kill();
             let _ = child.wait();
-            anyhow::bail!("Fingerprint überschreitet Ausgabegrenze");
+            anyhow::bail!("Fingerprint exceeds output limit");
         }
         if status.is_some_and(|s| !s.success()) {
-            anyhow::bail!("Produktion konnte nicht gelesen werden; keine Freigabe");
+            anyhow::bail!("Could not read production; approval denied");
         }
         if status.is_some() && output.is_some() {
             break;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    let (read, raw) = output.context("Fingerprint-Leser fehlgeschlagen")?;
+    let (read, raw) = output.context("Fingerprint reader failed")?;
     read?;
-    ensure!(
-        raw.len() <= 131072,
-        "Fingerprint überschreitet Ausgabegrenze"
-    );
+    ensure!(raw.len() <= 131072, "Fingerprint exceeds output limit");
     Ok(raw)
 }
 fn script(production_only: bool) -> String {

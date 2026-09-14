@@ -39,7 +39,7 @@ impl Default for ContractsState {
                 Ok(book) => (book, None),
                 Err(e) => (
                     Book::default(),
-                    Some(format!("Wiederherstellungspläne nicht lesbar: {e}")),
+                    Some(format!("Cannot read recovery plans: {e}")),
                 ),
             };
         Self {
@@ -98,12 +98,12 @@ fn contract_matches(contract: &Contract, plan: &ExecutionPlan, refs: &[String]) 
 
 fn status_label(status: Readiness) -> &'static str {
     match status {
-        Readiness::Ready => "Bereit laut letztem Vergleich",
-        Readiness::CheckDue => "Produktionsvergleich fällig",
-        Readiness::RehearsalDue => "Neue Generalprobe fällig",
-        Readiness::Changed => "Änderung erkannt — Nachweise entwertet",
-        Readiness::Unknown => "Vergleich fehlgeschlagen — Zustand unklar",
-        Readiness::Paused => "Automatische Vergleiche pausiert",
+        Readiness::Ready => "Ready based on last comparison",
+        Readiness::CheckDue => "Production comparison due",
+        Readiness::RehearsalDue => "New rehearsal due",
+        Readiness::Changed => "Change detected — evidence invalidated",
+        Readiness::Unknown => "Comparison failed — state unclear",
+        Readiness::Paused => "Automatic comparisons paused",
     }
 }
 
@@ -113,7 +113,7 @@ impl AivanaApp {
             .and_then(|p| self.contracts.book.save(&p));
         if let Err(e) = &result {
             self.contracts.error =
-                Some(format!("Pläne nicht gespeichert; Freigaben gesperrt: {e}"));
+                Some(format!("Plans not saved; approvals blocked: {e}"));
             self.contracts.monitoring = false;
             if let Some(worker) = &self.contracts.worker {
                 worker.cancel.store(true, Ordering::Release);
@@ -129,7 +129,7 @@ impl AivanaApp {
     ) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.contracts.error.is_none(),
-            "Speicher der Wiederherstellungspläne gesperrt"
+            "Recovery plan storage locked"
         );
         if let Some(worker) = &self.contracts.worker {
             anyhow::ensure!(
@@ -139,14 +139,14 @@ impl AivanaApp {
                     .contracts
                     .iter()
                     .any(|c| c.id == worker.id && contract_matches(c, plan, refs)),
-                "Produktionsvergleich läuft; Ergebnis vor Freigabe abwarten"
+                "Production comparison running; wait for the result before approving"
             );
         }
         for contract in &self.contracts.book.contracts {
             if contract_matches(contract, plan, refs) {
                 anyhow::ensure!(
                     profiles_match(&contract.plan, &self.profiles),
-                    "Produktionsprofil geändert; neue Generalprobe erforderlich"
+                    "Production profile changed; new rehearsal required"
                 );
             }
         }
@@ -156,7 +156,7 @@ impl AivanaApp {
     fn start_contract_check(&mut self, id: Uuid) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.contracts.error.is_none() && self.contracts.worker.is_none(),
-            "Vergleich läuft oder Speicher gesperrt"
+            "Comparison running or storage locked"
         );
         let index = self
             .contracts
@@ -164,13 +164,13 @@ impl AivanaApp {
             .contracts
             .iter()
             .position(|c| c.id == id)
-            .ok_or_else(|| anyhow::anyhow!("Wiederherstellungsplan fehlt"))?;
+            .ok_or_else(|| anyhow::anyhow!("Recovery plan missing"))?;
         if !profiles_match(&self.contracts.book.contracts[index].plan, &self.profiles) {
             self.contracts.book.contracts[index].invalidate(
-                "Produktionsprofil geändert oder entfernt; Zuordnung und Generalprobe erneuern",
+                "Production profile changed or removed; renew mapping and rehearsal",
             );
             self.save_contracts()?;
-            anyhow::bail!("Produktionsprofil geändert; Vergleich nicht gestartet");
+            anyhow::bail!("Production profile changed; comparison not started");
         }
         let contract = self.contracts.book.contracts[index].clone();
         let started = Utc::now();
@@ -201,7 +201,7 @@ impl AivanaApp {
             });
         });
         self.contracts.notice =
-            "Lesender WinRM-Vergleich gestartet. Dienstzustände werden nicht geändert.".into();
+            "Read-only WinRM comparison started. Service states are not changed.".into();
         Ok(())
     }
 
@@ -217,14 +217,14 @@ impl AivanaApp {
                         started: worker.started,
                         finished: Utc::now(),
                         fingerprints: vec![],
-                        error: Some("Vergleichsprozess unterbrochen".into()),
+                        error: Some("Comparison process interrupted".into()),
                     }),
                 });
         if let Some(mut check) = received {
             let worker = self.contracts.worker.take().unwrap();
             if worker.cancel.load(Ordering::Acquire) {
                 check.fingerprints.clear();
-                check.error = Some("Vergleich abgebrochen".into());
+                check.error = Some("Comparison canceled".into());
             }
             if self.contracts.error.is_none() {
                 if let Some(contract) = self
@@ -235,10 +235,10 @@ impl AivanaApp {
                     .find(|c| c.id == worker.id)
                 {
                     if contract.revision != worker.revision {
-                        self.contracts.notice = "Veraltete Vergleichsantwort verworfen; Plan wurde zwischenzeitlich geändert.".into();
+                        self.contracts.notice = "Outdated comparison response discarded; plan changed in the meantime.".into();
                     } else {
                         let result = if !profiles_match(&contract.plan, &self.profiles) {
-                            contract.invalidate("Produktionsprofil während der Prüfung geändert; neue Generalprobe erforderlich");
+                            contract.invalidate("Production profile changed during check; new rehearsal required");
                             Ok(())
                         } else {
                             contract.apply_check(worker.revision, check, Utc::now())
@@ -250,7 +250,7 @@ impl AivanaApp {
                                 let _ = self.save_contracts();
                             }
                             Err(e) => {
-                                contract.invalidate("Ungültige Vergleichsantwort; Nachweise bis zur neuen Generalprobe gesperrt");
+                                contract.invalidate("Invalid comparison response; evidence blocked until a new rehearsal");
                                 self.contracts.notice = e.to_string();
                                 let _ = self.save_contracts();
                             }
@@ -269,7 +269,7 @@ impl AivanaApp {
         let mut changed = false;
         for contract in &mut self.contracts.book.contracts {
             if contract.invalidated.is_none() && !profiles_match(&contract.plan, &self.profiles) {
-                contract.invalidate("Produktionsprofil geändert oder entfernt; neue Zuordnung und Generalprobe erforderlich");
+                contract.invalidate("Production profile changed or removed; new mapping and rehearsal required");
                 changed = true;
             }
         }
@@ -286,7 +286,7 @@ impl AivanaApp {
     fn import_recovery_contract(&mut self) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.contracts.error.is_none() && self.contracts.worker.is_none(),
-            "Vergleich läuft oder Speicher gesperrt"
+            "Comparison running or storage locked"
         );
         let (plan, refs) = self.promotion_contract_source()?;
         crate::promotion::check_rehearsal_receipts(&plan, &refs, Utc::now())?;
@@ -303,7 +303,7 @@ impl AivanaApp {
             contract.id
         } else {
             let name = if self.contracts.name.trim().is_empty() {
-                format!("{} · {} Ziele", plan.service, plan.mappings.len())
+                format!("{} · {} targets", plan.service, plan.mappings.len())
             } else {
                 self.contracts.name.trim().into()
             };
@@ -315,31 +315,31 @@ impl AivanaApp {
         self.save_contracts()?;
         self.contracts.selected = Some(id);
         self.contracts.settings_for = None;
-        self.contracts.notice = "Bestandene Generalprobe übernommen. Automatische Vergleiche benötigen die separate Sitzungsfreigabe.".into();
+        self.contracts.notice = "Passed rehearsal adopted. Automatic comparisons require separate approval for this session.".into();
         Ok(())
     }
 
     pub(super) fn contracts_view(&mut self, ui: &mut Ui) {
-        ui.heading("Lebende Wiederherstellungspläne");
-        ui.label("Erprobte Reparaturen aktuell halten: Änderungen erkennen, Nachweise entwerten und Generalproben rechtzeitig erneuern.");
-        ui.small("Bereitschaft beschreibt den letzten Nachweis. Produktionsänderungen benötigen weiterhin frische Belege (höchstens eine Stunde) und eine eigene Freigabe.");
+        ui.heading("Living recovery plans");
+        ui.label("Keep tested repairs current: detect changes, invalidate evidence, and renew rehearsals on time.");
+        ui.small("Readiness describes the last evidence. Production changes still require fresh evidence (no more than one hour old) and separate approval.");
         if let Some(e) = &self.contracts.error {
             ui.colored_label(tw::RED_600, e);
         }
         let mut monitoring = self.contracts.monitoring;
         if ui.add_enabled(self.contracts.error.is_none(), egui::Checkbox::new(&mut monitoring,
-            "Für diese Relayne-Sitzung fällige Produktionsvergleiche über WinRM automatisch erlauben")).changed() {
+            "Allow automatic WinRM production comparisons when due during this Relayne session")).changed() {
             self.contracts.monitoring = monitoring;
             if !monitoring {
                 if let Some(worker) = &self.contracts.worker { worker.cancel.store(true, Ordering::Release); }
             }
         }
-        ui.small("Nur Metadaten der festgelegten Produktionsziele lesen, mit der aktuellen Windows-Identität. Keine Gastzugänge, keine automatischen Dienständerungen. Freigabe wird beim Neustart zurückgesetzt.");
+        ui.small("Read only metadata from the specified production targets using the current Windows identity. No guest credentials or automatic service changes. Approval resets on restart.");
         if let Some(worker) = &self.contracts.worker {
             ui.horizontal_wrapped(|ui| {
                 ui.spinner();
-                ui.label("Produktionsvergleich läuft …");
-                if ui.button("Vergleich abbrechen").clicked() {
+                ui.label("Production comparison running …");
+                if ui.button("Cancel comparison").clicked() {
                     worker.cancel.store(true, Ordering::Release);
                 }
             });
@@ -347,7 +347,7 @@ impl AivanaApp {
         if ui
             .add_enabled(
                 self.contracts.worker.is_none(),
-                egui::Button::new("Gespeicherte Pläne neu laden"),
+                egui::Button::new("Reload saved plans"),
             )
             .clicked()
         {
@@ -361,7 +361,7 @@ impl AivanaApp {
                     self.contracts.settings_for = None;
                     self.contracts.monitoring = false;
                     self.contracts.notice =
-                        "Neu geladen; automatische Vergleiche erneut freigeben.".into();
+                        "Reloaded; approve automatic comparisons again.".into();
                 }
                 Err(e) => self.contracts.error = Some(e.to_string()),
             }
@@ -386,12 +386,12 @@ impl AivanaApp {
             });
         ui.horizontal_wrapped(|ui| {
             for (label, count) in [
-                "Bereit",
-                "Vergleich fällig",
-                "Generalprobe fällig",
-                "Geändert",
-                "Unklar",
-                "Pausiert",
+                "Ready",
+                "Comparison due",
+                "Rehearsal due",
+                "Changed",
+                "Unclear",
+                "Paused",
             ]
             .into_iter()
             .zip(counts)
@@ -403,19 +403,19 @@ impl AivanaApp {
             }
         });
         ui.separator();
-        ui.collapsing("Bestandene Generalprobe als Plan übernehmen", |ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.contracts.name).char_limit(256).hint_text("Name für neuen Wiederherstellungsplan"));
-            ui.label("Übernimmt den aktuellen Entwurf aus Klon → Produktion mit frischen Belegen. Derselbe Plan wird mit neuen Belegen erneuert; geänderte Zielzuordnungen erzeugen einen neuen Plan.");
+        ui.collapsing("Adopt passed rehearsal as a plan", |ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.contracts.name).char_limit(256).hint_text("Name for new recovery plan"));
+            ui.label("Adopts the current Clone → production draft with fresh evidence. The same plan is renewed with new evidence; changed target mappings create a new plan.");
             ui.horizontal_wrapped(|ui| {
-                if ui.button("Klon → Produktion öffnen").clicked() { self.view = View::Promotion; }
-                if ui.add_enabled(self.contracts.error.is_none() && self.contracts.worker.is_none(), egui::Button::new("Bestandene Generalprobe übernehmen / erneuern")).clicked() {
+                if ui.button("Open Clone → production").clicked() { self.view = View::Promotion; }
+                if ui.add_enabled(self.contracts.error.is_none() && self.contracts.worker.is_none(), egui::Button::new("Adopt / renew passed rehearsal")).clicked() {
                     if let Err(e) = self.import_recovery_contract() { self.contracts.notice = e.to_string(); }
                 }
             });
         });
         if self.contracts.book.contracts.is_empty() {
             ui.add_space(16.0);
-            ui.label("Noch keine Wiederherstellungspläne. Zuerst eine Generalprobe in Klon → Produktion abschließen und hier übernehmen.");
+            ui.label("No recovery plans yet. Complete a rehearsal in Clone → production first, then adopt it here.");
         }
         for contract in &self.contracts.book.contracts {
             let label = format!(
@@ -445,18 +445,18 @@ impl AivanaApp {
                 ui.colored_label(tw::RED_600, reason);
             }
             ui.label(format!(
-                "Letzte Generalprobe: {} UTC · nächste fällig: {} UTC",
-                contract.baseline.rehearsed_at.format("%d.%m.%Y %H:%M"),
-                contract.next_rehearsal_at().format("%d.%m.%Y %H:%M")
+                "Last rehearsal: {} UTC · next due: {} UTC",
+                contract.baseline.rehearsed_at.format("%m/%d/%Y %H:%M"),
+                contract.next_rehearsal_at().format("%m/%d/%Y %H:%M")
             ));
             ui.label(format!(
-                "Nächster Produktionsvergleich: {} UTC",
-                contract.next_check_at().format("%d.%m.%Y %H:%M")
+                "Next production comparison: {} UTC",
+                contract.next_check_at().format("%m/%d/%Y %H:%M")
             ));
             if let Some(check) = &contract.last_check {
                 ui.label(format!(
-                    "Letzter Vergleich: {} UTC",
-                    check.finished.format("%d.%m.%Y %H:%M")
+                    "Last comparison: {} UTC",
+                    check.finished.format("%m/%d/%Y %H:%M")
                 ));
                 if let Some(error) = &check.error {
                     ui.colored_label(tw::RED_600, error);
@@ -468,11 +468,11 @@ impl AivanaApp {
                     mapping.production.name, mapping.production.host, mapping.staging.name
                 ));
             }
-            ui.collapsing("Prüfumfang und Nachweisbindung", |ui| {
-                ui.label("OS-Version/Build, Architektur, Dienstdatei und Version, Konfigurationshash, Startmodus und Abhängigkeiten. Änderungen außerhalb dieses Prüfumfangs sind nicht abgedeckt.");
+            ui.collapsing("Check scope and evidence binding", |ui| {
+                ui.label("OS version/build, architecture, service file and version, configuration hash, startup mode, and dependencies. Changes outside this scope are not covered.");
                 ui.monospace(contract.plan.hash().unwrap_or_default());
                 for reference in &contract.references { ui.small(reference); }
-                ui.small(format!("Dauerhaft entwertete Belegverweise: {}", contract.revoked_references.len()));
+                ui.small(format!("Permanently invalidated evidence references: {}", contract.revoked_references.len()));
             });
             if self.contracts.settings_for != Some((contract.id, contract.revision)) {
                 self.contracts.settings_for = Some((contract.id, contract.revision));
@@ -482,28 +482,28 @@ impl AivanaApp {
             }
             ui.add_enabled_ui(self.contracts.worker.is_none() && self.contracts.error.is_none(), |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    ui.label("Vergleich alle"); ui.add(egui::DragValue::new(&mut self.contracts.check_minutes).range(5..=1440)); ui.label("Minuten");
-                    ui.label("Generalprobe alle"); ui.add(egui::DragValue::new(&mut self.contracts.rehearsal_hours).range(1..=720)); ui.label("Stunden");
+                    ui.label("Compare every"); ui.add(egui::DragValue::new(&mut self.contracts.check_minutes).range(5..=1440)); ui.label("minutes");
+                    ui.label("Rehearse every"); ui.add(egui::DragValue::new(&mut self.contracts.rehearsal_hours).range(1..=720)); ui.label("hours");
                 });
-                ui.checkbox(&mut self.contracts.enabled, "Diesen Plan in automatische Vergleiche einbeziehen");
-                if ui.button("Intervalle speichern").clicked() {
+                ui.checkbox(&mut self.contracts.enabled, "Include this plan in automatic comparisons");
+                if ui.button("Save intervals").clicked() {
                     let current = self.contracts.book.contracts.iter_mut().find(|c| c.id == contract.id).unwrap();
                     let result = current.set_settings(self.contracts.check_minutes, self.contracts.rehearsal_hours, self.contracts.enabled)
                         .and_then(|_| self.save_contracts());
-                    self.contracts.notice = result.map(|_| "Intervalle gespeichert. Die Generalprobe wurde dadurch nicht erneuert.".into()).unwrap_or_else(|e| e.to_string());
+                    self.contracts.notice = result.map(|_| "Intervals saved. This did not renew the rehearsal.".into()).unwrap_or_else(|e| e.to_string());
                 }
                 ui.horizontal_wrapped(|ui| {
-                    if ui.button("Jetzt einmal über WinRM lesend prüfen").clicked() {
+                    if ui.button("Run one read-only WinRM check now").clicked() {
                         if let Err(e) = self.start_contract_check(contract.id) { self.contracts.notice = e.to_string(); }
                     }
-                    if ui.button("Neue Generalprobe vorbereiten …").clicked() {
+                    if ui.button("Prepare new rehearsal …").clicked() {
                         match self.prepare_contract_rehearsal(&contract.plan) {
                             Ok(()) => self.view = View::Promotion,
                             Err(e) => self.contracts.notice = e.to_string(),
                         }
                     }
                 });
-                ui.small("Eine neue Generalprobe ersetzt den bisherigen Testentwurf und benötigt neue Gastzugänge sowie ausdrückliche Ausführungsfreigaben.");
+                ui.small("A new rehearsal replaces the previous test draft and requires new guest credentials and explicit execution approvals.");
             });
         }
         ui.separator();

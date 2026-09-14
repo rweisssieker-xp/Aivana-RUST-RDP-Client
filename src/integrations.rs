@@ -40,7 +40,7 @@ struct InventoryRow {
 /// passwords and arbitrary extra fields can never restore an imported secret.
 pub fn parse_inventory(text: &str, csv: bool) -> Result<Vec<ConnectionProfile>, String> {
     if text.len() > INVENTORY_LIMIT {
-        return Err("Inventar überschreitet 2 MiB.".into());
+        return Err("Inventory exceeds 2 MiB.".into());
     }
     let rows: Vec<InventoryRow> = if csv {
         let mut reader = csv::Reader::from_reader(text.as_bytes());
@@ -48,13 +48,13 @@ pub fn parse_inventory(text: &str, csv: bool) -> Result<Vec<ConnectionProfile>, 
             .deserialize()
             .take(ROW_LIMIT + 1)
             .collect::<Result<_, _>>()
-            .map_err(|_| "CSV ungültig; Spalten name,host erforderlich.".to_string())?
+            .map_err(|_| "Invalid CSV; name and host columns are required.".to_string())?
     } else {
         serde_json::from_str(text.trim_start_matches('\u{feff}'))
-            .map_err(|_| "JSON ungültig; Array mit name und host erforderlich.".to_string())?
+            .map_err(|_| "Invalid JSON; an array containing name and host is required.".to_string())?
     };
     if rows.len() > ROW_LIMIT {
-        return Err("Maximal 2000 Inventareinträge pro Import.".into());
+        return Err("At most 2,000 inventory entries are allowed per import.".into());
     }
     rows.into_iter()
         .enumerate()
@@ -63,22 +63,22 @@ pub fn parse_inventory(text: &str, csv: bool) -> Result<Vec<ConnectionProfile>, 
                 "" | "rdp" => Protocol::Rdp,
                 "ssh" => Protocol::Ssh,
                 "vnc" => Protocol::Vnc,
-                _ => return Err(format!("Zeile {}: unbekanntes Protokoll.", index + 1)),
+                _ => return Err(format!("Row {}: unknown protocol.", index + 1)),
             };
             let host = row.host.trim().trim_end_matches('.').to_ascii_lowercase();
             let port = row.port.unwrap_or(protocol.default_port());
             Endpoint::new(&host, "", port)
-                .map_err(|_| format!("Zeile {}: ungültiger Host/Port.", index + 1))?;
+                .map_err(|_| format!("Row {}: invalid host or port.", index + 1))?;
             for value in [&row.name, &row.username, &row.domain, &row.group] {
                 if value.len() > 256 || value.chars().any(char::is_control) {
                     return Err(format!(
-                        "Zeile {}: Metadaten zu lang oder mit Steuerzeichen.",
+                        "Row {}: metadata is too long or contains control characters.",
                         index + 1
                     ));
                 }
             }
             if row.name.trim().is_empty() {
-                return Err(format!("Zeile {}: Name fehlt.", index + 1));
+                return Err(format!("Row {}: name is missing.", index + 1));
             }
             let mut profile = ConnectionProfile::sample(row.name.trim(), &host, &row.group, false);
             profile.username = row.username;
@@ -132,8 +132,8 @@ pub fn review_inventory(
 pub fn ad_inventory_command() -> CommandSpec {
     CommandSpec {
         program: "powershell.exe".into(),
-        args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new(); Import-Module ActiveDirectory -ErrorAction Stop; $computers=@(Get-ADComputer -Filter * -Properties DNSHostName -ResultSetSize 501); if($computers.Count -gt 500){throw 'Mehr als 500 Computer; bitte gefiltertes Inventar als JSON/CSV importieren.'}; $rows=@($computers | Where-Object {$_.DNSHostName} | ForEach-Object { [pscustomobject]@{name=$_.Name;host=$_.DNSHostName;group='Active Directory';protocol='rdp'} }); ConvertTo-Json -InputObject $rows -Compress"].into_iter().map(str::to_string).collect(),
-        stdin: String::new(), source: "Active Directory / aktuelle Windows-Identität".into(),
+        args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new(); Import-Module ActiveDirectory -ErrorAction Stop; $computers=@(Get-ADComputer -Filter * -Properties DNSHostName -ResultSetSize 501); if($computers.Count -gt 500){throw 'More than 500 computers; import a filtered inventory as JSON/CSV instead.'}; $rows=@($computers | Where-Object {$_.DNSHostName} | ForEach-Object { [pscustomobject]@{name=$_.Name;host=$_.DNSHostName;group='Active Directory';protocol='rdp'} }); ConvertTo-Json -InputObject $rows -Compress"].into_iter().map(str::to_string).collect(),
+        stdin: String::new(), source: "Active Directory / current Windows identity".into(),
     }
 }
 
@@ -145,20 +145,20 @@ pub fn entra_inventory_command() -> CommandSpec {
         stdin:r#"$ErrorActionPreference='Stop'
 [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false)
 try {
-  if (-not $env:AIVANA_GRAPH_ACCESS_TOKEN) { throw 'Graph token fehlt' }
+  if (-not $env:AIVANA_GRAPH_ACCESS_TOKEN) { throw 'Graph token missing' }
   Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
   Import-Module Microsoft.Graph.Identity.DirectoryManagement -ErrorAction Stop
   $token=ConvertTo-SecureString $env:AIVANA_GRAPH_ACCESS_TOKEN -AsPlainText -Force
   Connect-MgGraph -AccessToken $token -NoWelcome -ErrorAction Stop | Out-Null
   $devices=@(Get-MgDevice -Top 501 -Property DisplayName,OperatingSystem -ErrorAction Stop)
-  if ($devices.Count -gt 500) { throw 'Inventarlimit' }
-  $rows=@($devices | Where-Object {$_.OperatingSystem -eq 'Windows'} | ForEach-Object {[pscustomobject]@{name=$_.DisplayName;host=$_.DisplayName;group='Entra (Zielname prüfen)';protocol='rdp'}})
+  if ($devices.Count -gt 500) { throw 'Inventory limit' }
+  $rows=@($devices | Where-Object {$_.OperatingSystem -eq 'Windows'} | ForEach-Object {[pscustomobject]@{name=$_.DisplayName;host=$_.DisplayName;group='Entra (review host name)';protocol='rdp'}})
   ConvertTo-Json -InputObject $rows -Compress
   Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
   exit 0
-} catch { [Console]::Error.WriteLine('Entra-Abfrage fehlgeschlagen. Graph-Module, AIVANA_GRAPH_ACCESS_TOKEN, Device.Read.All und Grenze von 500 Geräten prüfen.'); exit 1 }
+} catch { [Console]::Error.WriteLine('Entra query failed. Check Graph modules, AIVANA_GRAPH_ACCESS_TOKEN, Device.Read.All, and the 500-device limit.'); exit 1 }
 "#.into(),
-        source:"Entra ID / explizites Graph-Zugriffstoken; Anzeigenamen sind unbestätigte Zielkandidaten".into(),
+        source:"Entra ID / explicitly supplied Graph access token; display names are unverified host candidates".into(),
     }
 }
 
@@ -184,7 +184,7 @@ impl GroupRule {
 
 pub fn bitwarden_command(item_id: &str) -> Result<Command, String> {
     let id = uuid::Uuid::parse_str(item_id)
-        .map_err(|_| "Bitwarden-Eintrag benötigt eine gültige UUID.".to_string())?;
+        .map_err(|_| "A Bitwarden item requires a valid UUID.".to_string())?;
     let mut command = Command::new("bw.exe");
     command.args(["get", "item", &id.to_string(), "--nointeraction"]);
     command
@@ -210,16 +210,16 @@ struct VaultLogin {
 }
 fn parse_login(bytes: &[u8]) -> Result<SecretCredential, String> {
     let item: VaultItem =
-        serde_json::from_slice(bytes).map_err(|_| "Vault-Antwort ist ungültig.".to_string())?;
-    let login = item.login.ok_or("Vault-Eintrag ist kein Login.")?;
+        serde_json::from_slice(bytes).map_err(|_| "Invalid vault response.".to_string())?;
+    let login = item.login.ok_or("The vault item is not a login.")?;
     let username = login
         .username
         .filter(|s| !s.is_empty())
-        .ok_or("Vault-Login hat keinen Benutzernamen.")?;
+        .ok_or("The vault login has no username.")?;
     let password = login
         .password
         .filter(|s| !s.is_empty())
-        .ok_or("Vault-Login hat kein Passwort.")?;
+        .ok_or("The vault login has no password.")?;
     Ok(SecretCredential {
         username,
         password,
@@ -247,7 +247,7 @@ impl VaultRequest {
         match self.receiver.try_recv() {
             Ok(result) => Some(result),
             Err(mpsc::TryRecvError::Empty) => None,
-            Err(_) => Some(Err("Vault-Worker beendet.".into())),
+            Err(_) => Some(Err("Vault worker ended.".into())),
         }
     }
     pub fn cancel(&self) {
@@ -262,19 +262,19 @@ impl Drop for VaultRequest {
 
 #[cfg(not(windows))]
 fn fetch_login(_command: Command, _cancel: Arc<AtomicBool>) -> Result<SecretCredential, String> {
-    Err("Diese Vault-Integration benötigt Windows und DPAPI.".into())
+    Err("This vault integration requires Windows and DPAPI.".into())
 }
 
 #[cfg(windows)]
 fn fetch_login(mut command: Command, cancel: Arc<AtomicBool>) -> Result<SecretCredential, String> {
     if std::env::var_os("BW_SESSION").is_none_or(|value| value.is_empty()) {
-        return Err("BW_SESSION fehlt. Bitwarden extern entsperren und Relayne mit geerbter Sitzung starten.".into());
+        return Err("BW_SESSION is missing. Unlock Bitwarden externally and start Relayne with the inherited session.".into());
     }
     let mut child = command.spawn().map_err(|_| {
-        "bw.exe konnte nicht gestartet werden. Offizielle Bitwarden CLI im PATH erforderlich."
+        "Could not start bw.exe. The official Bitwarden CLI must be on PATH."
             .to_string()
     })?;
-    let mut reader = child.stdout.take().ok_or("Vault-Ausgabekanal fehlt.")?;
+    let mut reader = child.stdout.take().ok_or("The vault output channel is missing.")?;
     let mut bytes = Vec::new();
     let mut buffer = [0u8; 4096];
     let started = Instant::now();
@@ -285,7 +285,7 @@ fn fetch_login(mut command: Command, cancel: Arc<AtomicBool>) -> Result<SecretCr
         {
             let _ = child.kill();
             let _ = child.wait();
-            break Err("Vault-Abruf abgebrochen, Zeitlimit oder Größenlimit erreicht.".into());
+            break Err("Vault retrieval was canceled or reached its time or size limit.".into());
         }
         // The sole pipe owner reads only bytes known to be available. No blocking
         // reader thread survives cancellation even if a descendant holds stdout.
@@ -294,7 +294,7 @@ fn fetch_login(mut command: Command, cancel: Arc<AtomicBool>) -> Result<SecretCr
             Err(_) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                break Err("Vault-Ausgabe nicht verfügbar.".into());
+                break Err("Vault output is unavailable.".into());
             }
         };
         if available > 0 {
@@ -304,7 +304,7 @@ fn fetch_login(mut command: Command, cancel: Arc<AtomicBool>) -> Result<SecretCr
                 _ => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    break Err("Vault-Ausgabe unvollständig.".into());
+                    break Err("Vault output is incomplete.".into());
                 }
             }
             continue;
@@ -312,7 +312,7 @@ fn fetch_login(mut command: Command, cancel: Arc<AtomicBool>) -> Result<SecretCr
         match child.try_wait() {
             Ok(Some(status)) => {
                 if !status.success() {
-                    break Err("Vault-Abruf fehlgeschlagen. Sitzung, Eintrag-ID und Berechtigung extern prüfen.".into());
+                    break Err("Vault retrieval failed. Check the session, item ID, and permissions externally.".into());
                 }
                 // Recheck after process exit so its final write cannot be lost.
                 if pipe_available(&reader).unwrap_or(0) > 0 {
@@ -324,7 +324,7 @@ fn fetch_login(mut command: Command, cancel: Arc<AtomicBool>) -> Result<SecretCr
             Err(_) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                break Err("Vault-Prozessstatus nicht verfügbar.".into());
+                break Err("Vault process status is unavailable.".into());
             }
         }
     };

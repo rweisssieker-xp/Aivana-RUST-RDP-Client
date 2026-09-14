@@ -194,13 +194,13 @@ impl DriveBackend {
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b == b'_')
             {
-                bail!("Freigabename: 1–7 Buchstaben/Ziffern/Unterstriche erforderlich");
+                bail!("Share name: 1–7 letters, digits, or underscores required");
             }
             if !names.insert(folder.name.to_ascii_lowercase()) {
-                bail!("Freigabenamen müssen eindeutig sein");
+                bail!("Share names must be unique");
             }
             let root = Dir::open_ambient_dir(&folder.path, cap_std::ambient_authority())
-                .context("Freigabeordner konnte nicht geöffnet werden")?;
+                .context("Unable to open shared folder")?;
             shares.insert(
                 index as u32 + 1,
                 Share {
@@ -641,12 +641,12 @@ impl RdpdrBackend for DriveBackend {
                 .shares
                 .get(&response.device_id)
                 .map(|s| s.name.as_str())
-                .unwrap_or("Unbekannt");
+                .unwrap_or("Unknown");
             let message = if response.result_code == NtStatus::SUCCESS {
-                format!("Ordnerfreigabe {name} vom Server bestätigt")
+                format!("Folder share {name} confirmed by server")
             } else {
                 format!(
-                    "Ordnerfreigabe {name} vom Server abgelehnt ({:?})",
+                    "Folder share {name} rejected by server ({:?})",
                     response.result_code
                 )
             };

@@ -9,32 +9,32 @@ use std::{collections::HashMap, path::Path};
 use uuid::Uuid;
 
 pub fn import_profiles(path: &Path) -> Result<Vec<ConnectionProfile>> {
-    let bytes = std::fs::read(path).context("Profildatei konnte nicht gelesen werden")?;
+    let bytes = std::fs::read(path).context("Could not read profile file")?;
     import_bytes(extension(path)?, &bytes)
 }
 pub fn export_profiles(path: &Path, profiles: &[ConnectionProfile]) -> Result<()> {
     let bytes = export_bytes(extension(path)?, profiles)?;
-    std::fs::write(path, bytes).context("Profildatei konnte nicht geschrieben werden")
+    std::fs::write(path, bytes).context("Could not write profile file")
 }
 fn extension(path: &Path) -> Result<&str> {
     path.extension()
         .and_then(|v| v.to_str())
-        .context("Dateiendung .rdp, .csv oder .json erforderlich")
+        .context("File extension .rdp, .csv, or .json required")
 }
 
 pub fn import_bytes(format: &str, bytes: &[u8]) -> Result<Vec<ConnectionProfile>> {
     if bytes.len() > 16 * 1024 * 1024 {
-        bail!("Profildatei überschreitet 16 MiB");
+        bail!("Profile file exceeds 16 MiB");
     }
     let text = decode_text(bytes)?;
     let mut profiles = match format.to_ascii_lowercase().as_str() {
         "rdp" => vec![parse_rdp(&text)?],
         "csv" => parse_csv(&text)?,
         "json" => parse_json(&text)?,
-        _ => bail!("Dateiformat muss .rdp, .csv oder .json sein"),
+        _ => bail!("File format must be .rdp, .csv, or .json"),
     };
     if profiles.is_empty() {
-        bail!("Datei enthält keine Profile");
+        bail!("File contains no profiles");
     }
     for profile in &mut profiles {
         validate_profile(profile)?;
@@ -44,7 +44,7 @@ pub fn import_bytes(format: &str, bytes: &[u8]) -> Result<Vec<ConnectionProfile>
 }
 pub fn export_bytes(format: &str, profiles: &[ConnectionProfile]) -> Result<Vec<u8>> {
     if profiles.is_empty() {
-        bail!("Keine Profile ausgewählt");
+        bail!("No profiles selected");
     }
     for profile in profiles {
         validate_profile(profile)?;
@@ -57,12 +57,12 @@ pub fn export_bytes(format: &str, profiles: &[ConnectionProfile]) -> Result<Vec<
         "rdp" => {
             if profiles.len() != 1 {
                 bail!(
-                    "Eine .rdp-Datei kann nur ein Profil enthalten; für mehrere Profile CSV/JSON verwenden"
+                    "An .rdp file can contain only one profile; use CSV/JSON for multiple profiles"
                 );
             }
             Ok(export_rdp(&profiles[0])?.into_bytes())
         }
-        _ => bail!("Dateiformat muss .rdp, .csv oder .json sein"),
+        _ => bail!("File format must be .rdp, .csv, or .json"),
     }
 }
 fn sanitize(profile: &mut ConnectionProfile) {
@@ -78,15 +78,15 @@ fn sanitize(profile: &mut ConnectionProfile) {
 fn validate_profile(profile: &ConnectionProfile) -> Result<()> {
     validate_host(&profile.host)?;
     if profile.port == 0 {
-        bail!("Port muss zwischen 1 und 65535 liegen");
+        bail!("Port must be between 1 and 65535");
     }
     if profile.name.trim().is_empty() {
-        bail!("Profilname fehlt");
+        bail!("Profile name is missing");
     }
     if profile.options.gateway.enabled {
         validate_host(&profile.options.gateway.host)?;
         if profile.options.gateway.port == 0 {
-            bail!("Gateway-Port darf nicht 0 sein");
+            bail!("Gateway port cannot be 0");
         }
     }
     Ok(())
@@ -117,7 +117,7 @@ fn portable_value(profile: &ConnectionProfile) -> Result<Value> {
 fn from_value(mut value: Value) -> Result<ConnectionProfile> {
     let object = value
         .as_object_mut()
-        .context("Profil muss ein JSON-Objekt sein")?;
+        .context("Profile must be a JSON object")?;
     for key in [
         "password",
         "credential_id",
@@ -131,38 +131,38 @@ fn from_value(mut value: Value) -> Result<ConnectionProfile> {
     let host = object
         .get("host")
         .and_then(Value::as_str)
-        .context("Profil benötigt host")?;
+        .context("Profile requires host")?;
     validate_host(host)?;
     let mut base =
         serde_json::to_value(ConnectionProfile::sample(host, host, "Importiert", false))?;
     base.as_object_mut().unwrap().extend(object.clone());
-    Ok(serde_json::from_value(base).context("Ungültige Profilfelder")?)
+    Ok(serde_json::from_value(base).context("Invalid profile fields")?)
 }
 fn parse_json(text: &str) -> Result<Vec<ConnectionProfile>> {
-    let value: Value = serde_json::from_str(text).context("Ungültige JSON-Datei")?;
+    let value: Value = serde_json::from_str(text).context("Invalid JSON file")?;
     let values = match value {
         Value::Array(items) => items,
         Value::Object(mut obj) if obj.contains_key("profiles") => {
             if let Some(version) = obj.get("version") {
                 if version.as_u64() != Some(1) {
-                    bail!("Unbekannte Profilformat-Version");
+                    bail!("Unknown profile format version");
                 }
             }
             obj.remove("profiles")
                 .unwrap()
                 .as_array()
-                .context("profiles muss ein Array sein")?
+                .context("profiles must be an array")?
                 .clone()
         }
         Value::Object(_) => vec![value],
-        _ => bail!("JSON muss Profile enthalten"),
+        _ => bail!("JSON must contain profiles"),
     };
     values.into_iter().map(from_value).collect()
 }
 fn decode_text(bytes: &[u8]) -> Result<String> {
     if bytes.starts_with(&[0xff, 0xfe]) || bytes.starts_with(&[0xfe, 0xff]) {
         if bytes.len() % 2 != 0 {
-            bail!("Unvollständige UTF-16-Datei");
+            bail!("Incomplete UTF-16 file");
         }
         let little = bytes[0] == 0xff;
         let units: Vec<_> = bytes[2..]
@@ -175,40 +175,40 @@ fn decode_text(bytes: &[u8]) -> Result<String> {
                 }
             })
             .collect();
-        Ok(String::from_utf16(&units).context("Ungültiges UTF-16")?)
+        Ok(String::from_utf16(&units).context("Invalid UTF-16")?)
     } else {
         Ok(
             std::str::from_utf8(bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes))
-                .context("Datei muss UTF-8 oder UTF-16 mit BOM verwenden")?
+                .context("File must use UTF-8 or UTF-16 with a BOM")?
                 .to_owned(),
         )
     }
 }
 fn parse_endpoint(value: &str, default_port: u16) -> Result<(String, u16)> {
     let (host, port) = if value.starts_with('[') {
-        let end = value.find(']').context("IPv6-Klammer fehlt")?;
+        let end = value.find(']').context("Missing IPv6 bracket")?;
         let tail = &value[end + 1..];
         let port = if tail.is_empty() {
             default_port
         } else {
             tail.strip_prefix(':')
-                .context("Ungültiger Host/Port")?
+                .context("Invalid host/port")?
                 .parse::<u16>()
-                .context("Ungültiger Port")?
+                .context("Invalid port")?
         };
         (value[1..end].to_owned(), port)
     } else if value.matches(':').count() == 1 {
         let (host, port) = value.rsplit_once(':').unwrap();
         (
             host.to_owned(),
-            port.parse::<u16>().context("Ungültiger Port")?,
+            port.parse::<u16>().context("Invalid port")?,
         )
     } else {
         (value.to_owned(), default_port)
     };
     validate_host(&host)?;
     if port == 0 {
-        bail!("Port darf nicht 0 sein");
+        bail!("Port cannot be 0");
     }
     Ok((host, port))
 }
@@ -217,21 +217,21 @@ fn parse_rdp(text: &str) -> Result<ConnectionProfile> {
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
         let mut parts = line.splitn(3, ':');
         let key = parts.next().unwrap().trim().to_ascii_lowercase();
-        let kind = parts.next().context("Ungültige .rdp-Zeile")?;
-        let value = parts.next().context("Ungültige .rdp-Zeile")?;
+        let kind = parts.next().context("Invalid .rdp line")?;
+        let value = parts.next().context("Invalid .rdp line")?;
         if !["s", "i", "b"].contains(&kind) {
-            bail!("Ungültiger .rdp-Feldtyp");
+            bail!("Invalid .rdp field type");
         }
         settings.insert(key, value.to_owned());
     }
     let address = settings
         .get("full address")
-        .context(".rdp benötigt full address")?;
+        .context(".rdp requires full address")?;
     let (host, port) = parse_endpoint(address, 3389)?;
     let mut p = ConnectionProfile::sample(&host, &host, "Importiert", false);
     p.port = port;
     if let Some(value) = settings.get("server port") {
-        p.port = value.parse().context("Ungültiger server port")?;
+        p.port = value.parse().context("Invalid server port")?;
     }
     if let Some(value) = settings.get("username") {
         p.username = value.clone();
@@ -240,10 +240,10 @@ fn parse_rdp(text: &str) -> Result<ConnectionProfile> {
         p.domain = value.clone();
     }
     if let Some(value) = settings.get("desktopwidth") {
-        p.options.width = value.parse().context("Ungültige Desktopbreite")?;
+        p.options.width = value.parse().context("Invalid desktop width")?;
     }
     if let Some(value) = settings.get("desktopheight") {
-        p.options.height = value.parse().context("Ungültige Desktophöhe")?;
+        p.options.height = value.parse().context("Invalid desktop height")?;
     }
     if let Some(value) = settings.get("redirectclipboard") {
         p.options.clipboard = parse_flag(value)?;
@@ -255,7 +255,7 @@ fn parse_rdp(text: &str) -> Result<ConnectionProfile> {
         p.options.audio_playback = match value.as_str() {
             "0" => true,
             "1" | "2" => false,
-            _ => bail!("Ungültiger Audiomodus"),
+            _ => bail!("Invalid audio mode"),
         };
     }
     if let Some(value) = settings.get("dynamic resolution") {
@@ -271,7 +271,7 @@ fn parse_rdp(text: &str) -> Result<ConnectionProfile> {
         p.options.gateway.enabled = match value.as_str() {
             "0" | "4" => false,
             "1" | "2" | "3" => true,
-            _ => bail!("Ungültige Gateway-Verwendung"),
+            _ => bail!("Invalid gateway usage"),
         };
     }
     Ok(p)
@@ -280,16 +280,16 @@ fn parse_flag(value: &str) -> Result<bool> {
     match value {
         "1" | "true" => Ok(true),
         "0" | "false" => Ok(false),
-        _ => bail!("Ungültiger Wahrheitswert"),
+        _ => bail!("Invalid Boolean value"),
     }
 }
 fn export_rdp(p: &ConnectionProfile) -> Result<String> {
     if p.protocol != Protocol::Rdp {
-        bail!(".rdp unterstützt nur RDP-Profile");
+        bail!(".rdp supports only RDP profiles");
     }
     for value in [&p.username, &p.domain] {
         if value.contains(['\r', '\n']) {
-            bail!(".rdp-Felder dürfen keine Zeilenumbrüche enthalten");
+            bail!(".rdp fields cannot contain line breaks");
         }
     }
     let host = if p.host.contains(':') {
@@ -331,32 +331,32 @@ fn parse_csv(text: &str) -> Result<Vec<ConnectionProfile>> {
     let headers = reader.headers()?.clone();
     let headers: Vec<_> = headers.iter().map(|s| s.to_ascii_lowercase()).collect();
     if !headers.iter().any(|h| h == "host") {
-        bail!("CSV benötigt die Spalte host");
+        bail!("CSV requires the host column");
     }
     let mut out = Vec::new();
     for row in reader.records() {
-        let row = row.context("Ungültige CSV-Zeile")?;
+        let row = row.context("Invalid CSV row")?;
         let mut obj = serde_json::Map::new();
         for (key, value) in headers.iter().zip(row.iter()) {
             if value.is_empty() {
                 continue;
             }
             let value = match key.as_str() {
-                "port" => json!(value.parse::<u16>().context("Ungültiger CSV-Port")?),
+                "port" => json!(value.parse::<u16>().context("Invalid CSV port")?),
                 "favorite" => json!(parse_flag(value)?),
                 "tags" => {
                     if value.starts_with('[') {
-                        serde_json::from_str(value).context("Ungültige Tags")?
+                        serde_json::from_str(value).context("Invalid tags")?
                     } else {
                         json!(value.split(';').map(str::to_owned).collect::<Vec<_>>())
                     }
                 }
-                "options" => serde_json::from_str(value).context("Ungültige CSV-Optionen")?,
+                "options" => serde_json::from_str(value).context("Invalid CSV options")?,
                 "protocol" => json!(match value.to_ascii_lowercase().as_str() {
                     "rdp" => "Rdp",
                     "ssh" => "Ssh",
                     "vnc" => "Vnc",
-                    _ => bail!("Unbekanntes Protokoll"),
+                    _ => bail!("Unknown protocol"),
                 }),
                 "name" | "host" | "username" | "domain" | "group" => json!(value),
                 _ => continue,

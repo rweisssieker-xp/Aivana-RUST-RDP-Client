@@ -108,9 +108,9 @@ pub fn hypotheses(
                 failure: failure.id.clone(),
                 seconds_before: delta.num_seconds(),
                 relationship: if same {
-                    "Gleicher dokumentierter Endpunkt"
+                    "Same documented endpoint"
                 } else {
-                    "Zuvor beobachtete Abhängigkeit; Zuordnung erneut prüfen"
+                    "Previously observed dependency; review the mapping again"
                 }
                 .into(),
                 evidence,
@@ -137,7 +137,7 @@ pub fn telemetry_records(store: &crate::telemetry::Store) -> Vec<Record> {
                 "{}: Telemetrie erfasst{}",
                 o.target.name,
                 if o.payload.truncated {
-                    " (unvollständig)"
+                    " (incomplete)"
                 } else {
                     ""
                 }
@@ -185,7 +185,7 @@ pub fn telemetry_records(store: &crate::telemetry::Store) -> Vec<Record> {
                     Kind::Observation
                 },
                 title: format!(
-                    "{} · {} · Ereignis {} (Rechnerzeit)",
+                    "{} · {} · event {} (host time)",
                     o.target.name, e.provider, e.id
                 ),
                 evidence: vec![o.id.to_string()],
@@ -209,9 +209,9 @@ pub fn telemetry_records(store: &crate::telemetry::Store) -> Vec<Record> {
                 p.edge.destination.name,
                 p.edge.port,
                 if p.reachable {
-                    "erreichbar"
+                    "reachable"
                 } else {
-                    "nicht erreichbar"
+                    "unreachable"
                 }
             ),
             evidence: vec![p.id.to_string()],

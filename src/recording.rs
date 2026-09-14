@@ -74,7 +74,7 @@ impl Recorder {
         masks: Vec<Mask>,
     ) -> Result<Self> {
         if masks.len() > 16 || masks.iter().any(|m| !m.valid()) {
-            bail!("Ungültige Schwärzungsbereiche");
+            bail!("Invalid redaction regions");
         }
         std::fs::create_dir_all(&root)?;
         let recording = Recording {
@@ -100,10 +100,10 @@ impl Recorder {
                     Message::Frame(frame, note) => {
                         let result = (|| -> Result<()> {
                             if recording.frames.len() >= MAX_FRAMES {
-                                bail!("Limit von 600 Schlüsselbildern erreicht");
+                                bail!("Limit of 600 keyframes reached");
                             }
                             let screen = crate::vision::recognize(&frame).context(
-                                "Aufnahme gestoppt: automatische OCR-Schwärzung fehlgeschlagen",
+                                "Recording stopped: automatic OCR redaction failed",
                             )?;
                             let (mut masks, mut clean) = crate::vision::redact(&frame, &screen)?;
                             masks.extend_from_slice(&recording.masks);
@@ -122,7 +122,7 @@ impl Recorder {
                             let png = masked_png(&frame, &masks)?;
                             bytes += png.len() as u64;
                             if bytes > MAX_BYTES {
-                                bail!("Aufzeichnungslimit von 128 MiB erreicht");
+                                bail!("Recording limit of 128 MiB reached");
                             }
                             let file = format!("{:06}.dpapi", recording.frames.len());
                             write_protected(&dir.join(&file), &png)?;
@@ -213,12 +213,12 @@ fn write_protected(path: &Path, bytes: &[u8]) -> Result<()> {
     if path.file_name() == Some(std::ffi::OsStr::new("index.dpapi"))
         && bytes.len() > 4 * 1024 * 1024
     {
-        bail!("Aufzeichnungsindex-Limit erreicht; Aufnahme gestoppt");
+        bail!("Recording index limit reached; recording stopped");
     }
     #[cfg(not(windows))]
     {
         let _ = (path, bytes);
-        bail!("Aufzeichnungsschutz benötigt Windows DPAPI");
+        bail!("Recording protection requires Windows DPAPI");
     }
     #[cfg(windows)]
     {
@@ -233,7 +233,7 @@ fn write_protected(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 pub fn masked_png(frame: &FrameUpdate, masks: &[Mask]) -> Result<Vec<u8>> {
     if masks.iter().any(|m| !m.valid()) {
-        bail!("Ungültiger Schwärzungsbereich");
+        bail!("Invalid redaction region");
     }
     let (w, h) = (u32::from(frame.width), u32::from(frame.height));
     if w == 0
@@ -241,10 +241,10 @@ pub fn masked_png(frame: &FrameUpdate, masks: &[Mask]) -> Result<Vec<u8>> {
         || u64::from(w) * u64::from(h) > 32 * 1024 * 1024
         || frame.pixels_rgba.len() != w as usize * h as usize * 4
     {
-        bail!("Ungültige Bilddaten");
+        bail!("Invalid image data");
     }
     let mut img =
-        image::RgbaImage::from_raw(w, h, frame.pixels_rgba.clone()).context("Bilddaten")?;
+        image::RgbaImage::from_raw(w, h, frame.pixels_rgba.clone()).context("Image data")?;
     for m in masks {
         let (x0, y0) = (
             (m.x * w as f32).floor() as u32,
@@ -281,11 +281,11 @@ pub fn list(root: &Path) -> Result<Vec<Recording>> {
             continue;
         }
         if std::fs::metadata(&p)?.len() > 4 * 1024 * 1024 {
-            bail!("Aufzeichnungsindex zu groß");
+            bail!("Recording index exceeds the size limit");
         }
         let r: Recording = serde_json::from_slice(&unprotect_secret(&std::fs::read(p)?)?)?;
         if r.id != id || r.frames.len() > MAX_FRAMES {
-            bail!("Ungültiger Aufzeichnungsindex");
+            bail!("Invalid recording index");
         }
         result.push(r);
     }
@@ -293,13 +293,13 @@ pub fn list(root: &Path) -> Result<Vec<Recording>> {
     Ok(result)
 }
 pub fn read_frame(root: &Path, recording: &Recording, index: usize) -> Result<Vec<u8>> {
-    let frame = recording.frames.get(index).context("Schlüsselbild fehlt")?;
+    let frame = recording.frames.get(index).context("Keyframe is missing")?;
     if frame.file != format!("{index:06}.dpapi") {
-        bail!("Ungültiger Bildpfad");
+        bail!("Invalid image path");
     }
     let path = root.join(recording.id.to_string()).join(&frame.file);
     if std::fs::metadata(&path)?.len() > MAX_BYTES {
-        bail!("Bilddatei zu groß");
+        bail!("Image file exceeds the size limit");
     }
     unprotect_secret(&std::fs::read(path)?)
 }

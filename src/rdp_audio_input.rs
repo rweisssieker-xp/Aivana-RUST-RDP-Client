@@ -83,10 +83,10 @@ fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
 }
 
 fn pcm_formats(bytes: &[u8]) -> Result<Vec<PcmFormat>> {
-    let count = u32_at(bytes, 1).context("AUDIN Formatanzahl fehlt")? as usize;
+    let count = u32_at(bytes, 1).context("AUDIN format count is missing")? as usize;
 
     if count > 1024 {
-        bail!("AUDIN zu viele Formate");
+        bail!("AUDIN has too many formats");
     }
 
     let mut at = 9;
@@ -95,7 +95,7 @@ fn pcm_formats(bytes: &[u8]) -> Result<Vec<PcmFormat>> {
     for _ in 0..count {
         let header = bytes
             .get(at..at + 18)
-            .context("AUDIN Format abgeschnitten")?;
+            .context("AUDIN format is truncated")?;
 
         let tag = u16::from_le_bytes([header[0], header[1]]);
         let channels = u16::from_le_bytes([header[2], header[3]]);
@@ -106,7 +106,7 @@ fn pcm_formats(bytes: &[u8]) -> Result<Vec<PcmFormat>> {
         let length = 18 + extra;
         let wire = bytes
             .get(at..at + length)
-            .context("AUDIN Zusatzformat abgeschnitten")?
+            .context("AUDIN extended format is truncated")?
             .to_vec();
 
         let bits = u16::from_le_bytes([header[14], header[15]]);
@@ -199,7 +199,7 @@ impl AudioInput {
         self.stop_capture();
         let session_stop = session_flag(self.session);
         if session_stop.load(Ordering::SeqCst) {
-            bail!("Mikrofon: Sitzung bereits beendet");
+            bail!("Microphone: session already ended");
         }
 
         let generation = self.generation;
@@ -207,11 +207,11 @@ impl AudioInput {
         let format = self
             .formats
             .get(index as usize)
-            .context("AUDIN unbekanntes Format")?
+            .context("AUDIN format is unknown")?
             .clone();
 
         if frames == 0 || frames > 96000 {
-            bail!("AUDIN ungültige Paketgröße");
+            bail!("AUDIN packet size is invalid");
         }
 
         let stop = Arc::new(AtomicBool::new(false));
@@ -226,7 +226,7 @@ impl AudioInput {
             let setup = (|| -> Result<cpal::Stream> {
                 let device = cpal::default_host()
                     .default_input_device()
-                    .context("Kein Mikrofon gefunden")?;
+                    .context("No microphone found")?;
 
                 let supported = device.default_input_config()?;
                 let config: cpal::StreamConfig = supported.clone().into();
@@ -238,7 +238,7 @@ impl AudioInput {
                 let on_error = move |error| {
                     let _ = error_events.send(EngineEvent::Diagnostic {
                         session_id: session,
-                        message: format!("Mikrofonfehler: {error}"),
+                        message: format!("Microphone error: {error}"),
                     });
                 };
 
@@ -285,7 +285,7 @@ impl AudioInput {
                         )?
                     }
 
-                    _ => bail!("Mikrofonformat nicht unterstützt"),
+                    _ => bail!("Microphone format is unsupported"),
                 };
                 if session_stop.load(Ordering::SeqCst) {
                     bail!("Microphone session cancelled");
@@ -320,11 +320,11 @@ impl AudioInput {
             Ok(Ok(())) => {
                 self.capture = Some(capture);
                 self.frames = frames;
-                self.diagnostic("Mikrofon aktiv: native Aufnahme an Remote-Sitzung");
+                self.diagnostic("Microphone active: native capture to remote session");
                 Ok(())
             }
             Ok(Err(e)) => bail!(e),
-            Err(e) => bail!("Mikrofonstart: {e}"),
+            Err(e) => bail!("Microphone startup: {e}"),
         }
     }
 }
@@ -345,7 +345,7 @@ impl DvcProcessor for AudioInput {
         self.version = false;
         self.formats.clear();
         self.frames = 0;
-        self.diagnostic("Mikrofonkanal geschlossen");
+        self.diagnostic("Microphone channel closed");
     }
 
     fn process(&mut self, _: u32, bytes: &[u8]) -> PduResult<Vec<DvcMessage>> {
@@ -377,7 +377,7 @@ impl DvcProcessor for AudioInput {
                 }
 
                 if self.formats.is_empty() {
-                    self.diagnostic("Mikrofon: kein gemeinsames PCM16-Format");
+                    self.diagnostic("Microphone: no shared PCM16 format");
                 }
 
                 let size = 9 + self.formats.iter().map(|f| f.wire.len()).sum::<usize>();
@@ -401,7 +401,7 @@ impl DvcProcessor for AudioInput {
                     self.version = false;
                     self.formats.clear();
                     self.frames = 0;
-                    self.diagnostic("Mikrofon gestoppt: unvollständiges Aufnahmeformat");
+                    self.diagnostic("Microphone stopped: incomplete capture format");
                     return Ok(vec![]);
                 }
                 let frames = u32_at(bytes, 1).unwrap();
@@ -417,7 +417,7 @@ impl DvcProcessor for AudioInput {
                         ])
                     }
                     Err(e) => {
-                        self.diagnostic(format!("Mikrofon nicht geöffnet: {e}"));
+                        self.diagnostic(format!("Unable to open microphone: {e}"));
                         Ok(vec![Box::new(AudioPacket(vec![4, 1, 0, 0, 0]))])
                     }
                 }
@@ -428,7 +428,7 @@ impl DvcProcessor for AudioInput {
                 match self.open(index, self.frames) {
                     Ok(()) => Ok(vec![Box::new(AudioPacket(bytes[..5].to_vec()))]),
                     Err(e) => {
-                        self.diagnostic(format!("Mikrofonformat: {e}"));
+                        self.diagnostic(format!("Microphone format: {e}"));
                         Ok(vec![])
                     }
                 }
@@ -439,7 +439,7 @@ impl DvcProcessor for AudioInput {
                 self.version = false;
                 self.formats.clear();
                 self.frames = 0;
-                self.diagnostic("Mikrofon gestoppt: ungültige Kanalnachricht");
+                self.diagnostic("Microphone stopped: invalid channel message");
                 Ok(vec![])
             }
 
@@ -546,7 +546,7 @@ mod tests {
                 .open(0, 160)
                 .unwrap_err()
                 .to_string()
-                .contains("beendet")
+                .contains("ended")
         );
         allow_session(session);
         assert!(!session_flag(session).load(Ordering::SeqCst));

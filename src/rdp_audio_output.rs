@@ -61,7 +61,7 @@ impl Playback {
                 });
             }
             _ => {
-                value.diagnostic("Audio nicht verfügbar: kein unterstütztes Ausgabegerät");
+                value.diagnostic("Audio unavailable: no supported output device");
                 value.failed = true;
             }
         }
@@ -74,7 +74,7 @@ impl Playback {
         });
     }
     fn start(&mut self) -> Result<()> {
-        let format = self.formats.first().context("Audioformat fehlt")?.clone();
+        let format = self.formats.first().context("Audio format is missing")?.clone();
         let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(32);
         self.tx = Some(tx);
         self.stop.store(false, Ordering::Relaxed);
@@ -86,7 +86,7 @@ impl Playback {
             let setup = (|| -> Result<cpal::Stream> {
                 let device = cpal::default_host()
                     .default_output_device()
-                    .context("Kein Ausgabegerät")?;
+                    .context("No output device")?;
                 let supported = device.default_output_config()?;
                 let config = cpal::StreamConfig {
                     channels: format.n_channels,
@@ -143,7 +143,7 @@ impl Playback {
                         on_error,
                         None,
                     )?,
-                    _ => bail!("Audio-Ausgabeformat nicht unterstützt"),
+                    _ => bail!("Audio output format is unsupported"),
                 };
                 stream.play()?;
                 Ok(stream)
@@ -163,7 +163,7 @@ impl Playback {
         }));
         match ready_rx.recv_timeout(Duration::from_secs(5)) {
             Ok(Ok(())) => {
-                self.diagnostic("Audio aktiv: Remote-PCM über lokales Ausgabegerät");
+                self.diagnostic("Audio active: remote PCM through the local output device");
                 Ok(())
             }
             Ok(Err(e)) => bail!(e),
@@ -180,12 +180,12 @@ impl RdpsndClientHandler for Playback {
             return;
         }
         if format_no != 0 || data.len() > 4 * 1024 * 1024 {
-            self.diagnostic("Audio: ungültiges Format oder Paket");
+            self.diagnostic("Audio: invalid format or packet");
             return;
         }
         if self.thread.is_none() {
             if let Err(e) = self.start() {
-                self.diagnostic(format!("Audio nicht gestartet: {e}"));
+                self.diagnostic(format!("Audio did not start: {e}"));
                 self.failed = true;
                 return;
             }

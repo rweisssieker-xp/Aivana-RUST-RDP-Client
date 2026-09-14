@@ -13,7 +13,7 @@ fn bounded_read(path: &Path) -> std::io::Result<Vec<u8>> {
     if bytes.len() > LIMIT {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "Ticketspeicher zu groß",
+            "Ticket store too large",
         ));
     }
     Ok(bytes)
@@ -33,7 +33,7 @@ impl Ticket {
         if self.origin != "local" {
             ensure!(
                 jira_origin(&self.origin)? == self.origin,
-                "Ticket-Ursprung nicht kanonisch"
+                "The ticket origin is not canonical"
             );
         }
         valid_key(&self.key)?;
@@ -42,7 +42,7 @@ impl Ticket {
                 && self.title.len() <= 256
                 && self.description.len() <= 4096
                 && self.revision.len() <= 128,
-            "Ticket überschreitet Textgrenzen"
+            "Ticket text exceeds the limits"
         );
         Ok(())
     }
@@ -51,7 +51,7 @@ impl Ticket {
         let text = format!("{}\n{}", self.title, self.description);
         ensure!(
             text.len() <= 4096,
-            "Störung überschreitet 4096 Bytes; Ticketbeschreibung kürzen"
+            "Incident exceeds 4,096 bytes; shorten the ticket description"
         );
         Ok(crate::security::redact_secret_text(&text))
     }
@@ -85,9 +85,9 @@ impl Book {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
             Err(e) => return Err(e.into()),
         };
-        ensure!(bytes.len() <= LIMIT, "Ticketspeicher zu groß");
+        ensure!(bytes.len() <= LIMIT, "Ticket store too large");
         let clear = crate::security::unprotect_secret(&bytes)?;
-        ensure!(clear.len() <= LIMIT, "Ticketspeicher zu groß");
+        ensure!(clear.len() <= LIMIT, "Ticket store too large");
         let mut book: Self = serde_json::from_slice(&clear)?;
         book.validate()?;
         book.source = Some(digest(&bytes));
@@ -100,7 +100,7 @@ impl Book {
             r.ticket.validate()?;
             ensure!(
                 seen.insert((&r.ticket.origin, &r.ticket.key)) && r.deliveries.len() <= 64,
-                "Doppeltes Ticket oder zu viele Zustellungen"
+                "Duplicate ticket or too many deliveries"
             );
             for d in &r.deliveries {
                 ensure!(
@@ -109,7 +109,7 @@ impl Book {
                         "sending" | "sent" | "unknown" | "confirmed" | "not_sent"
                     ) && d.digest.len() == 64
                         && !d.id.is_nil(),
-                    "Ungültige Zustellung"
+                    "Invalid delivery"
                 );
             }
         }
@@ -138,12 +138,12 @@ impl Book {
         };
         ensure!(
             current == self.source,
-            "Ticketspeicher parallel geändert; neu laden"
+            "The ticket store changed concurrently; reload it"
         );
         let raw = serde_json::to_vec(self)?;
-        ensure!(raw.len() <= LIMIT, "Ticketspeicher zu groß");
+        ensure!(raw.len() <= LIMIT, "Ticket store too large");
         let protected = crate::security::protect_secret(&raw)?;
-        ensure!(protected.len() <= LIMIT, "Ticketspeicher zu groß");
+        ensure!(protected.len() <= LIMIT, "Ticket store too large");
         crate::security::atomic_write(path, &protected)?;
         self.source = Some(digest(&protected));
         Ok(())
@@ -174,12 +174,12 @@ impl Book {
     pub fn reserve(&mut self, index: usize, report: &str) -> Result<Uuid> {
         ensure!(
             !report.trim().is_empty() && report.len() <= 16384,
-            "Bericht fehlt oder zu groß"
+            "Report missing or too large"
         );
-        let record = self.records.get_mut(index).context("Ticket fehlt")?;
+        let record = self.records.get_mut(index).context("Ticket missing")?;
         ensure!(
             record.case.is_some(),
-            "Ticket keinem Recovery-Fall zugeordnet"
+            "The ticket is not assigned to a recovery case"
         );
         let hash = digest(report.as_bytes());
         ensure!(
@@ -190,7 +190,7 @@ impl Book {
                     .any(|d| (d.digest == hash && d.state != "not_sent")
                         || d.state == "sending"
                         || d.state == "unknown"),
-            "Bericht bereits gesendet oder Zustellung ungeklärt; keine automatische Wiederholung"
+            "The report was already sent or delivery is uncertain; no automatic retry"
         );
         let id = Uuid::new_v4();
         record.deliveries.push(Delivery {
@@ -207,8 +207,8 @@ impl Book {
             .iter_mut()
             .flat_map(|r| &mut r.deliveries)
             .find(|d| d.id == id)
-            .context("Zustellung fehlt")?;
-        ensure!(d.state == "sending", "Zustellung bereits abgeschlossen");
+            .context("Delivery missing")?;
+        ensure!(d.state == "sending", "Delivery already completed");
         d.state = if success { "sent" } else { "unknown" }.into();
         Ok(())
     }
@@ -223,20 +223,20 @@ impl Book {
             .iter_mut()
             .flat_map(|r| &mut r.deliveries)
             .find(|d| d.id == id)
-            .context("Zustellung fehlt")?;
+            .context("Delivery missing")?;
         ensure!(
             matches!(d.state.as_str(), "unknown" | "sending")
                 && now >= d.at + chrono::Duration::minutes(2),
-            "Aktive Zustellung erst nach mindestens zwei Minuten manuell klären"
+            "Wait at least two minutes before manually reconciling an active delivery"
         );
         d.state = if delivered { "confirmed" } else { "not_sent" }.into();
         Ok(())
     }
 }
 pub fn parse_import(text: &str) -> Result<Ticket> {
-    ensure!(text.len() <= 8192, "Ticket-JSON zu groß");
+    ensure!(text.len() <= 8192, "Ticket JSON too large");
     let t: Ticket =
-        serde_json::from_str(text).map_err(|_| anyhow::anyhow!("Ticket-JSON ungültig"))?;
+        serde_json::from_str(text).map_err(|_| anyhow::anyhow!("Invalid ticket JSON"))?;
     t.validate()?;
     Ok(t)
 }
@@ -250,7 +250,7 @@ pub fn jira_origin(input: &str) -> Result<String> {
             && u.query().is_none()
             && u.fragment().is_none()
             && (u.path() == "/" || u.path().is_empty()),
-        "Jira benötigt HTTPS-Ursprung ohne Pfad, Benutzer oder Query"
+        "Jira requires an HTTPS origin without a path, username, or query"
     );
     Ok(u.as_str().trim_end_matches('/').into())
 }
@@ -261,7 +261,7 @@ fn valid_key(key: &str) -> Result<()> {
             && key
                 .bytes()
                 .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-'),
-        "Ticket-Schlüssel ungültig"
+        "Invalid ticket key"
     );
     Ok(())
 }
@@ -279,8 +279,8 @@ fn response_json(response: reqwest::blocking::Response) -> Result<serde_json::Va
     );
     let mut bytes = vec![];
     response.take(262145).read_to_end(&mut bytes)?;
-    ensure!(bytes.len() <= 262144, "Jira-Antwort zu groß");
-    serde_json::from_slice(&bytes).map_err(|_| anyhow::anyhow!("Jira-Antwort ungültig"))
+    ensure!(bytes.len() <= 262144, "Jira response too large");
+    serde_json::from_slice(&bytes).map_err(|_| anyhow::anyhow!("Invalid Jira response"))
 }
 fn adf_text(
     v: &serde_json::Value,
@@ -307,7 +307,7 @@ pub fn fetch(origin: &str, key: &str, email: &str, token: &str) -> Result<Ticket
     valid_key(key)?;
     ensure!(
         !email.is_empty() && !token.is_empty(),
-        "Jira-E-Mail und API-Token fehlen"
+        "Jira email and API token are missing"
     );
     let json = response_json(
         client()?
@@ -316,7 +316,7 @@ pub fn fetch(origin: &str, key: &str, email: &str, token: &str) -> Result<Ticket
             ))
             .basic_auth(email, Some(token))
             .send()
-            .map_err(|_| anyhow::anyhow!("Jira nicht erreichbar"))?,
+            .map_err(|_| anyhow::anyhow!("Jira is unreachable"))?,
     )?;
     ensure!(
         json["key"].as_str() == Some(key),
@@ -338,12 +338,12 @@ pub fn fetch(origin: &str, key: &str, email: &str, token: &str) -> Result<Ticket
         key: key.into(),
         title: json["fields"]["summary"]
             .as_str()
-            .context("Jira-Titel fehlt")?
+            .context("Jira title missing")?
             .into(),
         description,
         revision: json["fields"]["updated"]
             .as_str()
-            .context("Jira-Revision fehlt")?
+            .context("Jira revision missing")?
             .into(),
     };
     ticket.validate()?;
@@ -363,16 +363,16 @@ pub fn post_report(
             && !token.is_empty()
             && report.len() <= 16384
             && !report.trim().is_empty(),
-        "Zustellung unvollständig"
+        "Delivery incomplete"
     );
     let text = format!(
         "{}\nRelayne delivery: {id}",
         crate::security::redact_secret_text(report)
     );
-    let response=client()?.post(format!("{origin}/rest/api/3/issue/{}/comment",ticket.key)).basic_auth(email,Some(token)).json(&serde_json::json!({"body":{"type":"doc","version":1,"content":[{"type":"paragraph","content":[{"type":"text","text":text}]}]}})).send().map_err(|_|anyhow::anyhow!("Jira-Zustellung ungeklärt; Ticket vor erneutem Versand manuell prüfen"))?;
+    let response=client()?.post(format!("{origin}/rest/api/3/issue/{}/comment",ticket.key)).basic_auth(email,Some(token)).json(&serde_json::json!({"body":{"type":"doc","version":1,"content":[{"type":"paragraph","content":[{"type":"text","text":text}]}]}})).send().map_err(|_|anyhow::anyhow!("Jira delivery is uncertain; check the ticket manually before retrying"))?;
     ensure!(
         response.status() == reqwest::StatusCode::CREATED,
-        "Jira-Zustellung ungeklärt (HTTP {})",
+        "Jira delivery is uncertain (HTTP {})",
         response.status()
     );
     Ok(())

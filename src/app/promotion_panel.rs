@@ -51,14 +51,14 @@ fn save(draft: &Draft) -> anyhow::Result<()> {
     let path = app_data_file("relayne-promotion.dpapi")?;
     anyhow::ensure!(
         draft.refs.len() <= 32 && draft.plan.mappings.len() <= 32,
-        "Entwurfsgrenze überschritten"
+        "Draft limit exceeded"
     );
     let raw = serde_json::to_vec(draft)?;
-    anyhow::ensure!(raw.len() <= DRAFT_LIMIT, "Entwurf zu groß");
+    anyhow::ensure!(raw.len() <= DRAFT_LIMIT, "Draft too large");
     let protected = security::protect_secret(&raw)?;
     anyhow::ensure!(
         protected.len() <= DRAFT_LIMIT,
-        "Geschützter Entwurf zu groß"
+        "Protected draft too large"
     );
     security::atomic_write(&path, &protected)
 }
@@ -68,13 +68,13 @@ fn load() -> anyhow::Result<Draft> {
         Ok(file) => {
             let mut raw = Vec::new();
             file.take((DRAFT_LIMIT + 1) as u64).read_to_end(&mut raw)?;
-            anyhow::ensure!(raw.len() <= DRAFT_LIMIT, "Geschützter Entwurf zu groß");
+            anyhow::ensure!(raw.len() <= DRAFT_LIMIT, "Protected draft too large");
             let clear = security::unprotect_secret(&raw)?;
-            anyhow::ensure!(clear.len() <= DRAFT_LIMIT, "Entwurf zu groß");
+            anyhow::ensure!(clear.len() <= DRAFT_LIMIT, "Draft too large");
             let draft: Draft = serde_json::from_slice(&clear)?;
             anyhow::ensure!(
                 draft.refs.len() <= 32 && draft.plan.mappings.len() <= 32,
-                "Entwurfsgrenze überschritten"
+                "Draft limit exceeded"
             );
             Ok(draft)
         }
@@ -99,12 +99,12 @@ fn receipt_metadata(references: &[String]) -> Vec<String> {
                 receipt.after,
                 receipt.health.expected_status,
                 if receipt.passed {
-                    "bestanden"
+                    "passed"
                 } else {
-                    "fehlgeschlagen"
+                    "failed"
                 }
             ),
-            Err(_) => format!("{reference} · Beleg nicht lesbar oder ungültig"),
+            Err(_) => format!("{reference} · Evidence unreadable or invalid"),
         })
         .collect()
 }
@@ -133,7 +133,7 @@ impl Default for PromotionState {
             Err(_) => (
                 Draft::default(),
                 true,
-                "Gespeicherter Entwurf nicht lesbar. Datei bleibt unverändert; Übernahme gesperrt."
+                "Cannot read saved draft. File unchanged; adoption blocked."
                     .into(),
             ),
         };
@@ -178,7 +178,7 @@ impl PromotionState {
         context.validate()?;
         anyhow::ensure!(
             context.service == self.draft.plan.service && self.health_binding(context)? == binding,
-            "Entwurf oder Beschreibung geändert; neuen Vorschlag erstellen"
+            "Draft or description changed; create a new suggestion"
         );
         let health = proposal.health()?;
         self.draft.plan.health = health;
@@ -188,7 +188,7 @@ impl PromotionState {
         self.password.clear();
         self.http_values = "{}".into();
         self.health_ai = Default::default();
-        self.notice = "Geprüfte Anwendungstests übernommen. Alte Belege und Freigaben verworfen; neue Generalprobe erforderlich.".into();
+        self.notice = "Reviewed application tests adopted. Old evidence and approvals discarded; new rehearsal required.".into();
         Ok(())
     }
     pub(super) fn adopt_contract(&mut self, plan: &ExecutionPlan) -> anyhow::Result<()> {
@@ -208,17 +208,17 @@ impl PromotionState {
         self.acknowledged = false;
         self.receipt_info.clear();
         self.initialized = false;
-        self.notice = "Neue Generalprobe vorbereitet. Zuordnung und Gastzugänge vor Ausführung prüfen; alte Belege wurden nicht übernommen.".into();
+        self.notice = "New rehearsal prepared. Review mapping and guest credentials before execution; old evidence was not adopted.".into();
         Ok(())
     }
     pub(super) fn can_adopt_recovery(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
             !self.blocked,
-            "Testentwurf gesperrt; Speicherfehler zuerst beheben"
+            "Test draft locked; resolve storage error first"
         );
         anyhow::ensure!(
             self.worker.is_none() && self.review.is_none(),
-            "Laufende Generalprobe oder offene Freigabe zuerst abschließen oder verlassen"
+            "Complete or exit the running rehearsal or pending approval first"
         );
         Ok(())
     }
@@ -246,7 +246,7 @@ impl PromotionState {
         self.acknowledged = false;
         self.receipt_info.clear();
         self.notice =
-            "Neuer Recovery-Testentwurf. Ziel und HTTP-Erfolgskriterien ausdrücklich prüfen."
+            "New recovery test draft. Explicitly review target and HTTP success criteria."
                 .into();
         Ok(())
     }
@@ -434,7 +434,7 @@ fn current_plan(
             .iter()
             .find(|lab| promotion::lab_target(lab).is_ok_and(|t| mapping.staging.same_endpoint(&t)))
             .ok_or_else(|| {
-                anyhow::anyhow!("Testlabor geändert oder nicht verfügbar; Zuordnung neu erstellen")
+                anyhow::anyhow!("Test lab changed or unavailable; recreate mapping")
             })?;
         selected.push(lab.clone());
     }
@@ -445,7 +445,7 @@ fn current_production(plan: &ExecutionPlan, profiles: &[ConnectionProfile]) -> a
     for mapping in &plan.mappings {
         anyhow::ensure!(
             profiles.iter().any(|p| mapping.production.matches(p)),
-            "Produktionsprofil geändert oder entfernt; Zuordnung neu erstellen"
+            "Production profile changed or removed; recreate mapping"
         );
     }
     Ok(())
@@ -490,7 +490,7 @@ impl AivanaApp {
                     self.promotion.cancel = None;
                     self.promotion.draft.refs.clear();
                     self.promotion.blocked = true;
-                    self.promotion.notice = "Test-Worker beendet. Persistierte Journale prüfen und Anwendung neu starten.".into();
+                    self.promotion.notice = "Test worker stopped. Check persisted journals and restart the application.".into();
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
@@ -510,13 +510,13 @@ impl AivanaApp {
             state.receipt_info = receipt_metadata(&state.draft.refs);
             match test_lab::journals() {
                 Ok(l) => state.labs = l,
-                Err(_) => state.notice = "Lab-Journale nicht lesbar; bitte prüfen.".into(),
+                Err(_) => state.notice = "Cannot read lab journals; please check.".into(),
             }
         }
-        ui.heading("Vom Testlabor in die Produktion");
-        ui.label("1. Ziel und Klon zuordnen → 2. Dienständerung und HTTP im Klon prüfen → 3. Produktion vorbereiten und separat freigeben.");
-        ui.label("Vor der Probe werden OS, Dienstdatei und Konfiguration automatisch zwischen Klon (PowerShell Direct) und Produktion (WinRM, aktueller Windows-Benutzer) verglichen. Abweichungen sperren die Übernahme.");
-        if ui.button("Testlabor öffnen / Klon erstellen").clicked() {
+        ui.heading("From test lab to production");
+        ui.label("1. Map target and clone → 2. Verify service change and HTTP in clone → 3. Prepare production and approve separately.");
+        ui.label("Before rehearsal, OS, service file, and configuration are automatically compared between clone (PowerShell Direct) and production (WinRM, current Windows user). Differences block adoption.");
+        if ui.button("Open test lab / create clone").clicked() {
             self.view = View::TestLab;
         }
         let before = state.draft.plan.hash().ok();
@@ -525,92 +525,92 @@ impl AivanaApp {
             && (state.draft.recovery_case.is_none() || recovery_actions_allowed), |ui| {
             if state.review.is_none() {
                 if state.draft.recovery_case.is_some() {
-                    ui.label(format!("Recovery-Dienst: {} → Running · Neustart: {}", state.draft.plan.service, state.draft.plan.restart));
+                    ui.label(format!("Recovery service: {} → Running · Restart: {}", state.draft.plan.service, state.draft.plan.restart));
                 } else {
-                ui.horizontal(|ui| { ui.label("Windows-Dienst"); ui.text_edit_singleline(&mut state.draft.plan.service); });
+                ui.horizontal(|ui| { ui.label("Windows service"); ui.text_edit_singleline(&mut state.draft.plan.service); });
                 ui.horizontal(|ui| {
-                    ui.label("Zielzustand");
+                    ui.label("Desired state");
                     ui.selectable_value(&mut state.draft.plan.desired, ServiceState::Running, "Running");
                     ui.selectable_value(&mut state.draft.plan.desired, ServiceState::Stopped, "Stopped");
                 });
                 }
                 if let HealthCheck::Http { port, tls, path, status, contains, followups } = &mut state.draft.plan.health {
-                    ui.checkbox(tls, "HTTPS mit Zertifikatsprüfung");
-                    ui.horizontal(|ui| { ui.label("HTTP-Port"); ui.add(egui::DragValue::new(port).range(1..=65535)); ui.label("Pfad"); ui.text_edit_singleline(path); });
-                    ui.horizontal(|ui| { ui.label("Erwarteter Status"); ui.add(egui::DragValue::new(status).range(200..=599)); ui.label("Antwort enthält (optional)"); ui.text_edit_singleline(contains); });
+                    ui.checkbox(tls, "HTTPS with certificate verification");
+                    ui.horizontal(|ui| { ui.label("HTTP port"); ui.add(egui::DragValue::new(port).range(1..=65535)); ui.label("Path"); ui.text_edit_singleline(path); });
+                    ui.horizontal(|ui| { ui.label("Expected status"); ui.add(egui::DragValue::new(status).range(200..=599)); ui.label("Response contains (optional)"); ui.text_edit_singleline(contains); });
                     super::execution_panel::edit_http_steps(ui, followups);
                 }
-                ui.small("HTTP im Klon: 127.0.0.1. HTTPS im Klon: localhost mit im Gast vertrauenswürdigem Zertifikat für localhost. Produktion: ausgewählter Host mit gültigem Zertifikat. Keine TLS-Ausnahmen.");
+                ui.small("HTTP in clone: 127.0.0.1. HTTPS in clone: localhost with a certificate for localhost trusted by the guest. Production: selected host with a valid certificate. No TLS exceptions.");
                 ui.separator();
-                egui::ComboBox::from_id_salt("promotion_profile").selected_text(state.production.and_then(|id| self.profiles.iter().find(|p| p.id == id)).map(|p| p.name.as_str()).unwrap_or("Produktionsprofil wählen")).show_ui(ui, |ui| {
+                egui::ComboBox::from_id_salt("promotion_profile").selected_text(state.production.and_then(|id| self.profiles.iter().find(|p| p.id == id)).map(|p| p.name.as_str()).unwrap_or("Select production profile")).show_ui(ui, |ui| {
                     for p in &self.profiles { if p.protocol == Protocol::Rdp && !p.options.gateway.enabled { ui.selectable_value(&mut state.production, Some(p.id), format!("{} · {}", p.name, p.host)); } }
                 });
-                if ui.button("Lab-Journale aktualisieren").clicked() {
-                    match test_lab::journals() { Ok(l) => { state.labs = l; state.lab = None; }, Err(_) => { state.labs.clear(); state.notice = "Lab-Journale nicht lesbar.".into(); } }
+                if ui.button("Refresh lab journals").clicked() {
+                    match test_lab::journals() { Ok(l) => { state.labs = l; state.lab = None; }, Err(_) => { state.labs.clear(); state.notice = "Cannot read lab journals.".into(); } }
                 }
-                egui::ComboBox::from_id_salt("promotion_lab").selected_text(state.lab.and_then(|i| state.labs.get(i)).map(|l| l.name.as_str()).unwrap_or("Laufendes Testlabor wählen")).show_ui(ui, |ui| {
+                egui::ComboBox::from_id_salt("promotion_lab").selected_text(state.lab.and_then(|i| state.labs.get(i)).map(|l| l.name.as_str()).unwrap_or("Select running test lab")).show_ui(ui, |ui| {
                     for (i, lab) in state.labs.iter().enumerate() { if promotion::lab_target(lab).is_ok() { ui.selectable_value(&mut state.lab, Some(i), format!("{} · {}", lab.name, lab.phase)); } }
                 });
-                if ui.add_enabled(state.draft.plan.mappings.len() < 16, egui::Button::new("Zuordnung hinzufügen")).clicked() {
+                if ui.add_enabled(state.draft.plan.mappings.len() < 16, egui::Button::new("Add mapping")).clicked() {
                     if let (Some(p), Some(lab)) = (state.production.and_then(|id| self.profiles.iter().find(|p| p.id == id)), state.lab.and_then(|i| state.labs.get(i))) {
                         if let Ok(staging) = promotion::lab_target(lab) {
                             let mut candidate = state.draft.plan.clone();
                             candidate.mappings.push(Mapping { production: Target::from_profile(p), staging });
                             match promotion::validate(&candidate) { Ok(()) => state.draft.plan = candidate, Err(e) => state.notice = e.to_string() }
                         }
-                    } else { state.notice = "Produktionsprofil und Testlabor auswählen.".into(); }
+                    } else { state.notice = "Select production profile and test lab.".into(); }
                 }
                 let mut remove = None;
                 for (i, mapping) in state.draft.plan.mappings.iter().enumerate() {
-                    ui.horizontal(|ui| { ui.label(format!("{} ({}) ↔ {}", mapping.production.name, mapping.production.host, mapping.staging.name)); if ui.small_button("Entfernen").clicked() { remove = Some(i); } });
-                    if let Some(lab) = state.labs.iter().find(|lab| lab.id == mapping.staging.profile_id.to_string()) { ui.small(format!("Vorlage: {} · VM {}", lab.template, lab.vm_id)); }
+                    ui.horizontal(|ui| { ui.label(format!("{} ({}) ↔ {}", mapping.production.name, mapping.production.host, mapping.staging.name)); if ui.small_button("Remove").clicked() { remove = Some(i); } });
+                    if let Some(lab) = state.labs.iter().find(|lab| lab.id == mapping.staging.profile_id.to_string()) { ui.small(format!("Template: {} · VM {}", lab.template, lab.vm_id)); }
                 }
                 if let Some(i) = remove { state.draft.plan.mappings.remove(i); }
                 if state.draft.plan.hash().ok() != before { state.draft.refs.clear(); state.receipt_info.clear(); state.acknowledged = false; }
                 state.health_suggestions_ui(ui, &health_model, health_incident.as_deref());
                 ui.separator();
-                ui.horizontal(|ui| { ui.label("Gastbenutzer für alle zugeordneten Klone"); ui.text_edit_singleline(&mut state.user); });
-                ui.horizontal(|ui| { ui.label("Gastpasswort (nur im Arbeitsspeicher)"); ui.add(egui::TextEdit::singleline(&mut state.password).password(true)); });
-                ui.label("HTTP-Laufzeit-Slots als JSON, z. B. {\"login_password\":\"...\"}. Nur Gastprobe; Produktion benötigt separate Werte. Keine Speicherung.");
+                ui.horizontal(|ui| { ui.label("Guest user for all mapped clones"); ui.text_edit_singleline(&mut state.user); });
+                ui.horizontal(|ui| { ui.label("Guest password (memory only)"); ui.add(egui::TextEdit::singleline(&mut state.password).password(true)); });
+                ui.label("HTTP runtime slots as JSON, e.g., {\"login_password\":\"...\"}. Guest rehearsal only; production requires separate values. Not stored.");
                 ui.add(egui::TextEdit::singleline(&mut state.http_values).password(true).char_limit(32768));
-                ui.checkbox(&mut state.acknowledged, "Ich autorisiere den lesenden WinRM-Vergleich mit Produktion und diese Dienständerungen in den Klonen.");
-                if ui.add_enabled(state.acknowledged && !state.user.trim().is_empty() && !state.password.is_empty(), egui::Button::new("Generalprobe prüfen …")).clicked() {
+                ui.checkbox(&mut state.acknowledged, "I authorize the read-only WinRM comparison with production and these service changes in the clones.");
+                if ui.add_enabled(state.acknowledged && !state.user.trim().is_empty() && !state.password.is_empty(), egui::Button::new("Review rehearsal …")).clicked() {
                     match current_plan(&state.draft.plan, &self.profiles, &state.labs) {
                         Ok(_) => state.review = Some(state.draft.clone()), Err(e) => state.notice = e.to_string(),
                     }
                 }
-                if ui.button("Entwurf speichern").clicked() {
-                    if save(&state.draft).is_err() { state.blocked = true; state.notice = "Entwurf konnte nicht sicher gespeichert werden; Ausführung gesperrt.".into(); }
-                    else { state.notice = "Entwurf lokal mit DPAPI gespeichert; Gastzugangsdaten nicht gespeichert.".into(); }
+                if ui.button("Save draft").clicked() {
+                    if save(&state.draft).is_err() { state.blocked = true; state.notice = "Could not save draft securely; execution blocked.".into(); }
+                    else { state.notice = "Draft saved locally with DPAPI; guest credentials not saved.".into(); }
                 }
-                if ui.add_enabled(!state.draft.refs.is_empty(), egui::Button::new("Produktionslauf vorbereiten …")).clicked() {
+                if ui.add_enabled(!state.draft.refs.is_empty(), egui::Button::new("Prepare production run …")).clicked() {
                     let checked = current_production(&state.draft.plan, &self.profiles).and_then(|_| promotion::check_receipts(&state.draft.plan, &state.draft.refs, Utc::now()));
                     match checked { Ok(()) => prepare = Some(state.draft.clone()), Err(e) => state.notice = e.to_string() }
                 }
             }
             if let Some(review) = state.review.clone() {
-                ui.separator(); ui.strong("Generalprobe zur Ausführung prüfen");
-                ui.label(format!("Dienst {} → {:?} · Neustart: {} · {} Klone", review.plan.service, review.plan.desired, review.plan.restart, review.plan.mappings.len()));
+                ui.separator(); ui.strong("Review rehearsal for execution");
+                ui.label(format!("Service {} → {:?} · Restart: {} · {} clones", review.plan.service, review.plan.desired, review.plan.restart, review.plan.mappings.len()));
                 if let HealthCheck::Http { port, tls, path, status, contains, followups } = &review.plan.health {
-                    ui.label(format!("HTTP GET {}://{}:{port}{path} · Status {status} · Antwort enthält: {}", if *tls { "https" } else { "http" }, if *tls { "localhost" } else { "127.0.0.1" }, if contains.is_empty() { "(kein Antwortmuster)" } else { contains }));
-                    ui.label(format!("Produktion: identischer Pfad {path} und Port {port} am jeweiligen Produktionshost."));
-                    for (index, step) in followups.iter().enumerate() { ui.label(format!("Schritt {}: {:?} {} · Status {} · enthält: {}", index + 2, step.options.method, step.path, step.status, step.contains));ui.monospace(serde_json::to_string_pretty(&step.options).unwrap_or_default()); }
+                    ui.label(format!("HTTP GET {}://{}:{port}{path} · Status {status} · Response contains: {}", if *tls { "https" } else { "http" }, if *tls { "localhost" } else { "127.0.0.1" }, if contains.is_empty() { "(no response pattern)" } else { contains }));
+                    ui.label(format!("Production: identical path {path} and port {port} on each production host."));
+                    for (index, step) in followups.iter().enumerate() { ui.label(format!("Step {}: {:?} {} · Status {} · Contains: {}", index + 2, step.options.method, step.path, step.status, step.contains));ui.monospace(serde_json::to_string_pretty(&step.options).unwrap_or_default()); }
                 }
                 for mapping in &review.plan.mappings {
-                    ui.label(format!("Produktion {} ({}) → Klon {} · VM-ID {}", mapping.production.name, mapping.production.host, mapping.staging.name, mapping.staging.host));
-                    if let Some(lab) = state.labs.iter().find(|lab| lab.id == mapping.staging.profile_id.to_string()) { ui.label(format!("Vorlage: {}", lab.template)); }
+                    ui.label(format!("Production {} ({}) → Clone {} · VM ID {}", mapping.production.name, mapping.production.host, mapping.staging.name, mapping.staging.host));
+                    if let Some(lab) = state.labs.iter().find(|lab| lab.id == mapping.staging.profile_id.to_string()) { ui.label(format!("Template: {}", lab.template)); }
                 }
-                ui.label("Erfolgreiche Änderungen bleiben im Klon. Bei Fehler wird eine Wiederherstellung versucht. Jeder Beleg ist an exakt diesen Plan gebunden und für eine Stunde gültig.");
-                ui.label("Der Klondienst muss vor dem Test im jeweils anderen Zustand sein: Nur ein tatsächlicher Zustandswechsel mit erfolgreichem HTTP-Test kann Produktion freigeben.");
-                ui.monospace(format!("Unveränderlicher Plan: {}", review.plan.hash().unwrap_or_else(|_| "ungültig — Ausführung gesperrt".into())));
-                if ui.button("Generalprobe jetzt in den Klonen ausführen").clicked() {
+                ui.label("Successful changes remain in the clone. On failure, restoration is attempted. Each piece of evidence is bound to this exact plan and valid for one hour.");
+                ui.label("Before testing, the clone service must be in the opposite state: only an actual state change with a successful HTTP test can approve production.");
+                ui.monospace(format!("Immutable plan: {}", review.plan.hash().unwrap_or_else(|_| "invalid — execution blocked".into())));
+                if ui.button("Run rehearsal in the clones now").clicked() {
                     let checked = test_lab::journals().and_then(|labs| current_plan(&review.plan, &self.profiles, &labs));
                     match checked {
                         Err(e) => state.notice = e.to_string(),
                         Ok(labs) => {
                             let mut draft = review;
                             draft.refs.clear();
-                            if save(&draft).is_err() { state.blocked = true; state.notice = "Entwurf nicht sicher gespeichert; kein Test gestartet.".into(); }
+                            if save(&draft).is_err() { state.blocked = true; state.notice = "Draft not saved securely; no test started.".into(); }
                             else {
                                 state.draft = draft.clone();
                                 state.receipt_info.clear();
@@ -619,25 +619,25 @@ impl AivanaApp {
                                 let (tx, rx) = std::sync::mpsc::channel(); state.worker = Some(rx);
                                 let cancel = Arc::new(AtomicBool::new(false)); state.cancel = Some(cancel.clone());
                                 std::thread::spawn(move || {
-                                    let mut outcome = Outcome { draft, notice: "Alle Klone erfolgreich geprüft. Produktion kann separat vorbereitet werden.".into(), storage_failed: false };
+                                    let mut outcome = Outcome { draft, notice: "All clones verified successfully. Production can be prepared separately.".into(), storage_failed: false };
                                     let result = (|| -> anyhow::Result<()> {
                                         let hash = outcome.draft.plan.hash()?;
                                         let health = promotion::health(&outcome.draft.plan)?;
-                                        let http_values:crate::execution::http_health::Values=serde_json::from_str(&http_values).map_err(|_|anyhow::anyhow!("HTTP-Laufzeitwerte benötigen ein JSON-Objekt aus Strings"))?;
+                                        let http_values:crate::execution::http_health::Values=serde_json::from_str(&http_values).map_err(|_|anyhow::anyhow!("HTTP runtime values require a JSON object of strings"))?;
                                         outcome.draft.plan.health.validate_values(&http_values)?;
                                         for lab in labs {
-                                            anyhow::ensure!(!cancel.load(Ordering::Acquire), "Abbruch angefordert");
+                                            anyhow::ensure!(!cancel.load(Ordering::Acquire), "Cancellation requested");
                                             crate::equivalence::observe(&outcome.draft.plan, &lab, &user, &password)?;
-                                            anyhow::ensure!(!cancel.load(Ordering::Acquire), "Abbruch angefordert");
+                                            anyhow::ensure!(!cancel.load(Ordering::Acquire), "Cancellation requested");
                                             let receipt = test_lab::execute_bound_repair_with_values(lab, user.clone(), password.clone(), outcome.draft.plan.service.clone(), outcome.draft.plan.desired == ServiceState::Running, health.clone(), hash.clone(),http_values.clone(),outcome.draft.plan.restart)?;
                                             outcome.draft.refs.push(receipt.reference());
                                             if let Err(e) = save(&outcome.draft) { outcome.storage_failed = true; return Err(e); }
-                                            anyhow::ensure!(receipt.passed && !receipt.restored, "Generalprobe fehlgeschlagen; weitere Klone bleiben unverändert");
+                                            anyhow::ensure!(receipt.passed && !receipt.restored, "Rehearsal failed; remaining clones are unchanged");
                                         }
                                         promotion::check_rehearsal_receipts(&outcome.draft.plan, &outcome.draft.refs, Utc::now())
                                     })();
-                                    if result.is_err() { outcome.notice = "Generalprobe oder Belegspeicherung fehlgeschlagen. Keine Produktionsfreigabe; Lab-Journale prüfen. Erfolgreiche vorherige Klone können geändert sein.".into(); }
-                                    if cancel.load(Ordering::Acquire) { outcome.notice = "Abbruch angefordert; die laufende Probe wurde abgewartet und weitere Klone werden nicht gestartet. Vorhandene Belege bleiben gespeichert. Eine Produktionsvorbereitung erfordert weiterhin vollständige gültige Belege und eine neue ausdrückliche Aktion.".into(); }
+                                    if result.is_err() { outcome.notice = "Rehearsal or evidence storage failed. No production approval; check lab journals. Earlier successful clones may have changed.".into(); }
+                                    if cancel.load(Ordering::Acquire) { outcome.notice = "Cancellation requested; the running rehearsal was allowed to finish, and no further clones will start. Existing evidence remains saved. Preparing production still requires complete valid evidence and a new explicit action.".into(); }
                                     let _ = tx.send(outcome);
                                 });
                             }
@@ -645,24 +645,24 @@ impl AivanaApp {
                     }
                     state.review = None;
                 }
-                if ui.button("Zurück zum Entwurf").clicked() { state.review = None; }
+                if ui.button("Back to draft").clicked() { state.review = None; }
             }
         });
         if state.worker.is_some() {
             ui.spinner();
-            ui.label("Generalprobe läuft sequenziell in den Klonen. Produktion wird nicht automatisch gestartet.");
+            ui.label("Rehearsal runs sequentially in the clones. Production does not start automatically.");
             if let Some(cancel) = &state.cancel {
                 if ui
                     .add_enabled(
                         !cancel.load(Ordering::Acquire),
-                        egui::Button::new("Abbrechen: laufende Probe abwarten"),
+                        egui::Button::new("Cancel: wait for running rehearsal"),
                     )
                     .clicked()
                 {
                     cancel.store(true, Ordering::Release);
                 }
                 if cancel.load(Ordering::Acquire) {
-                    ui.label("Abbruch vorgemerkt. Die laufende Gastprüfung einschließlich Wiederherstellungsversuch wird abgewartet.");
+                    ui.label("Cancellation requested. Waiting for the running guest check, including any restoration attempt.");
                 }
             }
             ui.ctx()
@@ -670,7 +670,7 @@ impl AivanaApp {
         }
         ui.separator();
         ui.label(format!(
-            "Gespeicherte Testbelege: {} / {}",
+            "Saved test evidence: {} / {}",
             state.draft.refs.len(),
             state.draft.plan.mappings.len()
         ));
@@ -678,8 +678,8 @@ impl AivanaApp {
             ui.label(metadata);
         }
         if !state.draft.refs.is_empty() {
-            ui.small("Belegstatus wird bei der Produktionsvorbereitung erneut geprüft; maximal eine Stunde gültig.");
-            if ui.button("Wiederherstellungsplan pflegen …").clicked() {
+            ui.small("Evidence status is checked again when preparing production; valid for up to one hour.");
+            if ui.button("Maintain recovery plan …").clicked() {
                 self.view = View::RecoveryPlans;
             }
         }

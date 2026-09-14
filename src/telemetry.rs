@@ -59,7 +59,7 @@ pub struct Observation {
 impl Observation {
     pub fn parse(target: Target, stdout: &str) -> Result<Self> {
         if stdout.len() > 128 * 1024 {
-            bail!("Telemetrieantwort zu groß");
+            bail!("Telemetry response exceeds the size limit");
         }
         let p: Payload = serde_json::from_str(stdout.trim())?;
         if p.addresses.len() > 64
@@ -69,14 +69,14 @@ impl Observation {
             || p.machine.len() > 255
             || p.os_version.len() > 128
         {
-            bail!("Telemetriegrenzen überschritten");
+            bail!("Telemetry limits exceeded");
         }
         if p.addresses.iter().any(|s| s.parse::<IpAddr>().is_err())
             || p.sockets
                 .iter()
                 .any(|s| s.local.parse::<IpAddr>().is_err() || s.remote.parse::<IpAddr>().is_err())
         {
-            bail!("Ungültige Netzwerkadresse in Telemetrie");
+            bail!("Invalid network address in telemetry");
         }
         if p.services
             .iter()
@@ -85,7 +85,7 @@ impl Observation {
                 .iter()
                 .any(|e| e.provider.len() > 256 || e.at.len() > 64)
         {
-            bail!("Ungültige Telemetriefelder");
+            bail!("Invalid telemetry fields");
         }
         Ok(Self {
             id: Uuid::new_v4(),
@@ -102,7 +102,7 @@ impl Observation {
 pub fn collect_spec(target: &Target) -> Result<CommandSpec> {
     if target.protocol != "RDP" || !target.route.is_empty() {
         bail!(
-            "Telemetrie benötigt ein direktes Windows-Ziel mit WinRM; aktuelle Windows-Identität"
+            "Telemetry requires a direct Windows target with WinRM and the current Windows identity"
         );
     }
     let endpoint = Endpoint::new(&target.host, "", target.port).map_err(anyhow::Error::msg)?;
@@ -226,7 +226,7 @@ pub struct Probe {
 pub fn probe_spec(edge: &Edge) -> Result<CommandSpec> {
     let addr: IpAddr = edge.address.parse()?;
     if edge.port == 0 {
-        bail!("Zielport fehlt");
+        bail!("Destination port is missing");
     }
     let endpoint =
         Endpoint::new(&edge.source.host, "", edge.source.port).map_err(anyhow::Error::msg)?;
@@ -239,7 +239,7 @@ pub fn probe_spec(edge: &Edge) -> Result<CommandSpec> {
         args: vec![],
         stdin: String::new(),
         source: format!(
-            "Abhängigkeit prüfen · {} → {addr}:{}",
+            "Check dependency · {} → {addr}:{}",
             edge.source.name, edge.port
         ),
     };
@@ -251,11 +251,11 @@ pub fn parse_probe(edge: Edge, stdout: &str) -> Result<Probe> {
     if v["address"].as_str().and_then(ip) != ip(&edge.address)
         || v["port"].as_u64() != Some(edge.port as u64)
     {
-        bail!("Probeantwort gehört nicht zur Abhängigkeit");
+        bail!("Probe response does not belong to the dependency");
     }
     let reachable = v["reachable"]
         .as_bool()
-        .ok_or_else(|| anyhow::anyhow!("Probeergebnis fehlt"))?;
+        .ok_or_else(|| anyhow::anyhow!("Probe result is missing"))?;
     Ok(Probe {
         id: Uuid::new_v4(),
         edge,
@@ -285,7 +285,7 @@ impl Store {
     }
     pub fn save(&self, path: &Path) -> Result<()> {
         if !cfg!(windows) {
-            bail!("Windows DPAPI erforderlich");
+            bail!("Windows DPAPI is required");
         }
         let bytes = serde_json::to_vec(self)?;
         if bytes.len() > 16 * 1024 * 1024 {
@@ -298,7 +298,7 @@ impl Store {
             return Ok(Self::default());
         }
         if std::fs::metadata(path)?.len() > 20 * 1024 * 1024 {
-            bail!("Telemetriespeicher zu groß");
+            bail!("Telemetry store exceeds the size limit");
         }
         Ok(serde_json::from_slice(&security::unprotect_secret(
             &std::fs::read(path)?,
@@ -325,10 +325,10 @@ impl Store {
             .map(|s| s.name.as_str())
             .collect();
         match probe.filter(|p|(Utc::now()-p.at).num_minutes()<15){
-            Some(p) if !p.reachable&&!stopped.is_empty()=>format!("Pfad aktuell nicht erreichbar; historisch diesem Port zugeordnete Dienste gestoppt: {}. Port-/Dienstzuordnung stammt vom {} und muss erneut bestätigt werden. Ursachenhypothese, kein Kausalitätsnachweis. Probe {}",stopped.join(", "),e.observed,p.id),
-            Some(p) if !p.reachable=>format!("Pfad vom betroffenen Rechner aktuell nicht erreichbar. Dienst-, Netzwerk- und Firewallursachen noch ungetrennt. Probe {}",p.id),
-            Some(p)=>format!("TCP-Pfad aktuell erreichbar; Anwendungsfunktion noch nicht bewiesen. Probe {}",p.id),
-            None=>"Historisch beobachtete Verbindung; gezielte Prüfung erforderlich. Keine bestätigte Ursache.".into()
+            Some(p) if !p.reachable&&!stopped.is_empty()=>format!("Path is currently unreachable; services historically associated with this port are stopped: {}. The port/service mapping is from {} and must be confirmed again. This is a hypothesis, not proof of causation. Probe {}",stopped.join(", "),e.observed,p.id),
+            Some(p) if !p.reachable=>format!("Path is currently unreachable from the affected computer. Service, network, and firewall causes have not yet been distinguished. Probe {}",p.id),
+            Some(p)=>format!("TCP path is currently reachable; application functionality is not yet proven. Probe {}",p.id),
+            None=>"Historically observed connection; a targeted check is required. No confirmed cause.".into()
         }
     }
 }

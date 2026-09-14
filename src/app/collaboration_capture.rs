@@ -18,7 +18,7 @@ fn sanitize(frame: FrameUpdate) -> CaptureResult {
         || frame.pixels_rgba.len() != frame.width as usize * frame.height as usize * 4
         || frame.pixels_rgba.len() > 32 * 1024 * 1024
     {
-        return Err("Ungültige oder zu große Bildschirmdaten".into());
+        return Err("Invalid or oversized screen data".into());
     }
     let screen = crate::vision::recognize(&frame).map_err(|e| e.to_string())?;
     let (masks, _) = crate::vision::redact(&frame, &screen).map_err(|e| e.to_string())?;
@@ -40,7 +40,7 @@ fn sanitize(frame: FrameUpdate) -> CaptureResult {
         }
     }
     let image = image::RgbaImage::from_raw(frame.width as u32, frame.height as u32, pixels)
-        .ok_or_else(|| "Ungültiger Frame".to_string())?;
+        .ok_or_else(|| "Invalid frame".to_string())?;
     let scaled = image::DynamicImage::ImageRgba8(image)
         .resize(640, 360, image::imageops::FilterType::Triangle)
         .to_rgb8();
@@ -63,7 +63,7 @@ impl AivanaApp {
                     self.collaboration_capture.pending = None;
                 }
                 Ok(Err(e)) => {
-                    self.status = format!("Freigabe-OCR fehlgeschlagen: {e}");
+                    self.status = format!("Sharing OCR failed: {e}");
                     self.collaboration_capture.cached = None;
                     self.collaboration_capture.pending = None;
                 }
@@ -133,7 +133,7 @@ impl AivanaApp {
             && !self.collaboration_capture.used.contains(&p.id);
         if !valid {
             self.status =
-                "Gemeinsamer Klick gesperrt: Freigabe, Sitzung oder Bildstand passt nicht mehr."
+                "Shared click blocked: approval, session, or frame no longer matches."
                     .into();
             return;
         }
@@ -151,16 +151,16 @@ impl AivanaApp {
             }
         };
         if crate::policy::PolicyEngine.decision_for(&action) == PolicyDecision::Deny {
-            self.status = "Gemeinsamer Klick durch lokale Richtlinie gesperrt".into();
+            self.status = "Shared click blocked by local policy".into();
             return;
         }
         if self.collaboration_capture.used.len() >= 4096 {
-            self.status = "Lokales Freigabelimit erreicht; Anwendung neu starten".into();
+            self.status = "Local approval limit reached; restart the application".into();
             return;
         }
         self.collaboration_capture.used.insert(p.id);
         self.teaching
-            .cancel_run("Gemeinsame Eingabe hat den RDP-Ablauf angehalten");
+            .cancel_run("Shared input paused the RDP workflow");
         self.engine.release_inputs_except(Some(p.session));
         self.engine.release_inputs(p.session);
         let result = self.engine.send_input(p.session, action);
@@ -177,8 +177,8 @@ impl AivanaApp {
         };
         self.engine.release_inputs(p.session);
         self.status = match result.and(release) {
-            Ok(()) => "Gemeinsam freigegebene Eingabe gesendet; Wirkung noch prüfen".into(),
-            Err(e) => format!("Gemeinsame Eingabe fehlgeschlagen: {e}"),
+            Ok(()) => "Approved shared input sent; verify its effect".into(),
+            Err(e) => format!("Shared input failed: {e}"),
         };
     }
 }

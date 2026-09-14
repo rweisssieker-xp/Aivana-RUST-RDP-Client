@@ -108,9 +108,9 @@ impl PreflightService for LocalPreflightService {
             findings.push(finding(
                 DiagnosticClass::Dns,
                 DiagnosticSeverity::Error,
-                "Host fehlt",
-                "Das Profil hat keinen Hostnamen oder keine IP-Adresse.",
-                "Host im Profil eintragen.",
+                "Host missing",
+                "The profile has no hostname or IP address.",
+                "Enter a host in the profile.",
             ));
         } else {
             match (profile.host.as_str(), profile.port).to_socket_addrs() {
@@ -119,35 +119,35 @@ impl PreflightService for LocalPreflightService {
                         findings.push(finding(
                             DiagnosticClass::Dns,
                             DiagnosticSeverity::Info,
-                            "DNS aufgeloest",
-                            &format!("{} wurde zu {} aufgeloest.", profile.host, addr),
-                            "Keine Aktion erforderlich.",
+                            "DNS resolved",
+                            &format!("{} resolved to {}.", profile.host, addr),
+                            "No action is required.",
                         ));
                         if TcpStream::connect_timeout(&addr, Duration::from_secs(2)).is_err() {
                             findings.push(finding(
                                 DiagnosticClass::Tcp,
                                 DiagnosticSeverity::Error,
-                                "TCP-Port nicht erreichbar",
-                                "Der Zielhost antwortet nicht auf dem RDP-Port.",
-                                "Firewall, VPN, Routing und RDP-Port pruefen.",
+                                "TCP port unreachable",
+                                "The target host is not responding on the RDP port.",
+                                "Check the firewall, VPN, routing, and RDP port.",
                             ));
                         }
                     } else {
                         findings.push(finding(
                             DiagnosticClass::Dns,
                             DiagnosticSeverity::Error,
-                            "Keine Adresse gefunden",
-                            "DNS lieferte keine nutzbare Zieladresse.",
-                            "Hostnamen oder DNS-Konfiguration pruefen.",
+                            "No address found",
+                            "DNS returned no usable target address.",
+                            "Check the hostname or DNS configuration.",
                         ));
                     }
                 }
                 Err(err) => findings.push(finding(
                     DiagnosticClass::Dns,
                     DiagnosticSeverity::Error,
-                    "DNS-Fehler",
+                    "DNS error",
                     &err.to_string(),
-                    "Hostnamen, DNS-Server oder Netzwerk pruefen.",
+                    "Check the hostname, DNS server, or network.",
                 )),
             }
         }
@@ -156,9 +156,9 @@ impl PreflightService for LocalPreflightService {
             findings.push(finding(
                 DiagnosticClass::Credential,
                 DiagnosticSeverity::Warning,
-                "Keine gespeicherten Credentials",
-                "Das Profil hat weder Credential-Referenz noch ein temporaeres Passwort.",
-                "Credential speichern oder Passwort fuer die Session eingeben.",
+                "No saved credentials",
+                "The profile has neither a credential reference nor a temporary password.",
+                "Save credentials or enter a password for this session.",
             ));
         }
 
@@ -285,7 +285,7 @@ mod tests {
         assert_eq!(report.timeout_secs, 45);
         assert!(report.username_set);
         assert!(report.password_set);
-        assert!(json.contains("Host fehlt"));
+        assert!(json.contains("Host missing"));
         assert!(!json.contains("hunter2"));
     }
 }

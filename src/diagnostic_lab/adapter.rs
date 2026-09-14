@@ -8,9 +8,9 @@ pub fn build(case: &Case, request: &Request) -> Result<CommandSpec> {
         case.config.mode == Mode::ReadOnly
             && request.mode == Mode::ReadOnly
             && request.binding == case.binding()?,
-        "Realer Leseauftrag ist nicht an diesen Fall gebunden"
+        "The real read request is not bound to this case"
     );
-    let target = case.config.target.as_ref().context("Ziel fehlt")?;
+    let target = case.config.target.as_ref().context("Target missing")?;
     let app = checked_url(&case.config.application)?;
     let payload = serde_json::json!({"request":request.id,"binding":request.binding,"probe":request.probe,"service":case.config.service,"host":app.host_str(),"port":app.port_or_known_default(),"dependency":case.config.dependency});
     let json = serde_json::to_string(&payload)?.replace('\'', "''");
@@ -23,7 +23,7 @@ pub fn build(case: &Case, request: &Request) -> Result<CommandSpec> {
         args: vec![],
         stdin: String::new(),
         source: format!(
-            "Diagnose · {} · {} · {}",
+            "Diagnosis · {} · {} · {}",
             target.name,
             request.probe.label(),
             request.id
@@ -47,20 +47,20 @@ struct Response {
 pub fn value(request: &Request, result: &JobResult) -> Result<Value> {
     ensure!(
         result.status == JobStatus::Completed && !result.truncated && result.stdout.len() <= 4096,
-        "Leseprüfung fehlgeschlagen, abgebrochen oder abgeschnitten"
+        "The read check failed, was canceled, or was truncated"
     );
     let response: Response = serde_json::from_str(result.stdout.trim())?;
     ensure!(
         response.request == request.id
             && response.binding == request.binding
             && response.probe == request.probe,
-        "Fremde oder veraltete Prüfantwort"
+        "Unrelated or stale check response"
     );
     let finished: DateTime<Utc> = result.finished.into();
     ensure!(
         finished >= request.started
             && finished.signed_duration_since(request.started) <= chrono::Duration::seconds(180),
-        "Prüfantwort außerhalb des Zeitfensters"
+        "Check response outside the time window"
     );
     Ok(response.value)
 }

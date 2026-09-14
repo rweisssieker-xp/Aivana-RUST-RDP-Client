@@ -36,7 +36,7 @@ impl Default for IntelligenceState {
                 Ok(k) => (k, None),
                 Err(e) => (
                     Knowledge::default(),
-                    Some(format!("Wissensspeicher nicht lesbar: {e}")),
+                    Some(format!("Cannot read knowledge store: {e}")),
                 ),
             };
         Self {
@@ -72,7 +72,7 @@ impl AivanaApp {
         {
             Ok(()) => true,
             Err(e) => {
-                self.status = format!("Wissen nicht gespeichert: {e}");
+                self.status = format!("Knowledge not saved: {e}");
                 false
             }
         }
@@ -89,7 +89,7 @@ impl AivanaApp {
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
                     self.intelligence.planning = None;
-                    self.status = "Planungsauftrag unterbrochen".into();
+                    self.status = "Planning job interrupted".into();
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
             }
@@ -114,7 +114,7 @@ impl AivanaApp {
                     .as_ref()
                     .filter(|r| r.status == JobStatus::Completed && !r.truncated)
                     .ok_or_else(|| {
-                        "Vorprüfung fehlgeschlagen/abgebrochen; keine Änderung".to_owned()
+                        "Preflight check failed/canceled; no change".to_owned()
                     })
                     .and_then(|r| {
                         intel::captured_state(&r.stdout, &service).map_err(|e| e.to_string())
@@ -128,7 +128,7 @@ impl AivanaApp {
                             before,
                             desired,
                             captured: Utc::now(),
-                            status: "Vorprüfung bestätigt".into(),
+                            status: "Preflight check confirmed".into(),
                             evidence: None,
                         };
                         self.intelligence.repair = Some(repair.id);
@@ -147,12 +147,12 @@ impl AivanaApp {
                     .iter_mut()
                     .find(|r| r.id == id)
                 {
-                    r.status = format!("Ungeklärt ({status:?}); aktuellen Zustand neu prüfen");
+                    r.status = format!("Unresolved ({status:?}); check the current state again");
                     if let Some(result) =
                         result.filter(|r| r.status == JobStatus::Completed && !r.truncated)
                     {
                         if let Err(e) = r.assess(&result.stdout) {
-                            r.status = format!("Ungeklärt: {e}");
+                            r.status = format!("Unresolved: {e}");
                         }
                     }
                     self.status = r.status.clone();
@@ -162,21 +162,21 @@ impl AivanaApp {
         }
     }
     pub(super) fn intelligence_view(&mut self, ui: &mut Ui) {
-        ui.heading("Planen, prüfen & lernen");
+        ui.heading("Plan, verify & learn");
         let diagnostic_profile = self.selected_profile().cloned();
-        egui::CollapsingHeader::new("Ursachen durch Vergleichstests eingrenzen").default_open(true).show(ui, |ui| {
+        egui::CollapsingHeader::new("Narrow down causes with comparison tests").default_open(true).show(ui, |ui| {
             self.intelligence.diagnostic.draw(ui, diagnostic_profile.as_ref());
         });
         if let Some(e) = &self.intelligence.error {
             ui.colored_label(tw::RED_600, e);
         }
-        ui.label("Formuliere das Ziel. Prüfe den Plan, bevor du ihn als Auftrag übernimmst.");
-        ui.add(egui::TextEdit::multiline(&mut self.intelligence.objective).hint_text("Zum Beispiel: Ursache für den gestoppten Druckdienst auf den ausgewählten Rechnern ermitteln").desired_rows(2));
+        ui.label("Describe the goal. Review the plan before adopting it as a job.");
+        ui.add(egui::TextEdit::multiline(&mut self.intelligence.objective).hint_text("For example: identify why the print service stopped on the selected computers").desired_rows(2));
         ui.horizontal_wrapped(|ui| {
             if ui
                 .add_enabled(
                     self.intelligence.planning.is_none(),
-                    egui::Button::new("Lokale Vorlage"),
+                    egui::Button::new("Local template"),
                 )
                 .clicked()
             {
@@ -185,12 +185,12 @@ impl AivanaApp {
             }
             ui.checkbox(
                 &mut self.intelligence.cloud_consent,
-                "Diesen Auftragstext an OpenAI senden",
+                "Send this job text to OpenAI",
             );
             if ui
                 .add_enabled(
                     self.intelligence.cloud_consent && self.intelligence.planning.is_none(),
-                    egui::Button::new("KI-Plan erstellen"),
+                    egui::Button::new("Create AI plan"),
                 )
                 .clicked()
             {
@@ -209,7 +209,7 @@ impl AivanaApp {
                 ui.spinner();
             }
         });
-        ui.small("Cloud-Planung sendet nur den sichtbaren Auftragstext; Rechnerdaten und Bildschirme werden hier nicht angehängt. Schlüssel: OPENAI_API_KEY.");
+        ui.small("Cloud planning sends only the visible job text; computer data and screens are not attached here. Key: OPENAI_API_KEY.");
         if let Some(plan) = &mut self.intelligence.plan {
             ui.label(&plan.rationale);
             for (index, step) in plan.steps.iter_mut().enumerate() {
@@ -233,16 +233,16 @@ impl AivanaApp {
                             });
                     });
                     ui.horizontal(|ui| {
-                        ui.label("Erfolgskriterium");
+                        ui.label("Success criterion");
                         ui.text_edit_singleline(&mut step.expectation);
                     });
                     ui.horizontal(|ui| {
-                        ui.label("Rückweg");
+                        ui.label("Rollback");
                         ui.text_edit_singleline(&mut step.recovery);
                     });
                 });
             }
-            ui.label("Zielrechner");
+            ui.label("Target computers");
             for p in &self.profiles {
                 if p.protocol != Protocol::Rdp {
                     continue;
@@ -260,7 +260,7 @@ impl AivanaApp {
                 .add_enabled(
                     self.intelligence.objective == self.intelligence.plan_objective
                         && self.intelligence.planning.is_none(),
-                    egui::Button::new("Geprüften Plan als Auftrag übernehmen"),
+                    egui::Button::new("Adopt reviewed plan as a job"),
                 )
                 .clicked()
             {
@@ -291,11 +291,11 @@ impl AivanaApp {
         ui.separator();
         self.service_repair_ui(ui);
         ui.separator();
-        ui.heading("Abhängigkeiten & Ursachenhypothesen");
-        ui.label("Deklarierte Abhängigkeiten werden mit fehlgeschlagenen, belegten Auftragsschritten verknüpft.");
+        ui.heading("Dependencies & potential causes");
+        ui.label("Declared dependencies are linked to failed job steps with supporting evidence.");
         for (label, slot) in [
-            ("Abhängiger Rechner", &mut self.intelligence.dependent),
-            ("Benötigt", &mut self.intelligence.prerequisite),
+            ("Dependent computer", &mut self.intelligence.dependent),
+            ("Requires", &mut self.intelligence.prerequisite),
         ] {
             egui::ComboBox::from_id_salt(label)
                 .selected_text(
@@ -311,9 +311,9 @@ impl AivanaApp {
         }
         ui.add(
             egui::TextEdit::singleline(&mut self.intelligence.dependency_reason)
-                .hint_text("Zum Beispiel: Anwendung benötigt den Datenbankdienst"),
+                .hint_text("For example: application requires the database service"),
         );
-        if ui.button("Abhängigkeit speichern").clicked() {
+        if ui.button("Save dependency").clicked() {
             if let (Some(a), Some(b)) =
                 (self.intelligence.dependent, self.intelligence.prerequisite)
             {
@@ -356,15 +356,15 @@ impl AivanaApp {
                 |ui| {
                     ui.label(candidate.explanation);
                     for id in candidate.evidence {
-                        ui.monospace(format!("Beleg {id}"));
+                        ui.monospace(format!("Evidence {id}"));
                     }
                 },
             );
         }
         ui.separator();
-        ui.heading("Erfahrungen");
+        ui.heading("Experience");
         if ui
-            .button("Bestätigte und fehlgeschlagene Schritte übernehmen")
+            .button("Import confirmed and failed steps")
             .clicked()
         {
             let previous = self.intelligence.book.experiences.clone();
@@ -375,7 +375,7 @@ impl AivanaApp {
         }
         ui.add(
             egui::TextEdit::singleline(&mut self.intelligence.query)
-                .hint_text("Ziel, Rechner, Voraussetzung oder Ergebnis suchen"),
+                .hint_text("Search goal, computer, prerequisite, or outcome"),
         );
         let needle = self.intelligence.query.to_lowercase();
         for e in self
@@ -405,36 +405,36 @@ impl AivanaApp {
         }
     }
     fn service_repair_ui(&mut self, ui: &mut Ui) {
-        ui.heading("Dienstzustand reparieren");
+        ui.heading("Repair service state");
         let profile = self.selected_profile().cloned();
         ui.label(format!(
-            "Ziel: {}",
+            "Target: {}",
             profile
                 .as_ref()
                 .map(|p| p.name.as_str())
-                .unwrap_or("Rechner in Verbindungen auswählen")
+                .unwrap_or("Select a computer in Connections")
         ));
-        ui.small("WinRM mit aktueller Windows-Identität. Unterstützt Start/Stop eines Dienstes. Technische Prüfung bestätigt ausschließlich den Dienstzustand. Bei Fehler wird der vorherige Zustand wiederhergestellt, soweit der Host erreichbar bleibt.");
+        ui.small("WinRM with the current Windows identity. Supports starting/stopping a service. Technical verification confirms only the service state. On failure, the previous state is restored as long as the host remains reachable.");
         ui.add(
             egui::TextEdit::singleline(&mut self.intelligence.service)
-                .hint_text("Dienstname, z. B. Spooler"),
+                .hint_text("Service name, e.g., Spooler"),
         );
         ui.horizontal(|ui| {
             ui.selectable_value(
                 &mut self.intelligence.desired,
                 ServiceState::Running,
-                "Soll: Running",
+                "Desired: Running",
             );
             ui.selectable_value(
                 &mut self.intelligence.desired,
                 ServiceState::Stopped,
-                "Soll: Stopped",
+                "Desired: Stopped",
             );
         });
         if ui
             .add_enabled(
                 self.intelligence.pending.is_none(),
-                egui::Button::new("1. Ausgangszustand lesen"),
+                egui::Button::new("1. Read initial state"),
             )
             .clicked()
         {
@@ -470,7 +470,7 @@ impl AivanaApp {
                 repair.desired.label(),
                 repair.status
             ));
-            let eligible = repair.status == "Vorprüfung bestätigt"
+            let eligible = repair.status == "Preflight check confirmed"
                 && (Utc::now() - repair.captured).num_seconds() < 120
                 && profile.as_ref().is_some_and(|p| repair.target.matches(p))
                 && repair.service == self.intelligence.service.trim()
@@ -481,17 +481,17 @@ impl AivanaApp {
                 &repair.service,
                 Some((repair.before, repair.desired)),
             ) {
-                ui.collapsing("Änderung und Rückweg prüfen", |ui| {
+                ui.collapsing("Review change and rollback", |ui| {
                     ui.monospace(spec.preview());
                 });
-                ui.checkbox(&mut self.intelligence.confirmed,"Diesen Dienstzustand ändern und bei Fehler den Ausgangszustand wiederherstellen");
+                ui.checkbox(&mut self.intelligence.confirmed,"Change this service state and restore the initial state on failure");
                 if ui
                     .add_enabled(
                         eligible
                             && self.intelligence.confirmed
                             && self.intelligence.pending.is_none()
                             && self.intelligence.error.is_none(),
-                        egui::Button::new("2. Ändern und technisch prüfen"),
+                        egui::Button::new("2. Change and verify technically"),
                     )
                     .clicked()
                 {
@@ -502,7 +502,7 @@ impl AivanaApp {
                         .iter()
                         .position(|r| r.id == repair.id)
                         .unwrap();
-                    self.intelligence.book.repairs[index].status = "Läuft".into();
+                    self.intelligence.book.repairs[index].status = "Running".into();
                     if self.save_knowledge() {
                         match self.intelligence.queue.enqueue(spec) {
                             Ok(id) => {
@@ -510,39 +510,39 @@ impl AivanaApp {
                             }
                             Err(e) => {
                                 self.intelligence.book.repairs[index].status =
-                                    "Nicht gestartet".into();
+                                    "Not started".into();
                                 self.status = e;
                                 self.save_knowledge();
                             }
                         }
                     } else {
                         self.intelligence.book.repairs[index].status =
-                            "Vorprüfung bestätigt".into();
+                            "Preflight check confirmed".into();
                     }
                     self.intelligence.confirmed = false;
                 }
             }
-            if !eligible && repair.status == "Vorprüfung bestätigt" {
-                ui.small("Vorprüfung erneuern oder Ziel/Sollzustand prüfen. Bei gleichem Zustand ist keine Änderung nötig.");
+            if !eligible && repair.status == "Preflight check confirmed" {
+                ui.small("Repeat the preflight check or review the target/desired state. No change is needed if the state already matches.");
             }
         }
         if let Some((id, _)) = &self.intelligence.pending {
             ui.horizontal(|ui| {
                 ui.spinner();
-                if ui.button("Lokalen Job abbrechen").clicked() {
+                if ui.button("Cancel local job").clicked() {
                     if let Some(job) = self.intelligence.queue.jobs.iter().find(|j| j.id == *id) {
                         job.cancel();
                     }
                 }
             });
-            ui.small("Ein Abbruch kann die entfernte Ausführung nicht rückgängig machen. Danach erneut prüfen.");
+            ui.small("Canceling cannot undo remote execution. Check again afterward.");
         }
         for r in self.intelligence.book.repairs.iter().rev().take(20) {
             ui.collapsing(
                 format!("{} · {} · {}", r.target.name, r.service, r.status),
                 |ui| {
                     ui.label(format!(
-                        "Voraussetzung: {} / {} · {}",
+                        "Prerequisite: {} / {} · {}",
                         r.before.label(),
                         r.target.host,
                         r.captured

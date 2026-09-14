@@ -31,7 +31,7 @@ impl AivanaApp {
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     self.test_lab.worker = None;
-                    self.test_lab.notice = "Lab-Worker unerwartet beendet; Journal prüfen".into();
+                    self.test_lab.notice = "Lab worker ended unexpectedly; check the journal".into();
                 }
                 _ => {}
             }
@@ -55,47 +55,47 @@ impl AivanaApp {
                 Err(e) => state.notice = format!("Journal: {e:#}"),
             };
         }
-        ui.heading("Isoliertes Hyper-V-Testlabor");
-        ui.label("Generation 2 · 2 GB RAM · eigener privater Switch · differenzierende VHDX. Windows-Gast mit PowerShell Direct und lokalem Gastkonto erforderlich.");
-        ui.label("Vorlage: offline, keinem bestehenden VM-Laufwerk zugeordnet, eigenständige VHDX mit Schreibschutz. Den Eltern-Datenträger unverändert lassen, solange ein Lab besteht.");
+        ui.heading("Isolated Hyper-V test lab");
+        ui.label("Generation 2 · 2 GB RAM · dedicated private switch · differencing VHDX. Requires a Windows guest with PowerShell Direct and a local guest account.");
+        ui.label("Template: offline, not attached to an existing VM drive, standalone read-only VHDX. Keep the parent disk unchanged while a lab exists.");
         ui.add_enabled_ui(state.worker.is_none() && !state.trial.busy(),|ui| {
-   if ui.button("Host-Voraussetzungen prüfen (nur lesen)").clicked(){state.review=Some((Action::Preflight,None));}
-   ui.horizontal(|ui|{ui.label("Offline-Vorlage VHDX");ui.text_edit_singleline(&mut state.template);});
-   if ui.button("Neues Lab vorbereiten …").clicked(){match test_lab::new_lab(&state.template){Ok(j)=>state.review=Some((Action::Create,Some(j))),Err(e)=>state.notice=format!("{e:#}")};}
+   if ui.button("Check host prerequisites (read-only)").clicked(){state.review=Some((Action::Preflight,None));}
+   ui.horizontal(|ui|{ui.label("Offline VHDX template");ui.text_edit_singleline(&mut state.template);});
+   if ui.button("Prepare new lab …").clicked(){match test_lab::new_lab(&state.template){Ok(j)=>state.review=Some((Action::Create,Some(j))),Err(e)=>state.notice=format!("{e:#}")};}
    ui.separator();
-   if ui.button("Journale neu laden").clicked(){match test_lab::journals(){Ok(l)=>{state.labs=l;state.selected=None;},Err(e)=>state.notice=format!("{e:#}")};}
+   if ui.button("Reload journals").clicked(){match test_lab::journals(){Ok(l)=>{state.labs=l;state.selected=None;},Err(e)=>state.notice=format!("{e:#}")};}
    for (i,j) in state.labs.iter().enumerate(){if ui.selectable_label(state.selected==Some(i),format!("{} · {}",j.name,j.phase)).clicked(){state.selected=Some(i);}}
    if let Some(j)=state.selected.and_then(|i|state.labs.get(i)).cloned(){
     ui.label(format!("VM-ID: {}\nSwitch-ID: {}\n{}\n{}",j.vm_id,j.switch_id,j.directory,j.detail));
-    ui.horizontal(|ui|{ui.label("Gastbenutzer");ui.text_edit_singleline(&mut state.user);});
-    ui.horizontal(|ui|{ui.label("Gastpasswort (nur dieser Test)");ui.add(egui::TextEdit::singleline(&mut state.password).password(true));});
-    ui.horizontal(|ui|{ui.label("Gastdienst für Generalprobe");ui.text_edit_singleline(&mut state.service);});
-    ui.checkbox(&mut state.desired_running,"Gewünschter Zustand: läuft (sonst gestoppt)");
-    ui.checkbox(&mut state.health_enabled,"HTTP-Funktionsprüfung im Gast nach Dienständerung");
-    if state.health_enabled {ui.horizontal(|ui|{ui.label("Loopback-URL");ui.text_edit_singleline(&mut state.health.url);});ui.horizontal(|ui|{ui.label("HTTP-Status");ui.add(egui::DragValue::new(&mut state.health.expected_status).range(100..=599));ui.label("Text muss enthalten sein (optional)");ui.text_edit_singleline(&mut state.health.body_marker);});}
-    if ui.add_enabled(!j.vm_id.is_empty(),egui::Button::new("Dienständerung im Klon proben …")).clicked(){state.review=Some((Action::Test,Some(j.clone())));}
-    if ui.add_enabled(j.phase!="cleaned",egui::Button::new("Dieses Lab aufräumen …")).clicked(){state.review=Some((Action::Cleanup,Some(j)));}
+    ui.horizontal(|ui|{ui.label("Guest user");ui.text_edit_singleline(&mut state.user);});
+    ui.horizontal(|ui|{ui.label("Guest password (this test only)");ui.add(egui::TextEdit::singleline(&mut state.password).password(true));});
+    ui.horizontal(|ui|{ui.label("Guest service for rehearsal");ui.text_edit_singleline(&mut state.service);});
+    ui.checkbox(&mut state.desired_running,"Desired state: running (otherwise stopped)");
+    ui.checkbox(&mut state.health_enabled,"HTTP functional check in the guest after service change");
+    if state.health_enabled {ui.horizontal(|ui|{ui.label("Loopback URL");ui.text_edit_singleline(&mut state.health.url);});ui.horizontal(|ui|{ui.label("HTTP status");ui.add(egui::DragValue::new(&mut state.health.expected_status).range(100..=599));ui.label("Required text (optional)");ui.text_edit_singleline(&mut state.health.body_marker);});}
+    if ui.add_enabled(!j.vm_id.is_empty(),egui::Button::new("Rehearse service change in clone …")).clicked(){state.review=Some((Action::Test,Some(j.clone())));}
+    if ui.add_enabled(j.phase!="cleaned",egui::Button::new("Clean up this lab …")).clicked(){state.review=Some((Action::Cleanup,Some(j)));}
    }
    if let Some((action,j))=state.review.clone(){
-    ui.separator();ui.strong("Ausführung prüfen");
-    ui.label(match action{Action::Preflight=>"Hyper-V-Modul, Administratorrechte, VMMS und PowerShell-Direct-Unterstützung lesen.",Action::Create=>"Privaten Switch, Kind-VHDX und neue VM anlegen; VM starten. Keine Netzwerkverbindung zum Host oder Produktionsnetz.",Action::Test=>"Den Gastdienst starten/stoppen, den Zielzustand prüfen und optional den lokalen HTTP-Endpunkt abrufen. Bei Fehler ursprünglichen Dienstzustand wiederherstellen. Erfolgreiche Änderungen bleiben im Klon.",Action::Cleanup=>"Nach Besitzprüfung ausschließlich diese VM hart ausschalten, entfernen, ihren privaten Switch und ihre Kind-VHDX löschen. Journal und Restverzeichnisse bleiben erhalten."});
-    if action==Action::Test {ui.label(format!("Dienst: {} · Ziel: {}",state.service,if state.desired_running{"Running"}else{"Stopped"}));}
+    ui.separator();ui.strong("Review execution");
+    ui.label(match action{Action::Preflight=>"Check the Hyper-V module, administrator privileges, VMMS, and PowerShell Direct support.",Action::Create=>"Create a private switch, child VHDX, and new VM; start the VM. No network connection to the host or production network.",Action::Test=>"Start/stop the guest service, verify the target state, and optionally fetch the local HTTP endpoint. Restore the original service state on failure. Successful changes remain in the clone.",Action::Cleanup=>"After verifying ownership, forcibly turn off and remove only this VM, and delete its private switch and child VHDX. The journal and remaining directories are retained."});
+    if action==Action::Test {ui.label(format!("Service: {} · Target: {}",state.service,if state.desired_running{"Running"}else{"Stopped"}));}
     if action==Action::Test && state.health_enabled {ui.label(format!("HTTP GET {} · Status {} · Text: {}",state.health.url,state.health.expected_status,state.health.body_marker));}
-    if let Some(j)=&j{ui.label(format!("{}\nVorlage: {}\nZiel: {}",j.name,j.template,j.directory));}
+    if let Some(j)=&j{ui.label(format!("{}\nTemplate: {}\nTarget: {}",j.name,j.template,j.directory));}
     ui.horizontal(|ui|{
-     if ui.button("Jetzt ausführen").clicked(){
+     if ui.button("Run now").clicked(){
       let (tx,rx)=std::sync::mpsc::channel();state.worker=Some(rx);state.review=None;
       let user=state.user.clone();let password=std::mem::take(&mut state.password);let service=state.service.clone();let desired_running=state.desired_running;let health=if state.health_enabled{state.health.clone()}else{test_lab::HealthProbe::default()};
       std::thread::spawn(move||{let _=tx.send(test_lab::execute(action,j,user,password,service,desired_running,health).map_err(|e|format!("{e:#}")));});
      }
-     if ui.button("Verwerfen").clicked(){state.review=None;}
+     if ui.button("Discard").clicked(){state.review=None;}
     });
    }
   });
         if state.worker.is_some() {
             ui.spinner();
             ui.label(
-                "Lab-Aktion läuft (max. 180 Sekunden). Bei Abbruch Journal und Ressourcen prüfen.",
+                "Lab action running (up to 180 seconds). If canceled, check the journal and resources.",
             );
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(200));
@@ -106,8 +106,8 @@ impl AivanaApp {
             state.trial.draw(ui, &journal, state.worker.is_some());
         } else {
             ui.separator();
-            ui.heading("Änderung & Fehler im Klon erproben");
-            ui.label("Wähle einen laufenden Relayne-Klon, um eine Starttypänderung, einen gezielten Dienstausfall und den Rückweg per Checkpoint zu prüfen.");
+            ui.heading("Test changes and failures in a clone");
+            ui.label("Select a running Relayne clone to test a startup type change, a deliberate service outage, and checkpoint rollback.");
         }
     }
 }

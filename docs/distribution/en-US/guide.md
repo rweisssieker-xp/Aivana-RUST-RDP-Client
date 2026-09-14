@@ -1,5 +1,7 @@
 # Relayne — distribution and operations guide
 
+> Historical September 13 development-package snapshot. For the current September 14 application and production-script behavior, use the [current operating guide](manual.md).
+
 Development draft · 2026-09-13 · en-US
 
 ## Status and scope

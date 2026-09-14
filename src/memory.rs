@@ -90,17 +90,17 @@ impl MemoryStore {
         match self.host_memory(host) {
             Some(memory) if !memory.successful_fixes.is_empty() => {
                 format!(
-                    "Letzten erfolgreichen Fix pruefen: {}",
+                    "Review the last successful fix: {}",
                     memory.successful_fixes.last().unwrap()
                 )
             }
             Some(memory) if !memory.known_issues.is_empty() => {
                 format!(
-                    "Known Issue pruefen: {}",
+                    "Review the known issue: {}",
                     memory.known_issues.last().unwrap()
                 )
             }
-            _ => "Evidence Mode starten und sichere Diagnosebeweise sammeln.".to_owned(),
+            _ => "Start Evidence Mode and collect safe diagnostic evidence.".to_owned(),
         }
     }
 

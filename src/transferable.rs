@@ -69,14 +69,14 @@ pub fn validate_run(
         })
         .collect();
     if parameters.keys().any(|name| !names.contains(name)) {
-        bail!("Unbekannter Ablaufparameter");
+        bail!("Unknown workflow parameter");
     }
     if procedure.expected_final.is_none() {
-        bail!("Gesamtablauf benötigt eine sichtbare Endbedingung");
+        bail!("The complete workflow requires a visible final condition");
     }
     for (index, step) in procedure.steps.iter().enumerate() {
         if !procedure.expected_after.contains_key(&index) {
-            bail!("Schritt {} benötigt eine OCR-Nachbedingung", index + 1);
+            bail!("Step {} requires an OCR postcondition", index + 1);
         }
         let action = match step {
             Step::TransferClick { button, double, .. }
@@ -100,22 +100,22 @@ pub fn validate_run(
                 validate_parameter(name)?;
                 let value = parameters
                     .get(name)
-                    .ok_or_else(|| anyhow::anyhow!("Parameter {name} fehlt"))?;
+                    .ok_or_else(|| anyhow::anyhow!("Parameter {name} is missing"))?;
                 if value.is_empty() || value.len() > 4096 || value.chars().any(char::is_control) {
-                    bail!("Parameter {name} benötigt einen begrenzten Text ohne Steuerzeichen");
+                    bail!("Parameter {name} requires bounded text without control characters");
                 }
                 crate::models::InputAction::TypeText {
                     text: value.clone(),
                 }
             }
             _ => bail!(
-                "Gesamtablauf erlaubt nur semantische Klicks und benannte Parameter; Schritt {} prüfen",
+                "The complete workflow permits only semantic clicks and named parameters; review step {}",
                 index + 1
             ),
         };
         if crate::policy::PolicyEngine.decision_for(&action) == crate::models::PolicyDecision::Deny
         {
-            bail!("Schritt {} ist durch Richtlinie gesperrt", index + 1);
+            bail!("Step {} is blocked by policy", index + 1);
         }
     }
     Ok(())
@@ -141,10 +141,10 @@ impl LogicalTarget {
             })
             .collect();
         let [word] = hits.as_slice() else {
-            bail!("Klick benötigt Anker: kein eindeutiges sichtbares Wort getroffen");
+            bail!("Click requires an anchor: no unique visible word was selected");
         };
         if !crate::vision::safe_anchor_text(&word.text) {
-            bail!("Ankertext möglicherweise vertraulich; manuell binden");
+            bail!("Anchor text may be sensitive; bind it manually");
         }
         let mut target = Self {
             anchor: Anchor {
@@ -174,7 +174,7 @@ impl LogicalTarget {
             target.context_offset = Some(offset(word.bounds, c.bounds));
         }
         if target.resolve(screen)? != word.bounds {
-            bail!("Automatischer Anker nicht eindeutig");
+            bail!("Automatic anchor is not unique");
         }
         Ok(target)
     }
@@ -183,7 +183,7 @@ impl LogicalTarget {
             || self.anchor.label.len() > 256
             || self.anchor.context.len() > 256
         {
-            bail!("Ungültiger Zielanker");
+            bail!("Invalid target anchor");
         }
         let found: Vec<_> = screen
             .words
@@ -215,8 +215,8 @@ impl LogicalTarget {
             {
                 Ok(w.bounds)
             }
-            [] => bail!("Ziel oder relativer Kontext fehlt: neu verankern"),
-            _ => bail!("Ziel mehrdeutig oder Geometrie ungültig: keine Aktion"),
+            [] => bail!("Target or relative context is missing: anchor again"),
+            _ => bail!("Target is ambiguous or geometry is invalid: no action"),
         }
     }
 }
@@ -234,7 +234,7 @@ pub fn validate_parameter(name: &str) -> Result<()> {
         || name.len() > 64
         || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
     {
-        bail!("Parametername: 1–64 Buchstaben, Ziffern oder Unterstriche");
+        bail!("Parameter name: 1–64 letters, digits, or underscores");
     }
     Ok(())
 }

@@ -43,8 +43,8 @@ impl AivanaApp {
         incident::normalize(records)
     }
     pub(super) fn incident_view(&mut self, ui: &mut Ui) {
-        ui.heading("Störung rekonstruieren");
-        ui.label("Sitzungsaktionen, Änderungen, Telemetrie und Prüfresultate in einer gemeinsamen Zeitleiste. Zeitliche Nähe ist kein Kausalitätsnachweis.");
+        ui.heading("Reconstruct an incident");
+        ui.label("Session actions, changes, telemetry, and check results on a shared timeline. Events occurring close together do not establish causation.");
         ui.horizontal_wrapped(|ui| {
             egui::ComboBox::from_id_salt("incident-profile")
                 .selected_text(
@@ -56,15 +56,15 @@ impl AivanaApp {
                                 .find(|p| p.id == id)
                                 .map(|p| p.name.as_str())
                         })
-                        .unwrap_or("Alle Rechner"),
+                        .unwrap_or("All computers"),
                 )
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.incident.profile, None, "Alle Rechner");
+                    ui.selectable_value(&mut self.incident.profile, None, "All computers");
                     for p in &self.profiles {
                         ui.selectable_value(&mut self.incident.profile, Some(p.id), &p.name);
                     }
                 });
-            ui.label("Suchfenster vor Fehler:");
+            ui.label("Lookback window before failure:");
             ui.add(
                 egui::DragValue::new(&mut self.incident.minutes)
                     .range(1..=120)
@@ -72,7 +72,7 @@ impl AivanaApp {
             );
             ui.add(
                 egui::TextEdit::singleline(&mut self.incident.query)
-                    .hint_text("Zeitleiste durchsuchen")
+                    .hint_text("Search timeline")
                     .desired_width(220.0),
             );
         });
@@ -81,34 +81,34 @@ impl AivanaApp {
             incident::hypotheses(&records, &self.insights.store.edges, self.incident.minutes);
         ui.separator();
         ui.strong(format!(
-            "{} belegte Ereignisse · {} zeitliche Zusammenhänge",
+            "{} documented events · {} temporal correlations",
             records.len(),
             candidates.len()
         ));
-        ui.label("Dienständerungen aus Telemetrie sind nur auf das Intervall zwischen Erfassungen eingrenzbar. Ereignisprotokolle verwenden Rechnerzeiten; abweichende Uhren können die Reihenfolge beeinflussen.");
+        ui.label("Service changes from telemetry can only be narrowed down to the interval between captures. Event logs use computer clocks; clock differences may affect ordering.");
         if ui
-            .button("Metadatenbericht verschlüsselt speichern")
+            .button("Save encrypted metadata report")
             .clicked()
         {
             let result = (|| -> anyhow::Result<std::path::PathBuf> {
                 let path = app_data_file("relayne-incident-report.dpapi")?;
                 let bytes = serde_json::to_vec_pretty(
-                    &serde_json::json!({"schema":1,"generated":Utc::now(),"note":"Zeitliche Zusammenhänge, keine bestätigten Ursachen", "records":records,"hypotheses":candidates}),
+                    &serde_json::json!({"schema":1,"generated":Utc::now(),"note":"Temporal correlations, not confirmed causes", "records":records,"hypotheses":candidates}),
                 )?;
                 crate::security::atomic_write(&path, &crate::security::protect_secret(&bytes)?)?;
                 Ok(path)
             })();
             self.incident.export_status = match result {
-                Ok(p) => format!("Gespeichert: {}", p.display()),
-                Err(e) => format!("Nicht gespeichert: {e}"),
+                Ok(p) => format!("Saved: {}", p.display()),
+                Err(e) => format!("Not saved: {e}"),
             };
         }
         ui.label(&self.incident.export_status);
-        ui.collapsing("Ursachenhypothesen mit Belegen",|ui|{
-            if candidates.is_empty(){ui.label("Keine passende vorangegangene Änderung belegt.");}
+        ui.collapsing("Potential causes with evidence",|ui|{
+            if candidates.is_empty(){ui.label("No matching preceding change documented.");}
             for h in candidates.iter().filter(|h|self.incident.profile.is_none_or(|p|records.iter().any(|r|r.id==h.failure && r.profile==Some(p)))) {
                 let change=records.iter().find(|r|r.id==h.change);let failure=records.iter().find(|r|r.id==h.failure);
-                if let (Some(c),Some(f))=(change,failure){ui.group(|ui|{ui.label(format!("{} Sekunden zuvor: {}",h.seconds_before,c.title));ui.label(format!("Danach: {}",f.title));ui.label(&h.relationship);ui.label("Nächster Schritt: betroffene Funktion und Abhängigkeit gezielt prüfen; weitere Änderungen als Gegenhypothese vergleichen.");ui.small(format!("Belege: {}",h.evidence.join(" · ")));});}
+                if let (Some(c),Some(f))=(change,failure){ui.group(|ui|{ui.label(format!("{} seconds earlier: {}",h.seconds_before,c.title));ui.label(format!("Afterward: {}",f.title));ui.label(&h.relationship);ui.label("Next step: check the affected function and dependency directly; compare other changes as alternative explanations.");ui.small(format!("Evidence: {}",h.evidence.join(" · ")));});}
             }
         });
         let query = self.incident.query.to_lowercase();
@@ -124,16 +124,16 @@ impl AivanaApp {
             ui.group(|ui| {
                 ui.label(format!(
                     "{} · {:?}",
-                    r.at.format("%d.%m.%Y %H:%M:%S UTC"),
+                    r.at.format("%m/%d/%Y %H:%M:%S UTC"),
                     r.kind
                 ));
                 ui.label(&r.title);
-                ui.small(format!("{} · Belege: {}", r.id, r.evidence.join(" · ")));
+                ui.small(format!("{} · Evidence: {}", r.id, r.evidence.join(" · ")));
             });
         }
         if records.is_empty() {
             ui.label(
-                "Noch keine Befunde. Erfasse Telemetrie oder führe einen geprüften Auftrag aus.",
+                "No findings yet. Capture telemetry or run a reviewed job.",
             );
         }
     }

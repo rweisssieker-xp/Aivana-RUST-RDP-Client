@@ -27,15 +27,15 @@ impl Options {
     pub fn validate(&self, tls: bool) -> Result<()> {
         ensure!(
             self.form.len() + self.secret_fields.len() <= 32 && self.json_equals.len() <= 16,
-            "HTTP-Feldgrenze überschritten"
+            "HTTP field limit exceeded"
         );
         ensure!(
             self.method == Method::Post || (self.form.is_empty() && self.secret_fields.is_empty()),
-            "GET kann keine Formulare senden"
+            "GET cannot submit forms"
         );
         ensure!(
             tls || self.secret_fields.is_empty(),
-            "Secret-Slots benötigen HTTPS"
+            "Secret slots require HTTPS"
         );
         for (k, v) in self.form.iter().chain(&self.secret_fields) {
             ensure!(
@@ -44,13 +44,13 @@ impl Options {
                     && v.len() <= 4096
                     && !k.chars().any(char::is_control)
                     && !v.chars().any(char::is_control),
-                "Ungültiges Formularfeld"
+                "Invalid form field"
             );
         }
         for (k, v) in &self.secret_fields {
             ensure!(
                 !self.form.contains_key(k) && !v.is_empty() && v.len() <= 128,
-                "Doppeltes Feld oder ungültiger Secret-Slot"
+                "Duplicate field or invalid secret slot"
             );
         }
         for (pointer, value) in &self.json_equals {
@@ -58,14 +58,14 @@ impl Options {
                 pointer.len() <= 512
                     && (pointer.is_empty() || pointer.starts_with('/'))
                     && !pointer.chars().any(char::is_control),
-                "Ungültiger JSON-Pointer"
+                "Invalid JSON pointer"
             );
             let mut chars = pointer.chars();
             while let Some(c) = chars.next() {
                 if c == '~' {
                     ensure!(
                         matches!(chars.next(), Some('0' | '1')),
-                        "Ungültiges JSON-Pointer-Escape"
+                        "Invalid JSON pointer escape"
                     );
                 }
             }
@@ -76,12 +76,12 @@ impl Options {
                         ..=9_007_199_254_740_991)
                         .contains(&n))
                     || value.as_str().is_some_and(|s| s.len() <= 1024),
-                "JSON-Assertions unterstützen String, Bool, null oder Ganzzahlen von -9007199254740991 bis 9007199254740991"
+                "JSON assertions support strings, Booleans, null, or integers from -9007199254740991 to 9007199254740991"
             );
         }
         ensure!(
             serde_json::to_vec(self)?.len() <= 16384,
-            "HTTP-Prüfschritt zu groß"
+            "HTTP check step is too large"
         );
         Ok(())
     }
@@ -91,7 +91,7 @@ impl Options {
                 values.get(slot).is_some_and(|v| !v.is_empty()
                     && v.len() <= 4096
                     && !v.chars().any(char::is_control)),
-                "Secret-Slot fehlt oder ist ungültig: {slot}"
+                "Secret slot is missing or invalid: {slot}"
             );
         }
         let size: usize = self
@@ -104,7 +104,7 @@ impl Options {
                     .map(|(k, slot)| k.len() + values[slot].len() + 2),
             )
             .sum();
-        ensure!(size <= 32768, "Formular überschreitet 32 KiB");
+        ensure!(size <= 32768, "Form exceeds 32 KiB");
         Ok(())
     }
 }
@@ -113,7 +113,7 @@ fn cookies(headers: &reqwest::header::HeaderMap, jar: &mut Values, tls: bool) ->
         let raw = h.to_str()?;
         ensure!(
             raw.len() <= 4096 && raw.is_ascii(),
-            "Cookie zu groß oder nicht ASCII"
+            "Cookie is too large or not ASCII"
         );
         let parts: Vec<_> = raw.split(';').map(str::trim).collect();
         let attrs = &parts[1..];
@@ -124,11 +124,11 @@ fn cookies(headers: &reqwest::header::HeaderMap, jar: &mut Values, tls: bool) ->
                     .any(|s| s.to_ascii_lowercase().starts_with("domain=")
                         || (s.to_ascii_lowercase().starts_with("path=")
                             && !s.eq_ignore_ascii_case("path=/"))),
-            "Nur hosteigene Path=/-Session-Cookies erlaubt"
+            "Only host-only Path=/ session cookies are allowed"
         );
         let (name, value) = parts[0]
             .split_once('=')
-            .ok_or_else(|| anyhow::anyhow!("Cookie ungültig"))?;
+            .ok_or_else(|| anyhow::anyhow!("Invalid cookie"))?;
         ensure!(
             !name.is_empty()
                 && name.len() <= 128
@@ -138,7 +138,7 @@ fn cookies(headers: &reqwest::header::HeaderMap, jar: &mut Values, tls: bool) ->
                 && value
                     .bytes()
                     .all(|b| (0x21..=0x7e).contains(&b) && !b"\";,\\".contains(&b)),
-            "Cookie-Zeichen ungültig"
+            "Invalid cookie characters"
         );
         if attrs.iter().any(|s| s.eq_ignore_ascii_case("secure")) && !tls {
             continue;
@@ -157,11 +157,11 @@ fn cookies(headers: &reqwest::header::HeaderMap, jar: &mut Values, tls: bool) ->
                 && !attrs
                     .iter()
                     .any(|s| s.to_ascii_lowercase().starts_with("expires=")),
-            "Nur Sitzungscookies ohne Ablaufzeit unterstützt"
+            "Only session cookies without expiry are supported"
         );
         ensure!(
             jar.len() < 32 || jar.contains_key(name),
-            "Cookie-Grenze überschritten"
+            "Cookie limit exceeded"
         );
         jar.insert(name.into(), value.into());
     }
@@ -193,7 +193,7 @@ pub fn execute(
     for step in std::iter::once(&first).chain(steps) {
         let mut endpoint = base.clone();
         endpoint.set_path(&step.path);
-        ensure!(endpoint.origin() == base.origin(), "HTTP-Origin geändert");
+        ensure!(endpoint.origin() == base.origin(), "HTTP origin changed");
         let mut fields = step.options.form.clone();
         for (field, slot) in &step.options.secret_fields {
             fields.insert(field.clone(), values[slot].clone());
@@ -218,14 +218,14 @@ pub fn execute(
         cookies(response.headers(), &mut jar, base.scheme() == "https")?;
         let mut body = vec![];
         response.take(65537).read_to_end(&mut body)?;
-        ensure!(body.len() <= 65536, "HTTP-Antwort zu groß");
+        ensure!(body.len() <= 65536, "HTTP response is too large");
         let body = String::from_utf8_lossy(&body);
         if !body.contains(&step.contains) {
             return Ok(false);
         }
         if !step.options.json_equals.is_empty() {
             let json: serde_json::Value = serde_json::from_str(&body)?;
-            ensure!(json_depth(&json) <= 32, "JSON-Verschachtelungsgrenze");
+            ensure!(json_depth(&json) <= 32, "JSON nesting limit");
             for (pointer, expected) in &step.options.json_equals {
                 if json.pointer(pointer) != Some(expected) {
                     return Ok(false);

@@ -66,7 +66,7 @@ impl Terminal {
                 commands: commands.clone(),
             },
         )));
-        let status = Arc::new(Mutex::new("OpenSSH gestartet".into()));
+        let status = Arc::new(Mutex::new("OpenSSH started".into()));
         let output = parser.clone();
         thread::spawn(move || {
             let mut bytes = [0u8; 8192];
@@ -136,11 +136,11 @@ impl Terminal {
     }
     pub fn input(&self, bytes: Vec<u8>) -> Result<(), String> {
         if bytes.len() > 65536 {
-            return Err("Eingabe ist auf 64 KiB begrenzt.".into());
+            return Err("Input is limited to 64 KiB.".into());
         }
         self.commands
             .try_send(Command::Input(bytes))
-            .map_err(|_| "Terminal-Eingabepuffer voll oder Sitzung beendet.".into())
+            .map_err(|_| "Terminal input buffer full or session ended.".into())
     }
     pub fn resize(&mut self, rows: u16, cols: u16) {
         let size = (rows.clamp(2, 160), cols.clamp(10, 320));

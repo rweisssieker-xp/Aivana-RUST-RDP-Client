@@ -9,10 +9,13 @@ mod diagnostics;
 mod equivalence;
 mod execution;
 mod health_suggestions;
+mod application_checks;
 mod incident;
 mod integrations;
 mod intelligence;
 mod localization;
+mod ticket_intake;
+mod ticket_escalation;
 mod release_readiness;
 mod diagnostic_lab;
 #[cfg(test)]

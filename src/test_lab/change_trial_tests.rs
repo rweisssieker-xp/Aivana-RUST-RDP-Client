@@ -1,4 +1,55 @@
 use super::*;
+
+fn fixture_replace_once(source: &str, needle: &str, replacement: &str) -> String {
+    let source = source.replace("\r\n", "\n");
+    let needle = needle.replace("\r\n", "\n");
+    assert_eq!(
+        source.matches(&needle).count(),
+        1,
+        "Offline fixture injection point changed; refuse to execute PowerShell"
+    );
+    source.replacen(&needle, &replacement.replace("\r\n", "\n"), 1)
+}
+
+#[cfg(windows)]
+fn run_trial_fixture(script: &str, payload: serde_json::Value) -> anyhow::Result<String> {
+    // This wrapper must fail before launching PowerShell if test-double injection
+    // drifted. The real adapter is never a valid fallback for a fixture.
+    for declaration in [
+        "function Get-VMSnapshot",
+        "function Checkpoint-VM",
+        "function Restore-VMSnapshot",
+        "function Remove-VMSnapshot",
+        "function Guest-Step($mode,$original){\n    if($p.scenario",
+    ] {
+        assert!(
+            script.contains(declaration),
+            "Required offline double is missing: {declaration}"
+        );
+    }
+    let entry = script
+        .find("try {\n    if($r.vm_id")
+        .expect("Fixture main entry missing");
+    assert!(
+        script.rfind("function Guest-Step").unwrap() < entry,
+        "Doubles must be installed before execution"
+    );
+    run_script(script, payload)
+}
+
+#[test]
+fn trial_fixture_replacement_normalizes_crlf_and_rejects_drift() {
+    assert_eq!(
+        fixture_replace_once("before\r\nhook\r\nafter", "\nhook\n", "\nDOUBLE\n"),
+        "before\nDOUBLE\nafter"
+    );
+    assert!(
+        std::panic::catch_unwind(|| fixture_replace_once("changed", "hook", "double")).is_err()
+    );
+    assert!(
+        std::panic::catch_unwind(|| fixture_replace_once("hook hook", "hook", "double")).is_err()
+    );
+}
 fn request() -> Request {
     Request {
         id: Uuid::new_v4(),
@@ -128,14 +179,19 @@ fn trial_adapter_records_actual_stages_and_always_attempts_return() {
         let r = request();
         let dir = std::env::temp_dir().join(format!("relayne-trial-fixture-{}", r.id));
         std::fs::create_dir_all(dir.join("receipts/change-trials")).unwrap();
-        let script = include_str!("change_trial.ps1").replace(
+        let script = fixture_replace_once(
+            include_str!("change_trial.ps1"),
             "try {\n    if($r.vm_id",
             &format!("{DOUBLES}\ntry {{\n    if($r.vm_id"),
         );
-        let script = script.replace("# Persist only a bounded stage, never raw guest errors, credentials or response bodies.", "if($p.scenario -eq 'success'){throw}");
+        let script = fixture_replace_once(
+            &script,
+            "# Persist only a bounded stage, never raw guest errors, credentials or response bodies.",
+            "if($p.scenario -eq 'success'){throw}",
+        );
         assert!(script.contains("function Guest-Step($mode,$original){\n    if($p.scenario"));
         let payload = serde_json::json!({"lab":{"id":r.lab_id,"vm_id":r.vm_id,"directory":dir},"request":r,"hash":r.hash().unwrap(),"checkpoint":r.checkpoint_name(),"user":"fixture-user","password":"fixture-secret","recover":false,"scenario":scenario});
-        let output = run_script(&script, payload).unwrap();
+        let output = run_trial_fixture(&script, payload).unwrap();
         assert!(!output.contains("fixture-secret"));
         let proof: Proof = serde_json::from_str(&output).unwrap();
         proof.validate(&r).unwrap();
@@ -158,7 +214,7 @@ fn trial_adapter_records_actual_stages_and_always_attempts_return() {
             _ => assert!(proof.settled()),
         }
         if scenario == "return-failure" {
-            let restored: Proof = serde_json::from_str(&run_script(&script,serde_json::json!({"lab":{"id":r.lab_id,"vm_id":r.vm_id,"directory":dir},"request":r,"hash":r.hash().unwrap(),"checkpoint":r.checkpoint_name(),"user":"fixture-user","password":"fixture-secret","recover":true,"scenario":"success"})).unwrap()).unwrap();
+            let restored: Proof = serde_json::from_str(&run_trial_fixture(&script,serde_json::json!({"lab":{"id":r.lab_id,"vm_id":r.vm_id,"directory":dir},"request":r,"hash":r.hash().unwrap(),"checkpoint":r.checkpoint_name(),"user":"fixture-user","password":"fixture-secret","recover":true,"scenario":"success"})).unwrap()).unwrap();
             restored.validate(&r).unwrap();
             assert!(restored.returned && restored.checkpoint_removed);
             assert!(
@@ -204,7 +260,7 @@ fn trial_history_fails_closed_on_corruption_and_binds_restore_to_request() {
         )
         .unwrap_err()
         .to_string()
-        .contains("Offenen Versuch")
+        .contains("Recover the open trial first")
     );
     let restore_path = store.join(format!("{}.restore.dpapi", r.id));
     r.spec.startup = Startup::Automatic;
@@ -288,16 +344,21 @@ function Restore-VMSnapshot {param([Parameter(ValueFromPipeline=$true)]$InputObj
         r.spec.health.url = format!("http://{addr}/health");
         let dir = std::env::temp_dir().join(format!("relayne-trial-guest-{}", r.id));
         std::fs::create_dir_all(dir.join("receipts/change-trials")).unwrap();
-        let script = include_str!("change_trial.ps1").replace(
+        let script = fixture_replace_once(
+            include_str!("change_trial.ps1"),
             "try {\n    if($r.vm_id",
             &format!("{DOUBLES}\n{GUEST_DOUBLES}\ntry {{\n    if($r.vm_id"),
         );
         let script = if !fault_healthy && !return_unhealthy {
-            script.replace("# Persist only a bounded stage, never raw guest errors, credentials or response bodies.", "throw")
+            fixture_replace_once(
+                &script,
+                "# Persist only a bounded stage, never raw guest errors, credentials or response bodies.",
+                "throw",
+            )
         } else {
             script
         };
-        let output = run_script(
+        let output = run_trial_fixture(
             &script,
             serde_json::json!({"lab":{"id":r.lab_id,"vm_id":r.vm_id,"directory":dir},"request":r,"hash":r.hash().unwrap(),"checkpoint":r.checkpoint_name(),"user":"fixture-user","password":"fixture-secret","recover":false}),
         );
@@ -353,12 +414,13 @@ function Checkpoint-VM {$global:forbiddenCall=$true;throw 'Checkpoint must not r
         let dir = std::env::temp_dir().join(format!("relayne-trial-topology-{}", r.id));
         std::fs::create_dir_all(dir.join("receipts/change-trials")).unwrap();
         std::fs::write(dir.join("child.vhdx"), b"fixture").unwrap();
-        let doubles = DOUBLES.replace(
+        let doubles = fixture_replace_once(
+            DOUBLES,
             "function Owned-VM { [pscustomobject]@{CheckpointType='Standard';State='Running'} }",
             "",
         );
-        let script=include_str!("change_trial.ps1").replace("try {\n    if($r.vm_id",&format!("{doubles}\n{TOPOLOGY}\ntry {{\n    if($r.vm_id")).replace("$proof|ConvertTo-Json -Compress", "if($global:forbiddenCall){throw 'Guard allowed forbidden call'}\n$proof|ConvertTo-Json -Compress");
-        let output=run_script(&script,serde_json::json!({"lab":{"id":r.lab_id,"vm_id":r.vm_id,"directory":dir,"name":"Owned","switch_id":Uuid::new_v4(),"template":"fixture.vhdx"},"request":r,"hash":r.hash().unwrap(),"checkpoint":r.checkpoint_name(),"user":"fixture","password":"fixture","recover":false,"scenario":scenario})).unwrap();
+        let script=fixture_replace_once(include_str!("change_trial.ps1"),"try {\n    if($r.vm_id",&format!("{doubles}\n{TOPOLOGY}\ntry {{\n    if($r.vm_id")).replace("$proof|ConvertTo-Json -Compress", "if($global:forbiddenCall){throw 'Guard allowed forbidden call'}\n$proof|ConvertTo-Json -Compress");
+        let output=run_trial_fixture(&script,serde_json::json!({"lab":{"id":r.lab_id,"vm_id":r.vm_id,"directory":dir,"name":"Owned","switch_id":Uuid::new_v4(),"template":"fixture.vhdx"},"request":r,"hash":r.hash().unwrap(),"checkpoint":r.checkpoint_name(),"user":"fixture","password":"fixture","recover":false,"scenario":scenario})).unwrap();
         let proof: Proof = serde_json::from_str(&output).unwrap();
         proof.validate(&r).unwrap();
         assert!(

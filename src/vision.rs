@@ -48,8 +48,8 @@ pub enum AnchorResolutionError {
 impl std::fmt::Display for AnchorResolutionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::Missing => "OCR-Ziel fehlt; auf erwarteten sichtbaren Zustand warten",
-            Self::Ambiguous => "OCR-Ziel mehrdeutig; eindeutigen Kontext ergänzen",
+            Self::Missing => "OCR target is missing; wait for the expected visible state",
+            Self::Ambiguous => "OCR target is ambiguous; add unique context",
         })
     }
 }
@@ -66,7 +66,7 @@ impl Screen {
         let label = normalize(&a.label);
         let context = normalize(&a.context);
         if label.is_empty() || label.len() > 256 || context.len() > 256 {
-            bail!("Ungültiger OCR-Anker");
+            bail!("Invalid OCR anchor");
         }
         let found: Vec<_> = self
             .words
@@ -148,7 +148,7 @@ pub fn safe_anchor_text(s: &str) -> bool {
 /// This is heuristic and cannot identify every secret, image, or custom control.
 pub fn redact(f: &FrameUpdate, screen: &Screen) -> Result<(Vec<crate::recording::Mask>, Screen)> {
     if !screen.matches(f) {
-        bail!("Schwärzung blockiert: OCR gehört nicht zum aktuellen Bild");
+        bail!("Redaction blocked: OCR does not match the current image");
     }
     let mut rects = Vec::new();
     for w in &screen.words {
@@ -158,7 +158,7 @@ pub fn redact(f: &FrameUpdate, screen: &Screen) -> Result<(Vec<crate::recording:
             || u32::from(b.x) + u32::from(b.w) > u32::from(f.width)
             || u32::from(b.y) + u32::from(b.h) > u32::from(f.height)
         {
-            bail!("Schwärzung blockiert: ungültige OCR-Geometrie");
+            bail!("Redaction blocked: invalid OCR geometry");
         }
         if sensitive(&w.text) {
             let y = b.y.saturating_sub(8);
@@ -192,7 +192,7 @@ pub fn recognize(f: &FrameUpdate) -> Result<Screen> {
         || f.pixels_rgba.len() != usize::from(f.width) * usize::from(f.height) * 4
         || f.pixels_rgba.len() > 128 * 1024 * 1024
     {
-        bail!("Ungültiges OCR-Bild");
+        bail!("Invalid OCR image");
     }
     let words = native_words(f)?;
     Ok(Screen {
@@ -206,7 +206,7 @@ pub fn recognize(f: &FrameUpdate) -> Result<Screen> {
 }
 #[cfg(not(windows))]
 fn native_words(_: &FrameUpdate) -> Result<Vec<Word>> {
-    bail!("Lokale OCR benötigt Windows 10/11 und ein installiertes OCR-Sprachpaket")
+    bail!("Local OCR requires Windows 10/11 and an installed OCR language pack")
 }
 #[cfg(windows)]
 fn keep_ocr_runtime_alive() -> Result<()> {
@@ -224,7 +224,7 @@ fn keep_ocr_runtime_alive() -> Result<()> {
             .map_err(|error| error.to_string())
     }) {
         Ok(_) => Ok(()),
-        Err(error) => bail!("Windows-OCR-Laufzeit konnte nicht gehalten werden: {error}"),
+        Err(error) => bail!("Unable to retain Windows OCR runtime: {error}"),
     }
 }
 
@@ -248,10 +248,10 @@ fn native_words(f: &FrameUpdate) -> Result<Vec<Word>> {
     }
     let _apartment = Apartment;
     let engine =
-        OcrEngine::TryCreateFromUserProfileLanguages().context("Windows OCR-Sprachpaket fehlt")?;
+        OcrEngine::TryCreateFromUserProfileLanguages().context("Windows OCR language pack is missing")?;
     let max = OcrEngine::MaxImageDimension()?;
     if u32::from(f.width) > max || u32::from(f.height) > max {
-        bail!("Bild überschreitet Windows OCR-Limit {max}; Aufnahme gestoppt");
+        bail!("Image exceeds Windows OCR limit {max}; recording stopped");
     }
     let mut bgra = f.pixels_rgba.clone();
     for p in bgra.chunks_exact_mut(4) {
@@ -272,7 +272,7 @@ fn native_words(f: &FrameUpdate) -> Result<Vec<Word>> {
     while operation.Status()?.0 == 0 {
         if started.elapsed() > std::time::Duration::from_secs(20) {
             let _ = operation.Cancel();
-            bail!("Lokale OCR-Zeitgrenze erreicht; Aufnahme gestoppt");
+            bail!("Local OCR time limit reached; recording stopped");
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
@@ -281,7 +281,7 @@ fn native_words(f: &FrameUpdate) -> Result<Vec<Word>> {
     for line in result.Lines()? {
         for word in line.Words()? {
             if words.len() >= 10000 {
-                bail!("OCR-Wortlimit überschritten");
+                bail!("OCR word limit exceeded");
             }
             let b = word.BoundingRect()?;
             let x = b.X.floor().max(0.0).min(f.width as f32) as u16;

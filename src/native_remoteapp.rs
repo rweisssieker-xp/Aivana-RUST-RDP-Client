@@ -46,7 +46,7 @@ fn invoke(
     unsafe {
         object
             .GetIDsOfNames(&GUID::zeroed(), &PCWSTR(name_wide.as_ptr()), 1, 0, &mut id)
-            .with_context(|| format!("RDP-Control-Eigenschaft {name} nicht verfügbar"))?;
+            .with_context(|| format!("RDP control property {name} is unavailable"))?;
         object
             .Invoke(
                 id,
@@ -58,7 +58,7 @@ fn invoke(
                 None,
                 None,
             )
-            .with_context(|| format!("RDP-Control-Aufruf {name} fehlgeschlagen"))?;
+            .with_context(|| format!("RDP control call {name} failed"))?;
     }
     Ok(result)
 }
@@ -86,9 +86,9 @@ impl NativeRemoteApp {
     /// `parent` must be the live HWND of the calling UI thread.
     pub fn new(parent: isize) -> Result<Self> {
         if parent == 0 {
-            bail!("RemoteApp benötigt ein gültiges übergeordnetes Fenster");
+            bail!("RemoteApp requires a valid parent window");
         }
-        unsafe { OleInitialize(None) }.context("RemoteApp benötigt einen Windows-STA-UI-Thread")?;
+        unsafe { OleInitialize(None) }.context("RemoteApp requires a Windows STA UI thread")?;
         let created = (|| -> Result<Self> {
             // Keep ATL loaded for process lifetime: its registered window class has DLL callbacks.
             static ATL: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
@@ -97,7 +97,7 @@ impl NativeRemoteApp {
             } else {
                 let module =
                     unsafe { LoadLibraryExW(w!("atl.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) }
-                        .context("Windows ATL ActiveX-Host ist nicht installiert")?;
+                        .context("Windows ATL ActiveX host is not installed")?;
                 let _ = ATL.set(module.0 as usize);
                 module
             };
@@ -109,17 +109,17 @@ impl NativeRemoteApp {
             let initialize: Init = unsafe {
                 std::mem::transmute(
                     GetProcAddress(module, s!("AtlAxWinInit"))
-                        .context("ATL ActiveX-Initialisierung fehlt")?,
+                        .context("ATL ActiveX initialization is unavailable")?,
                 )
             };
             let get_control: GetControl = unsafe {
                 std::mem::transmute(
                     GetProcAddress(module, s!("AtlAxGetControl"))
-                        .context("ATL ActiveX-Zugriff fehlt")?,
+                        .context("ATL ActiveX access is unavailable")?,
                 )
             };
             if unsafe { initialize() } == 0 {
-                bail!("ATL ActiveX-Initialisierung fehlgeschlagen");
+                bail!("ATL ActiveX initialization failed");
             }
             let window = unsafe {
                 CreateWindowExW(
@@ -137,7 +137,7 @@ impl NativeRemoteApp {
                     None,
                 )
             }
-            .context("Windows-RDP-Control konnte nicht eingebettet werden")?;
+            .context("Unable to embed the Windows RDP control")?;
             let mut raw = std::ptr::null_mut();
             if let Err(error) = unsafe { get_control(window, &mut raw).ok() } {
                 unsafe {
@@ -149,7 +149,7 @@ impl NativeRemoteApp {
                 unsafe {
                     let _ = DestroyWindow(window);
                 }
-                bail!("Windows-RDP-Control ist nicht installiert");
+                bail!("Windows RDP control is not installed");
             }
             let unknown = unsafe { IUnknown::from_raw(raw) };
             let control = match unknown.cast::<IDispatch>() {
@@ -185,7 +185,7 @@ impl NativeRemoteApp {
         invoke(
             self.control
                 .as_ref()
-                .context("RemoteApp-Control ist geschlossen")?,
+                .context("RemoteApp control is closed")?,
             "Connect",
             DISPATCH_METHOD,
             vec![],
@@ -200,16 +200,16 @@ impl NativeRemoteApp {
         crate::remoteapp::rdp_document(profile, app)?; // Validate all externally supplied values.
         if profile.options.gateway.enabled && profile.options.gateway.paa {
             bail!(
-                "PAA-Cookies verwenden die native IronRDP-Gateway-Verbindung; der ActiveX-Host unterstützt diese Übergabe nicht"
+                "PAA cookies use the native IronRDP gateway connection; the ActiveX host does not support passing them through"
             );
         }
         if !app.working_directory.is_empty() {
-            bail!("Ein Arbeitsverzeichnis wird für eingebettete RemoteApps noch nicht unterstützt");
+            bail!("A working directory is not yet supported for embedded RemoteApps");
         }
         let control = self
             .control
             .as_ref()
-            .context("RemoteApp-Control ist geschlossen")?;
+            .context("RemoteApp control is closed")?;
         put(control, "Server", profile.host.as_str())?;
         put(control, "UserName", profile.username.as_str())?;
         put(control, "Domain", profile.domain.as_str())?;
@@ -253,7 +253,7 @@ impl NativeRemoteApp {
         let control = self
             .control
             .as_ref()
-            .context("RemoteApp-Control ist geschlossen")?;
+            .context("RemoteApp control is closed")?;
         Ok(i32::try_from(&invoke(
             control,
             "Connected",

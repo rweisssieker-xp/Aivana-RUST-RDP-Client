@@ -130,12 +130,12 @@ fn generated_service_script_executes_success_and_both_failure_paths() {
     assert_eq!(restored["state"], "Stopped");
     let mut r = repair("Läuft");
     r.assess(&restored["result"].to_string()).unwrap();
-    assert!(r.status.contains("wiederhergestellt"));
+    assert!(r.status.contains("restored"));
     let failed = fake_service_run("restore_failure");
     assert_eq!(failed["calls"], serde_json::json!(["Start", "Stop"]));
     assert_eq!(failed["result"]["rollbackVerified"], false);
     r.assess(&failed["result"].to_string()).unwrap();
-    assert!(r.status.starts_with("Ungeklärt"));
+    assert!(r.status.starts_with("Unresolved"));
 }
 #[cfg(windows)]
 #[test]
@@ -168,8 +168,8 @@ fn restart_invalidates_running_and_preflight_journals() {
     k.save(&path).unwrap();
     let loaded = Knowledge::load(&path).unwrap();
     std::fs::remove_file(&path).unwrap();
-    assert!(loaded.repairs[0].status.contains("ungeklärt"));
-    assert!(loaded.repairs[1].status.contains("ungeklärt"));
+    assert!(loaded.repairs[0].status.contains("Unresolved"));
+    assert!(loaded.repairs[1].status.contains("Unresolved"));
     assert_eq!(loaded.repairs[2].status, "Zustand technisch bestätigt");
 }
 #[test]
@@ -200,7 +200,7 @@ fn dependency_hypothesis_requires_two_failures_with_evidence() {
     let c = intel::candidates(&book, &[dep.clone()]);
     assert_eq!(c.len(), 1);
     assert_eq!(c[0].evidence.len(), 2);
-    assert!(c[0].explanation.contains("Hypothese"));
+    assert!(c[0].explanation.contains("Hypothesis"));
     book.missions[0].outcomes[1].status = Status::Passed;
     assert!(intel::candidates(&book, &[dep]).is_empty());
 }

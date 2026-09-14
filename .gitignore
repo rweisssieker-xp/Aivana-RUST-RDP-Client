@@ -12,6 +12,8 @@
 *.log
 publish/
 dist/
+__pycache__/
+*.py[cod]
 
 # Local live verification secrets
 rdp-live.env

@@ -121,18 +121,18 @@ impl AivanaApp {
                 Err(mpsc::TryRecvError::Disconnected) => {
                     self.operations.local_pending = None;
                     self.operations.local_error =
-                        "Lokale Verzeichnisabfrage beendet ohne Ergebnis.".into();
+                        "Local directory query ended without a result.".into();
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
             }
         }
     }
     pub(super) fn operations_view(&mut self, ui: &mut Ui) {
-        ui.heading("Remote-Verwaltung");
-        ui.label("Echte Hintergrundaufträge • SSH / SFTP / WinRM");
-        ui.label("Voraussetzungen: installiertes OpenSSH, vorab geprüfter Hostschlüssel in known_hosts und Schlüssel/Agent. WinRM: Windows PowerShell, freigegebenes Remoting, aktuelle Windows-Identität (Negotiate).");
+        ui.heading("Remote administration");
+        ui.label("Background jobs • SSH / SFTP / WinRM");
+        ui.label("Requires OpenSSH installed, a previously verified host key in known_hosts, and a key/agent. WinRM: Windows PowerShell, remoting enabled, current Windows identity (Negotiate).");
         if ui
-            .button("Ziel aus ausgewähltem Verbindungsprofil übernehmen")
+            .button("Use target from selected connection profile")
             .clicked()
         {
             if let Some(profile) = self
@@ -153,28 +153,28 @@ impl AivanaApp {
                 };
                 self.operations.reviewed = false;
             } else {
-                self.status = "Zuerst ein Verbindungsprofil auswählen.".into();
+                self.status = "Select a connection profile first.".into();
             }
         }
         let state = &mut self.operations;
         ui.horizontal(|ui| {
             ui.label("Host");
             ui.text_edit_singleline(&mut state.host);
-            ui.label("SSH-Benutzer (leer = lokal)");
+            ui.label("SSH user (blank = local)");
             ui.text_edit_singleline(&mut state.user);
-            ui.label("SSH-Port");
+            ui.label("SSH port");
             ui.add(egui::DragValue::new(&mut state.port).range(1..=65535));
         });
         let modes = [
-            "SSH: eigener Befehl",
-            "WinRM: Systeminventar",
-            "WinRM: Dienste",
-            "WinRM: Prozesse",
-            "WinRM: Systemereignisse (24 h)",
-            "WinRM: Dienst starten",
-            "WinRM: Dienst stoppen",
-            "WinRM: Dienst neu starten",
-            "SFTP: Verzeichnis",
+            "SSH: custom command",
+            "WinRM: system inventory",
+            "WinRM: services",
+            "WinRM: processes",
+            "WinRM: system events (24 h)",
+            "WinRM: start service",
+            "WinRM: stop service",
+            "WinRM: restart service",
+            "SFTP: directory",
             "SFTP: Upload",
             "SFTP: Download",
         ];
@@ -190,7 +190,7 @@ impl AivanaApp {
         }
         let request = match state.mode {
             0 => {
-                ui.label("Dieser Befehl wird durch die Shell auf dem Ziel ausgeführt. Keine Kennwörter oder Geheimnisse eintragen.");
+                ui.label("This command runs through the shell on the target. Do not enter passwords or secrets.");
                 ui.text_edit_multiline(&mut state.command);
                 Request::Ssh {
                     command: state.command.clone(),
@@ -202,7 +202,7 @@ impl AivanaApp {
             4 => Request::WinRm(Query::Events),
             5..=7 => {
                 ui.horizontal(|ui| {
-                    ui.label("Technischer Dienstname");
+                    ui.label("Technical service name");
                     ui.text_edit_singleline(&mut state.service);
                 });
                 Request::Service {
@@ -216,20 +216,20 @@ impl AivanaApp {
             }
             _ => {
                 ui.horizontal(|ui| {
-                    ui.label("Remote-Pfad");
+                    ui.label("Remote path");
                     ui.text_edit_singleline(&mut state.remote);
                 });
                 if state.mode != 8 {
                     ui.horizontal(|ui| {
-                        ui.label("Lokaler absoluter Pfad");
+                        ui.label("Local absolute path");
                         ui.text_edit_singleline(&mut state.local);
                     });
-                    ui.label("Übertragung kann vorhandene Dateien überschreiben; nach Abbruch können Teildateien bestehen. Kein automatischer Wiederanlauf.");
-                    ui.checkbox(&mut state.resume, "Teildatei ausdrücklich fortsetzen (-a)");
+                    ui.label("Transfer may overwrite existing files; cancellation may leave partial files. No automatic retry.");
+                    ui.checkbox(&mut state.resume, "Explicitly resume partial file (-a)");
                     if state.resume {
-                        ui.colored_label(Color32::YELLOW,"Voraussetzung: Die vorhandene Zieldatei entspricht bytegenau dem Anfang der unveränderten Quelle. SFTP prüft diesen Inhalt nicht; sonst drohen beschädigte Dateien. Quelle und Ziel vor Freigabe prüfen.");
+                        ui.colored_label(Color32::YELLOW,"Prerequisite: the existing target file must match the beginning of the unchanged source byte for byte. SFTP does not verify this content; otherwise files may be corrupted. Check source and target before approving.");
                     }
-                    ui.checkbox(&mut state.recursive, "Verzeichnis rekursiv übertragen (-R)");
+                    ui.checkbox(&mut state.recursive, "Transfer directory recursively (-R)");
                 }
                 match state.mode {
                     8 => Request::List {
@@ -255,25 +255,25 @@ impl AivanaApp {
             state.reviewed = false;
             state.preview = preview;
         }
-        egui::CollapsingHeader::new("Befehl und Ziel prüfen")
+        egui::CollapsingHeader::new("Review command and target")
             .default_open(true)
             .show(ui, |ui| {
                 ui.monospace(&state.preview);
             });
         ui.checkbox(
             &mut state.reviewed,
-            "Ziel und Vorschau geprüft; diesen Auftrag ausdrücklich freigeben",
+            "Target and preview reviewed; explicitly approve this job",
         );
         if ui
             .add_enabled(
                 state.reviewed && spec.is_ok(),
-                egui::Button::new("Freigegebenen Auftrag einreihen"),
+                egui::Button::new("Queue approved job"),
             )
             .clicked()
         {
             if let Ok(spec) = spec {
                 match state.queue.enqueue(spec) {
-                    Ok(id) => self.status = format!("Remote-Auftrag #{id} eingereiht."),
+                    Ok(id) => self.status = format!("Remote job #{id} queued."),
                     Err(error) => self.status = error,
                 };
             }
@@ -281,13 +281,13 @@ impl AivanaApp {
         }
         ui.separator();
         ui.horizontal(|ui| {
-            ui.label("Aufträge und Dateiübertragungen • einzeln • Zeitlimit 120 s");
-            if ui.button("Abgeschlossene entfernen").clicked() {
+            ui.label("Jobs and file transfers • one at a time • 120 s timeout");
+            if ui.button("Remove completed").clicked() {
                 state.queue.clear_finished();
             }
         });
-        ui.small("Completed bedeutet Prozesscode 0. Ausgabe prüfen; Anwendungszustand separat bestätigen. Ausgabe je Kanal auf 128 KiB begrenzt.");
-        ui.small("Abbruch stoppt lokalen Transport; bereits gestartete Remote-Aktionen können weiterlaufen. Zustand erneut prüfen.");
+        ui.small("Completed means process exit code 0. Check output; confirm application state separately. Output limited to 128 KiB per channel.");
+        ui.small("Canceling stops local transport; remote actions already started may continue. Check the state again.");
         ScrollArea::vertical()
             .id_salt("operations-jobs")
             .max_height(420.0)
@@ -300,26 +300,26 @@ impl AivanaApp {
                     .id_salt(job.id)
                     .show(ui, |ui| {
                         let created: chrono::DateTime<chrono::Utc> = job.created.into();
-                        ui.label(format!("Erstellt: {}", created.to_rfc3339()));
+                        ui.label(format!("Created: {}", created.to_rfc3339()));
                         ui.monospace(job.spec.preview());
-                        if !job.status.terminal() && ui.button("Auftrag abbrechen").clicked() {
+                        if !job.status.terminal() && ui.button("Cancel job").clicked() {
                             job.cancel();
                         }
                     if let Some(result) = &job.result {
                         if matches!(result.status, crate::operations::JobStatus::Cancelled | crate::operations::JobStatus::TimedOut) {
-                            ui.colored_label(Color32::YELLOW, "Lokaler Transport abgebrochen oder Zeitlimit erreicht. Remote-Ergebnis unbekannt; Zustand vor Wiederholung prüfen.");
+                            ui.colored_label(Color32::YELLOW, "Local transport canceled or timed out. Remote outcome unknown; check state before retrying.");
                         }
                             let finished: chrono::DateTime<chrono::Utc> = result.finished.into();
-                            ui.label(format!("Beendet: {}", finished.to_rfc3339()));
+                            ui.label(format!("Finished: {}", finished.to_rfc3339()));
                             if result.truncated {
                                 ui.colored_label(
                                     Color32::YELLOW,
-                                    "Ausgabe begrenzt oder Stream nicht vollständig geschlossen.",
+                                    "Output limited or stream not fully closed.",
                                 );
                             }
-                            ui.label("Standardausgabe");
+                            ui.label("Standard output");
                             ui.monospace(&result.stdout);
-                            ui.label("Fehlerausgabe");
+                            ui.label("Standard error");
                             ui.monospace(&result.stderr);
                         }
                     });
@@ -337,37 +337,37 @@ impl AivanaApp {
 fn transfer_browser(state: &mut OperationsState, ui: &mut Ui) {
     ui.columns(2,|columns| {
         let ui=&mut columns[0];
-        ui.strong("Lokal");
+        ui.strong("Local");
         ui.text_edit_singleline(&mut state.local_directory);
-        if ui.add_enabled(state.local_pending.is_none(),egui::Button::new("Lokales Verzeichnis lesen")).clicked() {
+        if ui.add_enabled(state.local_pending.is_none(),egui::Button::new("Read local directory")).clicked() {
             let (tx,rx)=mpsc::channel();let requested=state.local_directory.clone();
             state.local_pending=Some(rx);state.local_error.clear();
             std::thread::spawn(move||{let _=tx.send(list_local_directory(requested));});
         }
-        if state.local_pending.is_some() {ui.label("Verzeichnis wird gelesen …");}
+        if state.local_pending.is_some() {ui.label("Reading directory …");}
         if !state.local_error.is_empty() {ui.colored_label(Color32::YELLOW,&state.local_error);}
         if let Some(listing)=state.local_listing.as_ref().filter(|l|l.requested==state.local_directory) {
             ui.small(format!("{} · {}",listing.path.display(),listing.captured.to_rfc3339()));
-            if listing.capped {ui.label("Auf 500 Einträge begrenzt.");}
+            if listing.capped {ui.label("Limited to 500 entries.");}
             ScrollArea::vertical().id_salt("local-transfer-files").max_height(190.0).show(ui,|ui| {
                 for entry in &listing.entries {
                     let name=entry.path.file_name().unwrap_or_default().to_string_lossy();
                     ui.horizontal(|ui| {
-                        if entry.directory && ui.small_button("Öffnen").clicked() {state.local_directory=entry.path.to_string_lossy().into_owned();}
-                        if ui.selectable_label(state.local==entry.path.to_string_lossy(),format!("{}{}",if entry.directory {"Ordner: "} else {""},name)).clicked() {state.local=entry.path.to_string_lossy().into_owned();}
+                        if entry.directory && ui.small_button("Open").clicked() {state.local_directory=entry.path.to_string_lossy().into_owned();}
+                        if ui.selectable_label(state.local==entry.path.to_string_lossy(),format!("{}{}",if entry.directory {"Folder: "} else {""},name)).clicked() {state.local=entry.path.to_string_lossy().into_owned();}
                     });
                 }
             });
-        } else {ui.small("Noch keine passende lokale Verzeichnisaufnahme. Datei auswählen, um den absoluten lokalen Pfad zu übernehmen.");}
-        let ui=&mut columns[1];ui.strong("Remote · letzte erfolgreiche Verzeichnisaufnahme");
-        ui.small("Remote-Pfad unten ausdrücklich bearbeiten. Für eine neue Aufnahme Modus SFTP: Verzeichnis wählen, Vorschau prüfen und einreihen. Namen werden aus der Textausgabe nicht automatisch übernommen.");
+        } else {ui.small("No matching local directory snapshot yet. Select a file to use its absolute local path.");}
+        let ui=&mut columns[1];ui.strong("Remote · last successful directory snapshot");
+        ui.small("Edit the remote path below explicitly. For a new snapshot, select SFTP: directory mode, review the preview, and queue the job. Names are not automatically taken from the text output.");
         if let Ok(endpoint)=Endpoint::new(&state.host,&state.user,state.port) {
             if let Some(job)=state.queue.latest_listing(&endpoint,&state.remote) {
                 let result=job.result.as_ref().unwrap();let captured:chrono::DateTime<chrono::Utc>=result.finished.into();
                 ui.small(format!("{}@{}:{} · {} · {}",state.user,state.host,state.port,state.remote,captured.to_rfc3339()));
-                if result.truncated {ui.colored_label(Color32::YELLOW,"Unvollständige/verkleinerte Aufnahme; nicht alle Einträge sichtbar.");}
+                if result.truncated {ui.colored_label(Color32::YELLOW,"Incomplete/truncated snapshot; not all entries are visible.");}
                 ScrollArea::vertical().id_salt("remote-transfer-files").max_height(190.0).show(ui,|ui|{ui.monospace(&result.stdout);});
-            } else {ui.label("Keine erfolgreiche Aufnahme für dieses Ziel, diesen Benutzer, Port und Pfad.");}
+            } else {ui.label("No successful snapshot for this target, user, port, and path.");}
         }
     });
 }

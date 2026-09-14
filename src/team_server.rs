@@ -1,6 +1,8 @@
 //! Relayne team API. Deliberately shares endpoint metadata, never credential material.
 #[path = "collaboration_session.rs"]
 pub mod collaboration_session;
+#[path = "commerce.rs"]
+pub mod commerce;
 #[path = "team_oidc.rs"]
 pub mod oidc;
 use anyhow::{Context, Result, bail};
@@ -202,6 +204,83 @@ fn serve_request_with_oidc(
     mut request: Request,
     oidc: Option<&mut oidc::Verifier>,
 ) -> Result<()> {
+    if request.url() == "/v1/tickets/webhook/github" && request.method() == &Method::Post {
+        let config = match crate::ticket_intake::WebhookConfig::from_env() {
+            Ok(Some(config)) => config,
+            _ => {
+                err(request, 503, "Ticket intake is not configured");
+                return Ok(());
+            }
+        };
+        let header = |name: &'static str| {
+            let values = request
+                .headers()
+                .iter()
+                .filter(|h| h.field.equiv(name))
+                .map(|h| h.value.as_str().to_owned())
+                .collect::<Vec<_>>();
+            if values.len() == 1 {
+                values.into_iter().next()
+            } else {
+                None
+            }
+        };
+        let (Some(event), Some(delivery), Some(signature)) = (
+            header("X-GitHub-Event"),
+            header("X-GitHub-Delivery"),
+            header("X-Hub-Signature-256"),
+        ) else {
+            err(
+                request,
+                400,
+                "Unique GitHub event, delivery and signature headers required",
+            );
+            return Ok(());
+        };
+        let mut bytes = Vec::new();
+        request
+            .as_reader()
+            .take(1_048_577)
+            .read_to_end(&mut bytes)?;
+        match crate::ticket_intake::receive_github(
+            db, &config, &event, &delivery, &signature, &bytes,
+        ) {
+            Ok(receipt) => respond(request, 200, serde_json::to_value(receipt)?),
+            Err(_) => err(request, 400, "Ticket webhook rejected"),
+        }
+        return Ok(());
+    }
+    if request.url() == "/v1/billing/webhook" && request.method() == &Method::Post {
+        let Ok(config) = commerce::Config::from_environment() else {
+            err(request, 503, "Billing is not configured");
+            return Ok(());
+        };
+        let headers = request
+            .headers()
+            .iter()
+            .filter(|h| h.field.equiv("Stripe-Signature"))
+            .map(|h| h.value.as_str().to_owned())
+            .collect::<Vec<_>>();
+        if headers.len() != 1 {
+            err(request, 400, "One Stripe signature is required");
+            return Ok(());
+        }
+        let mut bytes = Vec::new();
+        request
+            .as_reader()
+            .take(1_048_577)
+            .read_to_end(&mut bytes)?;
+        let now = chrono::Utc::now().timestamp();
+        match commerce::webhook(db, &config, &headers[0], &bytes, now) {
+            Ok(()) => respond(request, 200, serde_json::json!({"received":true})),
+            Err(_) => err(
+                request,
+                400,
+                "Webhook verification or reconciliation failed; retry required",
+            ),
+        }
+        return Ok(());
+    }
     let auth_headers = request
         .headers()
         .iter()
@@ -247,6 +326,201 @@ fn serve_request_with_oidc(
     let role = parse_role(&role)?;
     let path = request.url().to_owned();
     let method = request.method().clone();
+    if path == "/v1/escalations" && method == Method::Get {
+        respond(
+            request,
+            200,
+            serde_json::to_value(crate::ticket_escalation::list(db)?)?,
+        );
+        return Ok(());
+    }
+    if path.starts_with("/v1/escalations/") {
+        if path == "/v1/escalations/config" && method == Method::Get {
+            match crate::ticket_escalation::Config::from_env() {
+                Ok(Some(config)) => respond(
+                    request,
+                    200,
+                    serde_json::json!({"destination":config.destination(),"fingerprint":config.fingerprint()}),
+                ),
+                _ => err(request, 503, "Escalation is not configured"),
+            }
+            return Ok(());
+        }
+        if method != Method::Post {
+            err(request, 405, "Use POST for escalation actions");
+            return Ok(());
+        }
+        if role == Role::Viewer {
+            err(
+                request,
+                403,
+                "Operator role required for escalation authorization",
+            );
+            return Ok(());
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Enqueue {
+            delivery: String,
+            reason: String,
+            expires_utc: i64,
+            expected_fingerprint: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Retry {
+            id: String,
+            reason: String,
+            expires_utc: i64,
+            expected_fingerprint: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Reconcile {
+            id: String,
+            delivered: bool,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Cancel {
+            id: String,
+        }
+        let result = (|| -> Result<serde_json::Value> {
+            match path.as_str() {
+                "/v1/escalations/enqueue" => {
+                    let input: Enqueue = read_json(&mut request)?;
+                    let config = crate::ticket_escalation::Config::from_env()?
+                        .context("Escalation not configured")?;
+                    anyhow::ensure!(
+                        input.expected_fingerprint == config.fingerprint(),
+                        "Destination changed; review it again"
+                    );
+                    Ok(serde_json::to_value(crate::ticket_escalation::enqueue(
+                        db,
+                        &config,
+                        &actor,
+                        &input.delivery,
+                        &input.reason,
+                        input.expires_utc,
+                    )?)?)
+                }
+                "/v1/escalations/retry" => {
+                    let input: Retry = read_json(&mut request)?;
+                    let config = crate::ticket_escalation::Config::from_env()?
+                        .context("Escalation not configured")?;
+                    anyhow::ensure!(
+                        input.expected_fingerprint == config.fingerprint(),
+                        "Destination changed; review it again"
+                    );
+                    Ok(serde_json::to_value(
+                        crate::ticket_escalation::reauthorize(
+                            db,
+                            &config,
+                            &actor,
+                            &input.id,
+                            &input.reason,
+                            input.expires_utc,
+                        )?,
+                    )?)
+                }
+                "/v1/escalations/cancel" => {
+                    let input: Cancel = read_json(&mut request)?;
+                    crate::ticket_escalation::cancel(db, &actor, &input.id)?;
+                    Ok(serde_json::json!({"recorded":true}))
+                }
+                "/v1/escalations/reconcile" => {
+                    let input: Reconcile = read_json(&mut request)?;
+                    crate::ticket_escalation::reconcile(db, &actor, &input.id, input.delivered)?;
+                    Ok(serde_json::json!({"recorded":true}))
+                }
+                _ => anyhow::bail!("Unknown escalation action"),
+            }
+        })();
+        match result {
+            Ok(value) => respond(request, 200, value),
+            Err(_) => err(
+                request,
+                409,
+                "Escalation action rejected; check state, destination and authorization limits",
+            ),
+        }
+        return Ok(());
+    }
+    if method == Method::Get && path == "/v1/tickets/inbox" {
+        respond(
+            request,
+            200,
+            serde_json::to_value(crate::ticket_intake::list_inbox(db)?)?,
+        );
+        return Ok(());
+    }
+    if method == Method::Post && path == "/v1/tickets/inbox" {
+        if role == Role::Viewer {
+            err(request, 403, "Operator role required for ticket intake");
+            return Ok(());
+        }
+        let mut bytes = Vec::new();
+        request
+            .as_reader()
+            .take(1_048_577)
+            .read_to_end(&mut bytes)?;
+        match crate::ticket_intake::receive_import(db, &actor, &bytes) {
+            Ok(receipt) => respond(request, 200, serde_json::to_value(receipt)?),
+            Err(_) => err(request, 400, "Ticket intake rejected"),
+        }
+        return Ok(());
+    }
+    if path.starts_with("/v1/billing/") {
+        let now = chrono::Utc::now().timestamp();
+        if method == Method::Get && path == "/v1/billing/entitlement" {
+            respond(
+                request,
+                200,
+                serde_json::to_value(commerce::entitlement(db, &actor, now)?)?,
+            );
+            return Ok(());
+        }
+        if method != Method::Post {
+            err(request, 405, "Use POST for billing actions");
+            return Ok(());
+        }
+        let Ok(config) = commerce::Config::from_environment() else {
+            err(request, 503, "Billing is not configured");
+            return Ok(());
+        };
+        let result = match path.as_str() {
+            "/v1/billing/checkout" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Checkout {
+                    attempt: Uuid,
+                }
+                match read_json::<Checkout>(&mut request) {
+                    Ok(input) => commerce::checkout(db, &config, &actor, input.attempt),
+                    Err(_) => {
+                        err(request, 400, "Invalid checkout request");
+                        return Ok(());
+                    }
+                }
+            }
+            "/v1/billing/portal" => commerce::portal(db, &config, &actor),
+            "/v1/billing/refresh" => commerce::refresh(db, &config, &actor, now)
+                .and_then(|e| Ok(serde_json::to_value(e)?)),
+            _ => {
+                err(request, 404, "Unknown billing action");
+                return Ok(());
+            }
+        };
+        match result {
+            Ok(value) => respond(request, 200, value),
+            Err(_) => err(
+                request,
+                409,
+                "Billing action failed or requires configuration; retry with the same attempt",
+            ),
+        }
+        return Ok(());
+    }
     if method == Method::Post && path == "/v1/collaboration" {
         let mut body = Vec::new();
         request.as_reader().take(3_000_001).read_to_end(&mut body)?;
@@ -619,6 +893,68 @@ mod tests {
             let _ = std::fs::remove_file(format!("{}-shm", self.db.display()));
         }
     }
+    #[test]
+    fn account_status_and_ticket_intake_require_authenticated_roles() {
+        let h = Harness::new();
+        let viewer = h.issue(Role::Viewer);
+        let operator = h.issue(Role::Operator);
+        let empty = serde_json::json!({});
+        assert_eq!(
+            h.request(
+                reqwest::Method::GET,
+                "/v1/billing/entitlement",
+                &"f".repeat(64),
+                empty.clone()
+            )
+            .status()
+            .as_u16(),
+            401
+        );
+        let status: serde_json::Value = h
+            .request(
+                reqwest::Method::GET,
+                "/v1/billing/entitlement",
+                &viewer.token,
+                empty.clone(),
+            )
+            .json()
+            .unwrap();
+        assert_eq!(status["active"], false);
+        let ticket = serde_json::json!({"provider":"jira","source":"https://example.atlassian.net","ticket":{"key":"SUP-1","fields":{"summary":"Connection issue","description":{"type":"doc","content":[]},"updated":"1"}}});
+        assert_eq!(
+            h.request(
+                reqwest::Method::POST,
+                "/v1/tickets/inbox",
+                &viewer.token,
+                ticket.clone()
+            )
+            .status()
+            .as_u16(),
+            403
+        );
+        assert_eq!(
+            h.request(
+                reqwest::Method::POST,
+                "/v1/tickets/inbox",
+                &operator.token,
+                ticket
+            )
+            .status()
+            .as_u16(),
+            200
+        );
+        let inbox: Vec<crate::ticket_intake::InboxItem> = h
+            .request(
+                reqwest::Method::GET,
+                "/v1/tickets/inbox",
+                &viewer.token,
+                empty,
+            )
+            .json()
+            .unwrap();
+        assert_eq!(inbox.len(), 1);
+    }
+
     #[test]
     fn collaboration_http_auth_membership_and_latest_frame() {
         use collaboration_session::{Command, Frame, Reply};

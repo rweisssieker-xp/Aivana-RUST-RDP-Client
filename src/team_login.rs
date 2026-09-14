@@ -45,7 +45,7 @@ fn https_url(raw: &str) -> Result<Url> {
         || url.fragment().is_some()
         || url.query().is_some()
     {
-        bail!("OAuth-Endpunkte benötigen HTTPS ohne Zugangsdaten, Query oder Fragment");
+        bail!("OAuth endpoints require HTTPS without credentials, query, or fragment");
     }
     Ok(url)
 }
@@ -58,11 +58,11 @@ fn validate(options: &LoginOptions) -> Result<()> {
         &options.audience,
     ] {
         if value.len() > 2048 || value.chars().any(char::is_control) {
-            bail!("OAuth-Eingabe ungültig oder zu lang");
+            bail!("OAuth input is invalid or too long");
         }
     }
     if options.client_id.trim().is_empty() || options.scopes.trim().is_empty() {
-        bail!("Öffentliche Client-ID und API-Scopes erforderlich");
+        bail!("A public client ID and API scopes are required");
     }
     Ok(())
 }
@@ -89,35 +89,35 @@ struct Discovery {
 }
 fn endpoint(discovery: &Discovery, issuer: &str, raw: &str) -> Result<Url> {
     if discovery.issuer != issuer {
-        bail!("OIDC-Discovery meldet einen anderen Issuer");
+        bail!("OIDC discovery reports a different issuer");
     }
     let issuer = https_url(issuer)?;
     let endpoint = https_url(raw)?;
     if endpoint.origin() != issuer.origin() {
-        bail!("OAuth-Endpunkte müssen zum konfigurierten Issuer-Origin gehören");
+        bail!("OAuth endpoints must belong to the configured issuer origin");
     }
     Ok(endpoint)
 }
 fn read_json<T: for<'de> Deserialize<'de>>(response: reqwest::blocking::Response) -> Result<T> {
     if !response.status().is_success() {
         bail!(
-            "OAuth-Anbieter lehnt die Anfrage ab (HTTP {})",
+            "OAuth provider rejected the request (HTTP {})",
             response.status().as_u16()
         );
     }
     let mut bytes = Vec::new();
     response.take(1_048_577).read_to_end(&mut bytes)?;
     if bytes.len() > 1_048_576 {
-        bail!("OAuth-Antwort zu groß");
+        bail!("OAuth response exceeds the size limit");
     }
-    serde_json::from_slice(&bytes).context("OAuth-Antwort hat ein ungültiges Format")
+    serde_json::from_slice(&bytes).context("OAuth response has an invalid format")
 }
 fn random_secret() -> Result<String> {
     use ring::rand::SecureRandom;
     let mut bytes = [0; 32];
     ring::rand::SystemRandom::new()
         .fill(&mut bytes)
-        .map_err(|_| anyhow::anyhow!("Sicherer Zufallswert nicht verfügbar"))?;
+        .map_err(|_| anyhow::anyhow!("Secure random value is unavailable"))?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 fn challenge(verifier: &str) -> String {
@@ -140,7 +140,7 @@ fn run(
                 options.issuer.trim_end_matches('/')
             ))
             .send()
-            .context("OIDC-Discovery nicht erreichbar")?,
+            .context("OIDC discovery is unreachable")?,
     )?;
     let mut authorization = endpoint(
         &discovery,
@@ -153,15 +153,15 @@ fn run(
         .as_ref()
         .is_some_and(|methods| !methods.iter().any(|method| method == "S256"))
     {
-        bail!("OAuth-Anbieter unterstützt PKCE S256 nicht");
+        bail!("OAuth provider does not support PKCE S256");
     }
     if cancelled.load(Ordering::Relaxed) {
-        bail!("Anmeldung abgebrochen");
+        bail!("Sign-in canceled");
     }
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
     let address = listener.local_addr()?;
     let server = tiny_http::Server::from_listener(listener, None)
-        .map_err(|_| anyhow::anyhow!("Lokaler OAuth-Rückkanal nicht verfügbar"))?;
+        .map_err(|_| anyhow::anyhow!("Local OAuth callback is unavailable"))?;
     let redirect = format!("http://{address}/oauth/callback");
     let state = random_secret()?;
     let verifier = random_secret()?;
@@ -182,7 +182,7 @@ fn run(
     }
     sender
         .send(LoginEvent::OpenBrowser(authorization.to_string()))
-        .map_err(|_| anyhow::anyhow!("Anmeldefenster geschlossen"))?;
+        .map_err(|_| anyhow::anyhow!("Sign-in window closed"))?;
     let code = wait_callback(
         &server,
         &address.to_string(),
@@ -195,7 +195,7 @@ fn run(
         Duration::from_secs(120),
     )?;
     if cancelled.load(Ordering::Relaxed) {
-        bail!("Anmeldung abgebrochen");
+        bail!("Sign-in canceled");
     }
     let response = client
         .post(token_endpoint)
@@ -207,7 +207,7 @@ fn run(
             ("code_verifier", verifier.as_str()),
         ])
         .send()
-        .context("OAuth-Tokenendpoint nicht erreichbar")?;
+        .context("OAuth token endpoint is unreachable")?;
     let token: TokenResponse = read_json(response)?;
     access_token(token)
 }
@@ -220,7 +220,7 @@ struct TokenResponse {
 }
 fn access_token(token: TokenResponse) -> Result<String> {
     if !token.token_type.eq_ignore_ascii_case("bearer") || token.expires_in == Some(0) {
-        bail!("OAuth-Anbieter liefert kein gültiges Bearer-Access-Token");
+        bail!("OAuth provider did not return a valid bearer access token");
     }
     let value = token.access_token;
     if value.len() > 16384
@@ -231,7 +231,7 @@ fn access_token(token: TokenResponse) -> Result<String> {
             .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
     {
         bail!(
-            "Der Teamserver benötigt ein JWT-Access-Token für seine API. ID-Token werden nicht als Ersatz verwendet."
+            "The team server requires a JWT access token for its API. ID tokens are not used as a substitute."
         );
     }
     Ok(value)
@@ -242,11 +242,11 @@ enum Callback {
 }
 fn parse_callback(raw: &str, state: &str, issuer: &str, require_issuer: bool) -> Result<Callback> {
     if raw.len() > 8192 || !raw.starts_with("/oauth/callback?") {
-        bail!("Ungültiger OAuth-Rückkanal");
+        bail!("Invalid OAuth callback");
     }
     let url = Url::parse(&format!("http://127.0.0.1{raw}"))?;
     if url.path() != "/oauth/callback" || url.fragment().is_some() {
-        bail!("Ungültiger OAuth-Rückkanal");
+        bail!("Invalid OAuth callback");
     }
     let mut params = std::collections::BTreeMap::new();
     for (key, value) in url.query_pairs() {
@@ -254,26 +254,26 @@ fn parse_callback(raw: &str, state: &str, issuer: &str, require_issuer: bool) ->
             .insert(key.into_owned(), value.into_owned())
             .is_some()
         {
-            bail!("Doppelte OAuth-Antwortparameter");
+            bail!("Duplicate OAuth response parameters");
         }
     }
     if params.get("state").map(String::as_str) != Some(state) {
-        bail!("OAuth-State stimmt nicht überein");
+        bail!("OAuth state does not match");
     }
     if (require_issuer && !params.contains_key("iss"))
         || params.get("iss").is_some_and(|value| value != issuer)
     {
-        bail!("OAuth-Antwort-Issuer stimmt nicht überein");
+        bail!("OAuth response issuer does not match");
     }
     if params.contains_key("error") {
         if params.contains_key("code") {
-            bail!("Mehrdeutige OAuth-Antwort");
+            bail!("Ambiguous OAuth response");
         }
         return Ok(Callback::ProviderError);
     }
-    let code = params.remove("code").context("OAuth-Code fehlt")?;
+    let code = params.remove("code").context("OAuth code is missing")?;
     if code.is_empty() || code.len() > 4096 || code.chars().any(char::is_control) {
-        bail!("OAuth-Code ungültig");
+        bail!("OAuth code is invalid");
     }
     Ok(Callback::Code(code))
 }
@@ -290,7 +290,7 @@ fn wait_callback(
     let mut invalid = 0;
     while Instant::now() < deadline {
         if cancelled.load(Ordering::Relaxed) {
-            bail!("Anmeldung abgebrochen");
+            bail!("Sign-in canceled");
         }
         let Some(request) = server.recv_timeout(Duration::from_millis(100))? else {
             continue;
@@ -306,13 +306,13 @@ fn wait_callback(
         {
             parse_callback(request.url(), state, issuer, require_issuer)
         } else {
-            Err(anyhow::anyhow!("Ungültige OAuth-Callback-Anfrage"))
+            Err(anyhow::anyhow!("Invalid OAuth callback request"))
         };
         let accepted = response.is_ok();
         let body = if accepted {
-            "Anmeldeantwort empfangen. Bitte zu Relayne wechseln."
+            "Sign-in response received. Return to Relayne."
         } else {
-            "Diese Anmeldeantwort wurde abgelehnt."
+            "This sign-in response was rejected."
         };
         let answer = tiny_http::Response::from_string(body)
             .with_status_code(if accepted { 200 } else { 400 })
@@ -329,17 +329,17 @@ fn wait_callback(
         match response {
             Ok(Callback::Code(code)) => return Ok(code),
             Ok(Callback::ProviderError) => {
-                bail!("Anmeldung beim Anbieter abgelehnt oder abgebrochen")
+                bail!("Provider sign-in was denied or canceled")
             }
             Err(_) => {
                 invalid += 1;
                 if invalid >= 32 {
-                    bail!("Zu viele ungültige OAuth-Callbacks");
+                    bail!("Too many invalid OAuth callbacks");
                 }
             }
         }
     }
-    bail!("Anmeldung nach 120 Sekunden abgelaufen")
+    bail!("Sign-in timed out after 120 seconds")
 }
 
 #[cfg(test)]

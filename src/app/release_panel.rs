@@ -12,12 +12,38 @@ pub(super) fn draw(ui: &mut egui::Ui, locale: Locale) {
     ));
     ui.label(tr(locale,"Diese Ansicht dokumentiert den Stand. Sie führt keine Verbindung, Zahlung oder Lizenzaktivierung aus."));
     ui.separator();
+    if locale == Locale::EnUs {
+        ui.collapsing("Operating documentation", |ui| {
+            for (title, text) in release::ENGLISH_DOCUMENTS {
+                ui.collapsing(*title, |ui| {
+                    if ui.button("Copy document").clicked() {
+                        ui.ctx().copy_text((*text).to_owned());
+                    }
+                    egui::ScrollArea::vertical()
+                        .max_height(300.0)
+                        .show(ui, |ui| {
+                            ui.label(*text);
+                        });
+                });
+            }
+            if ui
+                .button("Copy bundled third-party license notices")
+                .clicked()
+            {
+                ui.ctx().copy_text(release::THIRD_PARTY_NOTICES.to_owned());
+            }
+        });
+    }
     ui.label(release::SELLER);
     ui.label(release::CONTACT);
-    ui.label(release::REGISTER);
+    ui.label(if locale == Locale::EnUs {
+        "Bielefeld District Court · HRB 46421 · VAT ID DE459356027"
+    } else {
+        release::REGISTER
+    });
     ui.hyperlink_to(release::WEBSITE, release::WEBSITE);
     ui.hyperlink_to(release::SOURCE, release::SOURCE);
-    for (title, detail) in release::GATES {
+    for (title, detail) in release::gates(locale) {
         ui.group(|ui| {
             ui.strong(tr(locale, title));
             ui.label(tr(locale, detail));

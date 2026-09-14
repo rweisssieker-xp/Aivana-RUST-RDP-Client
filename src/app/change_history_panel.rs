@@ -10,17 +10,17 @@ enum Work {
 }
 fn phase_label(phase: Phase) -> &'static str {
     match phase {
-        Phase::Prepared => "Vorbereitet",
-        Phase::Applied => "Angewendet",
-        Phase::RestorePending => "Wiederherstellung offen",
-        Phase::Restored => "Wiederhergestellt",
+        Phase::Prepared => "Prepared",
+        Phase::Applied => "Applied",
+        Phase::RestorePending => "Restore pending",
+        Phase::Restored => "Restored",
     }
 }
 fn comparison_label(entry: &Entry) -> String {
     entry
         .comparison()
-        .replace("Before:", "Vorher:")
-        .replace("After:", "Nachher:")
+        .replace("Before:", "Before:")
+        .replace("After:", "After:")
         .replace(" bytes", " Bytes")
 }
 pub struct ChangeHistoryState {
@@ -91,23 +91,23 @@ impl AivanaApp {
                     Ok(Work::Template(text)) => {
                         state.replacement = text;
                         state.prepared = None;
-                        state.message = "Aktuellen Inhalt als Vorlage geladen. Änderungen eingeben und anschließend einen neuen Vergleich erfassen.".into();
+                        state.message = "Current content loaded as a template. Enter your changes, then capture a new comparison.".into();
                     }
                     Ok(Work::Loaded(entries)) => {
                         state.entries = entries;
                         state.loaded = true;
-                        state.message = "Verschlüsseltes Journal geladen.".into();
+                        state.message = "Encrypted journal loaded.".into();
                     }
                     Ok(Work::Prepared(entry)) => {
                         state.prepared = Some(entry);
                         state.message =
-                            "Zustand erfasst. Bitte Ziel und Vorher-Nachher-Vergleich prüfen."
+                            "State captured. Review the target and before-and-after comparison."
                                 .into();
                     }
                     Ok(Work::Completed(entry)) => {
                         state.entries.retain(|e| e.id != entry.id);
                         state.message =
-                            format!("{}: Inhalt am Ziel überprüft.", phase_label(entry.phase));
+                            format!("{}: Target content verified.", phase_label(entry.phase));
                         state.entries.insert(0, entry);
                         state.prepared = None;
                     }
@@ -120,7 +120,7 @@ impl AivanaApp {
             Err(mpsc::TryRecvError::Disconnected) => {
                 state.pending = None;
                 state.prepared = None;
-                state.message = "Verarbeitung beendet. Vor einer Wiederholung das Journal neu laden und das Ziel prüfen.".into();
+                state.message = "Processing ended. Reload the journal and check the target before trying again.".into();
             }
             Err(mpsc::TryRecvError::Empty) => {}
         }
@@ -135,9 +135,9 @@ impl AivanaApp {
                     endpoint: entry.endpoint_key.clone(),
                     at,
                     kind: crate::incident::Kind::Change,
-                    title: "Änderungshistorie: angewendet und überprüft".into(),
+                    title: "Change history: applied and verified".into(),
                     evidence: vec![
-                        format!("Ziel: {}", entry.target.label()),
+                        format!("Target: {}", entry.target.label()),
                         comparison_label(entry),
                     ],
                 });
@@ -155,20 +155,20 @@ impl AivanaApp {
                     Phase::Applied => crate::incident::Kind::Change,
                     _ => crate::incident::Kind::Observation,
                 },
-                title: format!("Änderungshistorie: {}", phase_label(entry.phase)),
+                title: format!("Change history: {}", phase_label(entry.phase)),
                 evidence: vec![
-                    format!("Ziel: {}", entry.target.label()),
+                    format!("Target: {}", entry.target.label()),
                     comparison_label(entry),
-                    format!("Zustand erfasst: {}", entry.at.to_rfc3339()),
+                    format!("State captured: {}", entry.at.to_rfc3339()),
                 ],
             });
         }
         records
     }
     pub(super) fn change_history_view(&mut self, ui: &mut Ui) {
-        ui.heading("Änderungszeitmaschine");
-        ui.label("Dateien bis 1 MiB · sechs Registrierungstypen · Datei-ACLs · 128 verschlüsselte Einträge");
-        ui.small("Lokal und WinRM Negotiate: aktuelles Windows-Konto, keine Rechteerhöhung. Dateisnapshots erfassen Besitzer/Gruppe/DACL und Elternordner für die geprüfte Wiederherstellung gelöschter Dateien. Dienste, Registry-Bäume und SACL bleiben außerhalb des Umfangs.");
+        ui.heading("Change time machine");
+        ui.label("Files up to 1 MiB · six registry types · file ACLs · 128 encrypted entries");
+        ui.small("Local and WinRM Negotiate: current Windows account, no elevation. File snapshots capture owner/group/DACL and parent folders for verified restoration of deleted files. Services, registry trees, and SACLs are outside the scope.");
         let state = &mut self.change_history;
         if !state.loaded && state.pending.is_none() {
             state.loaded = true;
@@ -177,46 +177,46 @@ impl AivanaApp {
         let busy = state.pending.is_some();
         ui.add_enabled_ui(!busy, |ui| {
             ui.horizontal(|ui| {
-                ui.label("Rechner (leer = lokal)"); ui.text_edit_singleline(&mut state.host);
-                if ui.button("Ausgewähltes direktes RDP-Profil zuordnen").clicked() {
+                ui.label("Computer (blank = local)"); ui.text_edit_singleline(&mut state.host);
+                if ui.button("Associate the selected direct RDP profile").clicked() {
                     if let Some(profile) = self.profiles.iter().find(|p| Some(p.id) == self.selected_profile) {
-                        if profile.options.gateway.enabled || profile.protocol != Protocol::Rdp { state.message = "Nur direkte RDP-Profile ohne Gateway können WinRM-Aufträgen zugeordnet werden.".into(); }
+                        if profile.options.gateway.enabled || profile.protocol != Protocol::Rdp { state.message = "Only direct RDP profiles without a gateway can be associated with WinRM jobs.".into(); }
                         else { state.host = profile.host.clone(); state.profile_id = Some(profile.id); }
                     }
                 }
             });
             if state.profile_id.is_some_and(|id| !self.profiles.iter().any(|p| p.id == id && p.host == state.host && !state.host.is_empty() && p.protocol == Protocol::Rdp && !p.options.gateway.enabled)) { state.profile_id = None; }
-            if let Some(id) = state.profile_id { ui.small(format!("Zugeordnetes Profil: {id} · direktes WinRM")); }
-            ui.checkbox(&mut state.registry, "Registrierungswert");
+            if let Some(id) = state.profile_id { ui.small(format!("Associated profile: {id} · direct WinRM")); }
+            ui.checkbox(&mut state.registry, "Registry value");
             if state.registry {
                 state.permissions = false;
-                egui::ComboBox::from_label("Vorhandener Werttyp").selected_text(state.registry_kind.label()).show_ui(ui, |ui| {
+                egui::ComboBox::from_label("Existing value type").selected_text(state.registry_kind.label()).show_ui(ui, |ui| {
                     for kind in [history::RegistryKind::String, history::RegistryKind::ExpandString, history::RegistryKind::DWord, history::RegistryKind::QWord, history::RegistryKind::MultiString, history::RegistryKind::Binary] {
                         ui.selectable_value(&mut state.registry_kind, kind, kind.label());
                     }
                 });
-                ui.small("DWORD/QWORD: vorzeichenlose Dezimalzahl. MULTI_SZ: JSON-Stringarray. BINARY: Base64. Der vorhandene Typ muss übereinstimmen.");
-            } else { ui.checkbox(&mut state.permissions, "Dateiberechtigungen statt Inhalt (kanonisches Besitzer/Gruppe/DACL-SDDL)"); }
-            ui.label(if state.registry { "Vorhandener Schlüssel: HKCU:\\... oder HKLM:\\..." } else { "Vorhandene Datei: absoluter Windows-Pfad mit Laufwerksbuchstaben" });
+                ui.small("DWORD/QWORD: unsigned decimal. MULTI_SZ: JSON string array. BINARY: Base64. The existing type must match.");
+            } else { ui.checkbox(&mut state.permissions, "File permissions instead of content (canonical owner/group/DACL SDDL)"); }
+            ui.label(if state.registry { "Existing key: HKCU:\\... or HKLM:\\..." } else { "Existing file: absolute Windows path with a drive letter" });
             ui.add(egui::TextEdit::singleline(&mut state.path).char_limit(2048));
-            if state.registry { ui.label("Wertname (leer = Standardwert)"); ui.add(egui::TextEdit::singleline(&mut state.value_name).char_limit(256)); }
-            ui.label("Neuer vollständiger Inhalt (UTF-8; einschließlich aller Zeilenumbrüche)");
+            if state.registry { ui.label("Value name (blank = default value)"); ui.add(egui::TextEdit::singleline(&mut state.value_name).char_limit(256)); }
+            ui.label("Complete new content (UTF-8, including all line breaks)");
             ui.add(egui::TextEdit::multiline(&mut state.replacement).desired_rows(5).char_limit(history::CONTENT_LIMIT));
             let target = Target { host: state.host.trim().to_owned(), path: state.path.clone(), registry: state.registry, value_name: if state.registry { state.value_name.clone() } else { String::new() }, registry_kind: state.registry_kind, permissions: state.permissions };
             let endpoint_key = state.profile_id.and_then(|id| self.profiles.iter().find(|p| p.id == id))
                 .map(|profile| crate::incident::endpoint_key(&crate::mission::Target::from_profile(profile)));
-            if ui.button("Aktuellen Inhalt / SDDL als Bearbeitungsvorlage lesen").clicked() {
+            if ui.button("Read current content / SDDL as an editing template").clicked() {
                 let template_target = target.clone();
                 state.start(move || {
                     use history::Backend;
                     let bytes = history::WindowsBackend.read(&template_target)?;
-                    Ok(Work::Template(String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("Binärdatei: keine UTF-8-Bearbeitungsvorlage verfügbar"))?))
+                    Ok(Work::Template(String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("Binary file: no UTF-8 editing template available"))?))
                 });
             }
             if state.prepared.as_ref().is_some_and(|e| e.target != target || history::normalize_replacement(&target, state.replacement.as_bytes()).ok().as_deref() != Some(e.after.as_slice()) || e.profile_id != state.profile_id || e.endpoint_key != endpoint_key) {
                 state.prepared = None; state.reviewed = false;
             }
-            if ui.button("1. Zustand erfassen und Vergleich vorbereiten").clicked() {
+            if ui.button("1. Capture state and prepare comparison").clicked() {
                 let replacement = state.replacement.as_bytes().to_vec();
                 let profile_id = state.profile_id;
                 state.prepared = None;
@@ -229,33 +229,33 @@ impl AivanaApp {
             }
             if let Some(entry) = state.prepared.clone() {
                 ui.strong(entry.target.label()); ui.monospace(comparison_label(&entry));
-                if entry.file_context.is_some() { ui.small("Datei-ACL und Elternordner erfasst. Die spätere Freigabe zur Wiederherstellung gilt auch für eine inzwischen gelöschte Datei am exakt gleichen Pfad, sofern die Elternordner-Berechtigungen unverändert sind."); }
-                ui.checkbox(&mut state.reveal, "Inhalte hier anzeigen (können Geheimnisse enthalten)");
+                if entry.file_context.is_some() { ui.small("File ACL and parent folders captured. Subsequent restore approval also covers a file deleted in the meantime at the exact same path, provided the parent folder permissions are unchanged."); }
+                ui.checkbox(&mut state.reveal, "Show content here (may contain secrets)");
                 if state.reveal {
                     ui.columns(2, |columns| {
-                        columns[0].label("Vorher"); columns[0].monospace(String::from_utf8_lossy(&entry.before));
-                        columns[1].label("Nachher"); columns[1].monospace(String::from_utf8_lossy(&entry.after));
+                        columns[0].label("Before"); columns[0].monospace(String::from_utf8_lossy(&entry.before));
+                        columns[1].label("After"); columns[1].monospace(String::from_utf8_lossy(&entry.after));
                     });
                 }
-                ui.checkbox(&mut state.reviewed, "Ziel und neuer Inhalt geprüft; diese Änderung ausdrücklich freigeben");
-                if ui.add_enabled(state.reviewed && state.pending.is_none(), egui::Button::new("2. Journal sichern und geprüfte Änderung anwenden")).clicked() {
+                ui.checkbox(&mut state.reviewed, "Target and new content reviewed; explicitly approve this change");
+                if ui.add_enabled(state.reviewed && state.pending.is_none(), egui::Button::new("2. Save journal and apply reviewed change")).clicked() {
                     state.start(move || Ok(Work::Completed(history::apply(&history::journal_directory()?, &mut history::WindowsBackend, entry)?)));
                 }
             }
             ui.separator();
-            if ui.add_enabled(state.pending.is_none(), egui::Button::new("Verschlüsseltes Journal neu laden")).clicked() { state.reload(); }
-            ui.small("Vorbereitete oder offene Einträge können von unterbrochenen Aktionen stammen. Die Wiederherstellung prüft das Ziel: Nachher-Zustand → Vorher-Zustand herstellen; bereits Vorher-Zustand → als erledigt markieren; anderer Inhalt → ablehnen.");
-            ui.small("Registrierungswerte lassen sich nicht gegen fremde Schreibzugriffe sperren. Andere schreibende Anwendungen während der Änderung pausieren. Unterbrochene Dateischreibvorgänge können Teilinhalte hinterlassen; solche Abweichungen erfordern manuelle Wiederherstellung.");
+            if ui.add_enabled(state.pending.is_none(), egui::Button::new("Reload journal")).clicked() { state.reload(); }
+            ui.small("Prepared or pending entries may come from interrupted actions. Restoration checks the target: after state → restore before state; already in before state → mark complete; other content → reject.");
+            ui.small("Registry values cannot be locked against other writers. Pause other applications that write during the change. Interrupted file writes may leave partial content; these differences require manual restoration.");
             let entries = state.entries.clone();
             egui::ScrollArea::vertical().id_salt("change-history-list").max_height(380.0).show(ui, |ui| {
                 for entry in entries {
                     egui::CollapsingHeader::new(format!("{} · {} · {}", entry.at.format("%Y-%m-%d %H:%M:%S UTC"), phase_label(entry.phase), entry.target.label())).id_salt(entry.id).show(ui, |ui| {
                         ui.monospace(comparison_label(&entry));
-                        ui.small(format!("Journal-ID {} · zuletzt aktualisiert {}", entry.id, entry.updated_at));
+                        ui.small(format!("Journal ID {} · last updated {}", entry.id, entry.updated_at));
                         if entry.phase != Phase::Restored {
                             let mut reviewed = state.restore_reviewed == Some(entry.id);
-                            if ui.checkbox(&mut reviewed, "Geprüft: Wiederherstellung dieses Vorher-Zustands freigeben").changed() { state.restore_reviewed = if reviewed { Some(entry.id) } else { None }; }
-                            if ui.add_enabled(reviewed && state.pending.is_none(), egui::Button::new("Bei passendem Zielinhalt wiederherstellen")).clicked() {
+                            if ui.checkbox(&mut reviewed, "Reviewed: approve restoration of this before state").changed() { state.restore_reviewed = if reviewed { Some(entry.id) } else { None }; }
+                            if ui.add_enabled(reviewed && state.pending.is_none(), egui::Button::new("Restore if target content matches")).clicked() {
                                 state.start(move || Ok(Work::Completed(history::restore(&history::journal_directory()?, &mut history::WindowsBackend, entry)?)));
                             }
                         }
@@ -268,7 +268,7 @@ impl AivanaApp {
         }
         if state.pending.is_some() {
             ui.spinner();
-            ui.label("Auftrag läuft; Zeitlimit für die Übertragung: 120 Sekunden je Schritt.");
+            ui.label("Job running; transfer timeout: 120 seconds per step.");
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(100));
         }

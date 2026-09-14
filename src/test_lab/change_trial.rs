@@ -32,7 +32,7 @@ impl Spec {
                     .service
                     .bytes()
                     .all(|c| c.is_ascii_alphanumeric() || b"_- .".contains(&c)),
-            "Ungültiger Dienstname"
+            "Invalid service name"
         );
         anyhow::ensure!(
             ![
@@ -60,12 +60,12 @@ impl Spec {
             ]
             .iter()
             .any(|s| self.service.eq_ignore_ascii_case(s)),
-            "Systemdienst ist für Fehlerexperimente gesperrt"
+            "System service is blocked for fault experiments"
         );
         self.health.validate()?;
         anyhow::ensure!(
             !self.health.url.is_empty() && self.health.followups.is_empty(),
-            "Erste Version benötigt genau eine öffentliche Loopback-HTTP-Prüfung"
+            "Initial version requires exactly one public loopback HTTP check"
         );
         Ok(())
     }
@@ -119,7 +119,7 @@ impl Proof {
     fn validate(&self, request: &Request) -> Result<()> {
         anyhow::ensure!(
             self.request_hash == request.hash()?,
-            "Versuchsbindung stimmt nicht"
+            "Trial binding does not match"
         );
         anyhow::ensure!(
             [
@@ -132,7 +132,7 @@ impl Proof {
                 "complete"
             ]
             .contains(&self.stage.as_str()),
-            "Unbekannte Versuchsphase"
+            "Unknown trial phase"
         );
         anyhow::ensure!(
             !self.untouched
@@ -141,22 +141,25 @@ impl Proof {
                     && !self.repaired
                     && !self.returned
                     && self.stage == "baseline"),
-            "Widersprüchlicher unveränderter Zustand"
+            "Contradictory unchanged state"
         );
         anyhow::ensure!(
             !self.repaired || self.fault_observed,
-            "Reparatur ohne Fehlerbeobachtung"
+            "Repair without a fault observation"
         );
-        anyhow::ensure!(!self.fault_observed || self.changed, "Fehler ohne Änderung");
-        anyhow::ensure!(!self.changed || self.baseline, "Änderung ohne Baseline");
+        anyhow::ensure!(
+            !self.fault_observed || self.changed,
+            "Fault without a change"
+        );
+        anyhow::ensure!(!self.changed || self.baseline, "Change without a baseline");
         anyhow::ensure!(
             !self.checkpoint_removed || self.returned,
-            "Checkpoint ohne geprüften Rückweg entfernt"
+            "Checkpoint removed without a verified recovery path"
         );
         anyhow::ensure!(
             !(self.baseline || self.returned)
                 || ["Auto", "Manual"].contains(&self.baseline_mode.as_str()),
-            "Unbekannte Starttyp-Baseline"
+            "Unknown startup type baseline"
         );
         Ok(())
     }
@@ -210,16 +213,16 @@ pub fn history(lab: &str) -> Result<Vec<Record>> {
         let name = path
             .file_name()
             .and_then(|s| s.to_str())
-            .context("Ungültiger Belegname")?;
+            .context("Invalid evidence name")?;
         if !name.ends_with(".request.dpapi") {
             continue;
         }
-        anyhow::ensure!(records.len() < 100, "Versuchslimit erreicht");
+        anyhow::ensure!(records.len() < 100, "Trial limit reached");
         let request: Request = read_protected(&path)?;
         request.spec.validate()?;
         anyhow::ensure!(
             request.lab_id == lab && name == format!("{}.request.dpapi", request.id),
-            "Versuchsidentität geändert"
+            "Trial identity changed"
         );
         Uuid::parse_str(&request.vm_id)?;
         let proof: Option<Proof> = optional(&dir.join(format!("{}.result.dpapi", request.id)))?;
@@ -231,7 +234,7 @@ pub fn history(lab: &str) -> Result<Vec<Record>> {
         if let Some(r) = &recovery {
             anyhow::ensure!(
                 r.request_hash == request.hash()?,
-                "Rückweg gehört zu anderem Versuch"
+                "Recovery path belongs to another trial"
             );
         }
         records.push(Record {
@@ -252,7 +255,7 @@ fn current(journal: &Journal) -> Result<Journal> {
         saved.vm_id == journal.vm_id
             && saved.directory == journal.directory
             && saved.name == journal.name,
-        "Klon wurde verändert; neu auswählen"
+        "Clone changed; select it again"
     );
     Uuid::parse_str(&saved.vm_id)?;
     Ok(saved)
@@ -263,7 +266,7 @@ fn credentials(user: &str, password: &str) -> Result<()> {
             && user.len() <= 256
             && !password.is_empty()
             && password.len() <= 4096,
-        "Gastzugang erforderlich"
+        "Guest credentials required"
     );
     Ok(())
 }
@@ -276,7 +279,7 @@ pub fn run(journal: Journal, spec: Spec, user: String, password: String) -> Resu
     let records = history(&journal.id)?;
     anyhow::ensure!(
         records.len() < 100 && !records.iter().any(Record::unresolved),
-        "Offenen Versuch zuerst wiederherstellen (oder Versuchslimit erreicht)"
+        "Recover the open trial first (or trial limit reached)"
     );
     let request = Request {
         id: Uuid::new_v4(),
@@ -307,10 +310,10 @@ pub fn recover(journal: Journal, id: Uuid, user: String, password: String) -> Re
     let record = history(&journal.id)?
         .into_iter()
         .find(|r| r.request.id == id)
-        .context("Versuch fehlt")?;
+        .context("Trial is missing")?;
     anyhow::ensure!(
         record.unresolved() && record.request.vm_id == journal.vm_id,
-        "Versuch erledigt oder VM verändert"
+        "Trial completed or VM changed"
     );
     let request = record.request;
     let payload = serde_json::json!({"lab":journal,"request":request,"hash":request.hash()?,"checkpoint":request.checkpoint_name(),"user":user,"password":password,"recover":true});
@@ -319,7 +322,7 @@ pub fn recover(journal: Journal, id: Uuid, user: String, password: String) -> Re
     proof.validate(&request)?;
     anyhow::ensure!(
         proof.returned && proof.checkpoint_removed,
-        "Rückweg nicht bestätigt; Klon und Checkpoint manuell prüfen"
+        "Recovery path not confirmed; review clone and checkpoint manually"
     );
     write_immutable(
         &directory(&request.lab_id)?.join(format!("{}.restore.dpapi", request.id)),

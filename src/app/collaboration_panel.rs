@@ -33,7 +33,7 @@ impl AivanaApp {
     pub(super) fn collaboration_view(&mut self, ui: &mut Ui) {
         ui.separator();
         ui.heading("Live Co-Working");
-        ui.label("Explizite Bildfreigabe · maskierte Live-Bilder · Klicks und Einzeltasten nach zwei Identitäten und lokaler Prüfung");
+        ui.label("Explicit screen sharing · masked live images · clicks and individual keys require two identities and local review");
         let client = match TeamClient::new(&self.team.endpoint, &self.team.token) {
             Ok(c) => c,
             Err(_) => return,
@@ -51,7 +51,7 @@ impl AivanaApp {
             .as_ref()
             .and_then(|rx| match rx.try_recv() {
                 Ok(r) => Some(r),
-                Err(mpsc::TryRecvError::Disconnected) => Some(Err("Verbindung abgebrochen".into())),
+                Err(mpsc::TryRecvError::Disconnected) => Some(Err("Connection interrupted".into())),
                 Err(_) => None,
             });
         let mut execute: Option<Proposal> = None;
@@ -94,7 +94,7 @@ impl AivanaApp {
                         });
                     if !binding_valid || !frame_valid {
                         self.team.live = Default::default();
-                        self.team.live.message = "Ungültige Bildantwort".into();
+                        self.team.live.message = "Invalid image response".into();
                         return;
                     }
                     if let (Some(Command::Consume { room, id, digest }), Some(p), Some(r)) =
@@ -152,14 +152,14 @@ impl AivanaApp {
                 && self.team.live.consent == Some(room.session)
                 && self.selected_session == Some(room.session);
             ui.label(format!(
-                "Raum {} · Host {} · Generation {}",
+                "Room {} · Host {} · Generation {}",
                 room.id, room.owner, room.generation
             ));
             ui.horizontal(|ui| {
                 if ui
                     .add_enabled(
                         !busy,
-                        egui::Button::new("Raum verlassen / Freigabe beenden"),
+                        egui::Button::new("Leave room / stop sharing"),
                     )
                     .clicked()
                 {
@@ -170,7 +170,7 @@ impl AivanaApp {
                 }
                 if owner
                     && ui
-                        .add_enabled(!busy, egui::Button::new("Steuerung sofort widerrufen"))
+                        .add_enabled(!busy, egui::Button::new("Revoke control immediately"))
                         .clicked()
                 {
                     self.team
@@ -180,10 +180,10 @@ impl AivanaApp {
             });
             if consenting_owner {
                 ui.horizontal(|ui| {
-                    ui.label("Steuerung an Mitglied (20 s)");
+                    ui.label("Give control to member (20 s)");
                     ui.text_edit_singleline(&mut self.team.live.target);
                     if ui
-                        .add_enabled(!busy, egui::Button::new("Übergeben"))
+                        .add_enabled(!busy, egui::Button::new("Transfer"))
                         .clicked()
                     {
                         self.team.live.send(
@@ -198,12 +198,12 @@ impl AivanaApp {
             }
             if let Some(lease) = &room.lease {
                 ui.label(format!(
-                    "Exklusive Steuerung: {} · Ablauf {}",
+                    "Exclusive control: {} · Expires {}",
                     lease.actor, lease.expires
                 ));
             }
             ui.horizontal(|ui| {
-                ui.label("Annotation (Bild anklicken)");
+                ui.label("Annotation (click the image)");
                 ui.text_edit_singleline(&mut self.team.live.note);
             });
             if let Some(texture) = &self.team.live.texture {
@@ -266,7 +266,7 @@ impl AivanaApp {
                 }
             }
             ui.label(
-                "Bildklicks und einzelne Tasten benötigen zwei Identitäten und lokale Ausführung.",
+                "Image clicks and individual keys require two identities and local execution.",
             );
             ui.horizontal_wrapped(|ui| {
                 use crate::team_server::collaboration_session::SharedKey;
@@ -314,10 +314,10 @@ impl AivanaApp {
                     continue;
                 }
                 ui.label(format!(
-                    "{} · Sitzung {} · Freigaben {:?}",
+                    "{} · Session {} · Approvals {:?}",
                     p.key
-                        .map(|k| format!("Taste {k:?}"))
-                        .unwrap_or_else(|| format!("Klick ({},{})", p.x, p.y)),
+                        .map(|k| format!("Key {k:?}"))
+                        .unwrap_or_else(|| format!("Click ({},{})", p.x, p.y)),
                     p.session,
                     p.approvals
                 ));
@@ -326,7 +326,7 @@ impl AivanaApp {
                     if ui
                         .add_enabled(
                             !busy && !p.approvals.contains(&actor),
-                            egui::Button::new("Diesen unveränderlichen Antrag genehmigen"),
+                            egui::Button::new("Approve this immutable request"),
                         )
                         .clicked()
                     {
@@ -343,7 +343,7 @@ impl AivanaApp {
                         && ui
                             .add_enabled(
                                 !busy && p.approvals.len() >= 2,
-                                egui::Button::new("Lokal prüfen und einmal ausführen"),
+                                egui::Button::new("Review locally and run once"),
                             )
                             .clicked()
                     {
@@ -389,13 +389,13 @@ impl AivanaApp {
             }
         } else {
             ui.horizontal(|ui| {
-                ui.label("Mitglieder: exakte Akteurnamen, durch Komma getrennt");
+                ui.label("Members: exact actor names, separated by commas");
                 ui.text_edit_singleline(&mut self.team.live.members);
             });
             if ui
                 .add_enabled(
                     !busy,
-                    egui::Button::new("Ausgewählte RDP-Sitzung maskiert live freigeben"),
+                    egui::Button::new("Share selected RDP session live with masking"),
                 )
                 .clicked()
             {
@@ -415,15 +415,15 @@ impl AivanaApp {
                         .send(client.clone(), Command::Create { session, members });
                 } else {
                     self.team.live.message =
-                        "Keine verbundene RDP-Sitzung mit sicher maskierbarem Bild verfügbar"
+                        "No connected RDP session with a safely maskable image is available"
                             .into();
                 }
             }
             ui.horizontal(|ui| {
-                ui.label("Raum-ID");
+                ui.label("Room ID");
                 ui.text_edit_singleline(&mut self.team.live.join);
                 if ui
-                    .add_enabled(!busy, egui::Button::new("Beitreten"))
+                    .add_enabled(!busy, egui::Button::new("Join"))
                     .clicked()
                 {
                     match Uuid::parse_str(self.team.live.join.trim()) {
@@ -431,7 +431,7 @@ impl AivanaApp {
                             self.team.live.consent = None;
                             self.team.live.send(client, Command::Poll { room })
                         }
-                        Err(_) => self.team.live.message = "Ungültige Raum-ID".into(),
+                        Err(_) => self.team.live.message = "Invalid room ID".into(),
                     }
                 }
             });

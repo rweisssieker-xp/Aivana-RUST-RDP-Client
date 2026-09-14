@@ -14,14 +14,14 @@ pub fn lab_target(lab: &Journal) -> Result<Target> {
     let vm = Uuid::parse_str(&lab.vm_id)?;
     ensure!(
         !profile_id.is_nil() && !vm.is_nil(),
-        "Lab und VM benötigen eindeutige Identitäten"
+        "Lab and VM require unique identities"
     );
     ensure!(
         matches!(
             lab.phase.as_str(),
             "running" | "test_passed" | "test_failed"
         ),
-        "Lab muss gestartet und für eine neue Prüfung verfügbar sein"
+        "Lab must be running and available for a new check"
     );
     Ok(Target {
         profile_id,
@@ -66,14 +66,14 @@ pub fn health(plan: &ExecutionPlan) -> Result<HealthProbe> {
             h.validate()?;
             Ok(h)
         }
-        _ => bail!("Klonfreigabe benötigt eine HTTP- oder HTTPS-Prüfung"),
+        _ => bail!("Clone approval requires an HTTP or HTTPS check"),
     }
 }
 pub fn validate(plan: &ExecutionPlan) -> Result<()> {
     plan.validate()?;
     ensure!(
         plan.mappings.iter().all(|m| valid_lab_target(&m.staging)),
-        "Alle Produktionsziele benötigen eindeutig zugeordnete Hyper-V-Labs"
+        "All production targets require uniquely mapped Hyper-V labs"
     );
     health(plan)?;
     Ok(())
@@ -86,7 +86,7 @@ pub(crate) fn check_evidence(
     validate(plan)?;
     ensure!(
         receipts.len() == plan.mappings.len(),
-        "Für jedes Ziel wird genau ein Klonnachweis benötigt"
+        "Exactly one clone evidence record is required for each target"
     );
     let hash = plan.hash()?;
     let health = health(plan)?;
@@ -99,20 +99,20 @@ pub(crate) fn check_evidence(
                 r.lab_id == mapping.staging.profile_id.to_string()
                     && r.vm_id == mapping.staging.host
             })
-            .ok_or_else(|| anyhow::anyhow!("Passender Lab-/VM-Nachweis fehlt"))?;
+            .ok_or_else(|| anyhow::anyhow!("Matching lab/VM evidence is missing"))?;
         receipt.verify_integrity()?;
         ensure!(
             seen.insert(receipt.id),
-            "Nachweis darf nicht doppelt verwendet werden"
+            "Evidence cannot be used more than once"
         );
         ensure!(
             receipt.binding == hash
                 && receipt.service == plan.service
                 && receipt.desired_running == (desired == "Running")
                 && receipt.restart == plan.restart,
-            "Nachweis gehört zu einem anderen Auftrag"
+            "Evidence belongs to another mission"
         );
-        ensure!(receipt.health == health, "HTTP-Prüfung wurde geändert");
+        ensure!(receipt.health == health, "HTTP check changed");
         ensure!(
             receipt.passed
                 && !receipt.restored
@@ -123,13 +123,13 @@ pub(crate) fn check_evidence(
                     receipt.before != receipt.after
                 })
                 && matches!(receipt.before.as_str(), "Running" | "Stopped"),
-            "Kein erfolgreicher tatsächlicher Zustandswechsel im Klon nachgewiesen"
+            "No successful actual state change was evidenced in the clone"
         );
         ensure!(
             receipt.started <= receipt.finished
                 && receipt.finished <= now
                 && (now - receipt.finished).num_seconds() <= 3600,
-            "Klonnachweis fehlt, liegt in der Zukunft oder ist älter als eine Stunde"
+            "Clone evidence is missing, from the future, or older than one hour"
         );
     }
     Ok(())
@@ -148,7 +148,7 @@ pub fn check_rehearsal_receipts(
     references: &[String],
     now: DateTime<Utc>,
 ) -> Result<()> {
-    ensure!(references.len() <= 32, "Zu viele Nachweise");
+    ensure!(references.len() <= 32, "Too many evidence records");
     let receipts = references
         .iter()
         .map(|reference| crate::test_lab::load_receipt(reference))
@@ -408,7 +408,7 @@ pub(crate) mod tests {
         );
         assert!(
             check_receipts(&plan, &refs, now).is_ok(),
-            "Aufräumen darf einen unveränderlichen historischen Nachweis nicht verwerfen"
+            "Cleanup cannot discard immutable historical evidence"
         );
         assert!(check_receipts(&plan, &refs, now + chrono::Duration::seconds(3601)).is_err());
         let mut altered = proof;

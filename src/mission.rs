@@ -80,10 +80,10 @@ pub struct Step {
 impl Default for Step {
     fn default() -> Self {
         Self {
-            title: "Befunde erfassen".into(),
+            title: "Capture observations".into(),
             kind: StepKind::Observe,
-            expectation: "Aktuellen Zustand anhand der Befunde beurteilen".into(),
-            recovery: "Keine Änderung durch die Erfassung".into(),
+            expectation: "Assess current state using observations".into(),
+            recovery: "Capture does not change the target".into(),
             command: String::new(),
         }
     }
@@ -100,12 +100,12 @@ pub enum Status {
 impl Status {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Pending => "Offen",
-            Self::Running => "Läuft",
-            Self::Review => "Prüfung nötig",
-            Self::Passed => "Bestätigt",
-            Self::Failed => "Fehlgeschlagen",
-            Self::Interrupted => "Unterbrochen",
+            Self::Pending => "Pending",
+            Self::Running => "Running",
+            Self::Review => "Review needed",
+            Self::Passed => "Confirmed",
+            Self::Failed => "Failed",
+            Self::Interrupted => "Interrupted",
         }
     }
 }
@@ -159,10 +159,10 @@ pub struct Mission {
 impl Mission {
     pub fn new(objective: &str, targets: Vec<Target>, steps: Vec<Step>) -> Result<Self> {
         if objective.trim().is_empty() || objective.len() > 4096 {
-            bail!("Auftrag fehlt oder ist zu lang");
+            bail!("Mission is missing or too long");
         }
         if targets.is_empty() || targets.len() > 256 || steps.is_empty() || steps.len() > 64 {
-            bail!("1–256 Rechner und 1–64 Schritte erforderlich");
+            bail!("1–256 computers and 1–64 steps required");
         }
         if targets
             .iter()
@@ -171,7 +171,7 @@ impl Mission {
             .len()
             != targets.len()
         {
-            bail!("Rechner doppelt ausgewählt");
+            bail!("Computer selected more than once");
         }
         if targets
             .iter()
@@ -180,7 +180,7 @@ impl Mission {
                 .iter()
                 .any(|s| s.title.trim().is_empty() || s.expectation.trim().is_empty())
         {
-            bail!("Ziel, Schritt oder Erfolgskriterium fehlt");
+            bail!("Target, step, or success criterion is missing");
         }
         if steps.iter().any(|s| {
             s.title.len() > 4096
@@ -190,7 +190,7 @@ impl Mission {
                 || (s.kind == StepKind::SshCommand
                     && (s.command.trim().is_empty() || s.recovery.trim().is_empty()))
         }) {
-            bail!("Schritt zu lang oder SSH-Befehl/Rückweg fehlt");
+            bail!("Step is too long or SSH command/recovery path is missing");
         }
         let pilot = targets[0].profile_id;
         let outcomes = targets
@@ -228,7 +228,7 @@ impl Mission {
     }
     pub fn allow_rollout(&mut self) -> Result<()> {
         if !self.pilot_passed() {
-            bail!("Probelauf muss zuerst vollständig bestätigt sein");
+            bail!("Rehearsal must be fully confirmed first");
         }
         self.rollout = true;
         self.updated = Utc::now();
@@ -236,25 +236,25 @@ impl Mission {
     }
     pub fn begin(&mut self, target: Uuid, step: usize) -> Result<()> {
         if self.paused {
-            bail!("Auftrag ist pausiert");
+            bail!("Job is paused");
         }
         if target != self.pilot && (!self.rollout || !self.pilot_passed()) {
-            bail!("Probelauf und Rollout-Freigabe fehlen");
+            bail!("Rehearsal and rollout approval are missing");
         }
         if self
             .outcomes
             .iter()
             .any(|o| o.target == target && o.step < step && o.status != Status::Passed)
         {
-            bail!("Vorherigen Schritt zuerst prüfen");
+            bail!("Review the previous step first");
         }
         let o = self
             .outcomes
             .iter_mut()
             .find(|o| o.target == target && o.step == step)
-            .context("Schritt nicht vorhanden")?;
+            .context("Step does not exist")?;
         if matches!(o.status, Status::Running | Status::Passed | Status::Review) {
-            bail!("Schritt bereits gestartet oder bestätigt");
+            bail!("Step already started or confirmed");
         }
         o.status = Status::Running;
         o.evidence.clear();
@@ -264,23 +264,23 @@ impl Mission {
     }
     pub fn record(&mut self, target: Uuid, step: usize, evidence: Evidence) -> Result<()> {
         if evidence.target.profile_id != target {
-            bail!("Befund gehört zu einem anderen Rechner");
+            bail!("Observation belongs to another computer");
         }
         let t = self
             .targets
             .iter()
             .find(|t| t.profile_id == target)
-            .context("Rechner fehlt")?;
+            .context("Computer is missing")?;
         if !t.same_endpoint(&evidence.target) {
-            bail!("Befund gehört zu einem anderen Endpunkt");
+            bail!("Observation belongs to another endpoint");
         }
         let o = self
             .outcomes
             .iter_mut()
             .find(|o| o.target == target && o.step == step)
-            .context("Schritt fehlt")?;
+            .context("Step is missing")?;
         if o.status != Status::Running {
-            bail!("Schritt läuft nicht mehr");
+            bail!("Step is no longer running");
         }
         if evidence.facts.is_empty() && evidence.notes.trim().is_empty() {
             bail!("Leerer Befund");
@@ -293,15 +293,15 @@ impl Mission {
     }
     pub fn verify(&mut self, target: Uuid, step: usize, passed: bool, note: &str) -> Result<()> {
         if note.trim().is_empty() {
-            bail!("Bitte das Prüfergebnis begründen");
+            bail!("Explain the review result");
         }
         let o = self
             .outcomes
             .iter_mut()
             .find(|o| o.target == target && o.step == step)
-            .context("Schritt fehlt")?;
+            .context("Step is missing")?;
         if o.status != Status::Review || o.evidence.is_empty() {
-            bail!("Zuerst einen aktuellen Befund erfassen");
+            bail!("Capture a current finding first");
         }
         o.status = if passed {
             Status::Passed
@@ -326,7 +326,7 @@ impl Mission {
     }
     pub fn map_local_profiles(&mut self, profiles: &[ConnectionProfile]) -> Result<()> {
         if !self.paused {
-            bail!("Auftrag vor der Zuordnung pausieren");
+            bail!("Pause the job before mapping");
         }
         let mut mapped = BTreeMap::new();
         let mut used = BTreeSet::new();
@@ -340,14 +340,11 @@ impl Mission {
                 })
                 .collect();
             if candidates.len() != 1 {
-                bail!(
-                    "Für {} ist kein eindeutiges identisches lokales Profil vorhanden",
-                    t.name
-                );
+                bail!("No unique identical local profile exists for {}", t.name);
             }
             let local = Target::from_profile(candidates[0]);
             if !used.insert(local.profile_id) {
-                bail!("Mehrere Ziele würden auf dasselbe Profil zeigen");
+                bail!("Multiple targets would point to the same profile");
             }
             mapped.insert(t.profile_id, local);
         }
@@ -412,7 +409,7 @@ impl MissionBook {
             return Ok(Self::default());
         }
         if std::fs::metadata(path)?.len() > 64 * 1024 * 1024 {
-            bail!("Auftragsspeicher zu groß");
+            bail!("Mission store is too large");
         }
         let clear = unprotect_secret(&std::fs::read(path)?)?;
         let mut book: Self = serde_json::from_slice(&clear).context("Auftragsspeicher lesen")?;
@@ -431,7 +428,7 @@ impl MissionBook {
         #[cfg(not(windows))]
         {
             let _ = path;
-            bail!("Verschlüsselter Auftragsspeicher benötigt Windows DPAPI");
+            bail!("Encrypted mission store requires Windows DPAPI");
         }
         #[cfg(windows)]
         {
@@ -440,7 +437,7 @@ impl MissionBook {
             }
             let clear = serde_json::to_vec(self)?;
             if clear.len() > 64 * 1024 * 1024 {
-                bail!("Auftragsspeicher überschreitet 64 MiB");
+                bail!("Mission store exceeds 64 MiB");
             }
             let bytes = protect_secret(&clear)?;
             let temp = path.with_extension(format!("{}.tmp", Uuid::new_v4()));
@@ -457,9 +454,9 @@ impl MissionBook {
             .missions
             .iter()
             .find(|m| m.id == id)
-            .context("Auftrag fehlt")?;
+            .context("Mission is missing")?;
         if !m.completed() {
-            bail!("Nur vollständig bestätigte Aufträge werden als erprobter Ablauf gespeichert");
+            bail!("Only fully confirmed missions are saved as verified workflows");
         }
         self.procedures.push(Procedure {
             id: Uuid::new_v4(),
@@ -487,9 +484,9 @@ impl MissionBook {
     }
     pub fn import(&mut self, json: &str) -> Result<Uuid> {
         if json.len() > 16 * 1024 * 1024 {
-            bail!("Übergabe größer als 16 MiB");
+            bail!("Handoff exceeds 16 MiB");
         }
-        let mut m: Mission = serde_json::from_str(json).context("Übergabe lesen")?;
+        let mut m: Mission = serde_json::from_str(json).context("Read handoff")?;
         validate_mission(&m)?;
         // Imported reports are history; local execution must be explicitly resumed and targets matched.
         m.id = Uuid::new_v4();
@@ -529,7 +526,7 @@ fn validate_mission(m: &Mission) -> Result<()> {
     if !m.targets.iter().any(|t| t.profile_id == m.pilot)
         || m.outcomes.len() != template.outcomes.len()
     {
-        bail!("Ungültige Auftragsstruktur");
+        bail!("Invalid mission structure");
     }
     let keys: BTreeSet<_> = m.outcomes.iter().map(|o| (o.target, o.step)).collect();
     if keys.len() != m.outcomes.len()
@@ -538,18 +535,18 @@ fn validate_mission(m: &Mission) -> Result<()> {
             .iter()
             .any(|o| !keys.contains(&(o.target, o.step)))
     {
-        bail!("Ungültige Schrittzuordnung");
+        bail!("Invalid step mapping");
     }
     let evidence_ids: BTreeSet<_> = m.evidence.iter().map(|e| e.id).collect();
     if evidence_ids.len() != m.evidence.len() || m.evidence.len() > 16384 {
-        bail!("Ungültige Befundliste");
+        bail!("Invalid observation list");
     }
     for o in &m.outcomes {
         if matches!(o.status, Status::Passed | Status::Review) && o.evidence.is_empty() {
-            bail!("Prüfergebnis ohne Befund");
+            bail!("Review result without an observation");
         }
         if o.status == Status::Passed && o.verification.trim().is_empty() {
-            bail!("Erfolg ohne Prüfnotiz");
+            bail!("Success without a review note");
         }
         for id in &o.evidence {
             if !m
@@ -557,7 +554,7 @@ fn validate_mission(m: &Mission) -> Result<()> {
                 .iter()
                 .any(|e| e.id == *id && e.target.profile_id == o.target)
             {
-                bail!("Befundzuordnung ungültig");
+                bail!("Invalid observation mapping");
             }
         }
     }
@@ -565,7 +562,7 @@ fn validate_mission(m: &Mission) -> Result<()> {
         if !m.targets.iter().any(|t| t.same_endpoint(&e.target))
             || (e.facts.is_empty() && e.notes.trim().is_empty())
         {
-            bail!("Befund enthält keinen Inhalt oder gehört zu einem anderen Endpunkt");
+            bail!("Observation has no content or belongs to another endpoint");
         }
     }
     Ok(())

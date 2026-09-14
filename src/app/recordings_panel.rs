@@ -2,6 +2,10 @@ use super::*;
 use crate::recording::{self, Mask, Recorder, Recording};
 #[derive(Default)]
 pub(super) struct RecordingsState {
+    check_source: Option<crate::application_checks::recorded_ui::Derived>,
+    check_chosen: std::collections::BTreeSet<usize>,
+    check_include_procedure: bool,
+    check_review: Option<crate::application_checks::recorded_ui::Review>,
     pub active: Option<Recorder>,
     catalog: Vec<Recording>,
     masks: Vec<Mask>,
@@ -61,7 +65,7 @@ impl AivanaApp {
                     self.recordings.catalog.push(r);
                 }
                 Err(e) => {
-                    self.status = format!("Aufzeichnung: {e}");
+                    self.status = format!("Recording: {e}");
                     if let Some(rec) = &mut self.recordings.active {
                         rec.stop();
                     }
@@ -72,18 +76,20 @@ impl AivanaApp {
         if disconnected && self.recordings.active.is_some() {
             self.recordings.active = None;
             self.recordings.stopping = false;
-            self.status="Aufzeichnungsworker beendet. Archivstatus prüfen; letzte Speicherung möglicherweise fehlgeschlagen.".into();
+            self.status =
+                "Recording worker stopped. Check archive status; the last save may have failed."
+                    .into();
         }
     }
     pub(super) fn recordings_view(&mut self, ui: &mut Ui) {
-        ui.heading("Lokale Aufzeichnungen");
-        ui.label("Verschlüsselte Schlüsselbilder mit Zeitmarken und Suchnotizen. Höchstens ein verändertes Bild pro Sekunde, 600 Bilder / 128 MiB je Aufzeichnung. Lokale Windows OCR schwärzt erkannte Geheimnisfelder vor Speicherung und ergänzt den Suchindex. OCR-Fehler stoppen die Aufnahme. Erkennung ist keine Garantie für vollständige Geheimniserkennung; ergänzen Sie manuelle Masken. Kein Video oder Audio.");
+        ui.heading("Local recordings");
+        ui.label("Encrypted keyframes with timestamps and search notes. At most one changed image per second, 600 images / 128 MiB per recording. Local Windows OCR redacts detected secret fields before saving and adds to the search index. OCR errors stop recording. Detection does not guarantee that all secrets are found; add manual masks. No video or audio.");
         if !self.recordings.refreshed {
             self.refresh_recordings();
         }
         if self.recordings.active.is_none() {
             ui.label(
-                "Schwärzung vor der Aufnahme: Koordinaten als Anteil des Remote-Bildes (0 bis 1).",
+                "Redaction before recording: coordinates as a fraction of the remote image (0 to 1).",
             );
             let mut remove = None;
             for (i, m) in self.recordings.masks.iter_mut().enumerate() {
@@ -105,15 +111,15 @@ impl AivanaApp {
                             egui::DragValue::new(&mut m.w)
                                 .speed(0.01)
                                 .range(0.01..=1.0)
-                                .prefix("Breite "),
+                                .prefix("Width "),
                         );
                         ui.add(
                             egui::DragValue::new(&mut m.h)
                                 .speed(0.01)
                                 .range(0.01..=1.0)
-                                .prefix("Höhe "),
+                                .prefix("Height "),
                         );
-                        if ui.small_button("Entfernen").clicked() {
+                        if ui.small_button("Remove").clicked() {
                             remove = Some(i);
                         }
                     });
@@ -122,7 +128,7 @@ impl AivanaApp {
             if let Some(i) = remove {
                 self.recordings.masks.remove(i);
             }
-            if ui.button("Schwärzungsbereich ergänzen").clicked() {
+            if ui.button("Add redaction area").clicked() {
                 self.recordings.masks.push(Mask {
                     x: 0.0,
                     y: 0.0,
@@ -131,12 +137,12 @@ impl AivanaApp {
                 });
             }
             if let Some(s) = self.selected_session().cloned() {
-                ui.label(format!("Aufnahmeziel: {}", s.title));
+                ui.label(format!("Recording target: {}", s.title));
                 if ui
                     .add_enabled(
                         s.status == SessionStatus::Connected
                             && self.latest_frames.contains_key(&s.id),
-                        egui::Button::new("Aufzeichnung dieser Sitzung starten"),
+                        egui::Button::new("Start recording this session"),
                     )
                     .clicked()
                 {
@@ -158,21 +164,21 @@ impl AivanaApp {
                     }
                 }
             } else {
-                ui.label("Zuerst eine verbundene Sitzung auswählen.");
+                ui.label("Select a connected session first.");
             }
         } else {
             ui.colored_label(
                 tw::RED_600,
                 if self.recordings.stopping {
-                    "Aufzeichnung wird abgeschlossen …"
+                    "Finalizing recording …"
                 } else {
-                    "● Aufzeichnung aktiv"
+                    "● Recording active"
                 },
             );
             if ui
                 .add_enabled(
                     !self.recordings.stopping,
-                    egui::Button::new("Aufzeichnung stoppen"),
+                    egui::Button::new("Stop recording"),
                 )
                 .clicked()
             {
@@ -181,23 +187,23 @@ impl AivanaApp {
             }
             if let Some(rec) = &self.recordings.active {
                 ui.small(format!(
-                    "{} Bilder wegen ausgelasteter Speicherung übersprungen",
+                    "{} images skipped because storage was busy",
                     rec.dropped
                 ));
             }
         }
         ui.add(
             egui::TextEdit::singleline(&mut self.recordings.note)
-                .hint_text("Suchnotiz für die nächsten aufgenommenen Bilder")
+                .hint_text("Search note for the next recorded images")
                 .desired_width(f32::INFINITY),
         );
         ui.separator();
         ui.horizontal_wrapped(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.recordings.query)
-                    .hint_text("Bildinhalt, Titel oder Notiz suchen"),
+                    .hint_text("Search image content, title, or note"),
             );
-            if ui.button("Archiv aktualisieren").clicked() {
+            if ui.button("Refresh archive").clicked() {
                 self.refresh_recordings();
             }
         });
@@ -213,15 +219,11 @@ impl AivanaApp {
                     .selectable_label(
                         self.recordings.selected == Some(r.id),
                         format!(
-                            "{} · {} · {} Bilder{}",
+                            "{} · {} · {} images{}",
                             r.title,
-                            r.created.format("%d.%m. %H:%M"),
+                            r.created.format("%m/%d %H:%M"),
                             r.frames.len(),
-                            if r.finished {
-                                ""
-                            } else {
-                                " · nicht abgeschlossen"
-                            }
+                            if r.finished { "" } else { " · incomplete" }
                         ),
                     )
                     .clicked()
@@ -243,10 +245,11 @@ impl AivanaApp {
             .find(|r| Some(r.id) == self.recordings.selected)
         {
             if !r.frames.is_empty() {
+                self.recorded_application_checks_ui(ui, r);
                 self.recordings.frame = self.recordings.frame.min(r.frames.len() - 1);
                 ui.add(
                     egui::Slider::new(&mut self.recordings.frame, 0..=r.frames.len() - 1)
-                        .text("Schlüsselbild"),
+                        .text("Keyframe"),
                 );
                 let key = (r.id, self.recordings.frame);
                 if self.recordings.loaded != Some(key) {
@@ -264,14 +267,14 @@ impl AivanaApp {
                             self.recordings.loaded = Some(key);
                         }
                         Err(e) => {
-                            self.status = format!("Bild lesen: {e:#}");
+                            self.status = format!("Read image: {e:#}");
                             self.recordings.texture = None;
                         }
                     }
                 }
                 let frame = &r.frames[self.recordings.frame];
                 ui.label(format!("{} · {}", frame.at, frame.note));
-                ui.collapsing("Erkannter Bildinhalt (bereinigt)", |ui| {
+                ui.collapsing("Recognized image content (sanitized)", |ui| {
                     ui.label(&frame.ocr);
                 });
                 if let Some(texture) = &self.recordings.texture {
@@ -284,18 +287,15 @@ impl AivanaApp {
                 }
                 ui.add(
                     egui::TextEdit::singleline(&mut self.recordings.path)
-                        .hint_text("Absoluter Pfad für PNG-Export"),
+                        .hint_text("Absolute path for PNG export"),
                 );
-                if ui
-                    .button("Dieses Bild unverschlüsselt exportieren")
-                    .clicked()
-                {
+                if ui.button("Export this image without encryption").clicked() {
                     self.status = match app_data_file("recordings")
                         .and_then(|root| recording::read_frame(&root, r, self.recordings.frame))
                         .and_then(|bytes| {
                             crate::mission::export_new(Path::new(&self.recordings.path), &bytes)
                         }) {
-                        Ok(p) => format!("Bild gespeichert: {}", p.display()),
+                        Ok(p) => format!("Image saved: {}", p.display()),
                         Err(e) => format!("Export: {e:#}"),
                     };
                 }
@@ -306,7 +306,58 @@ impl AivanaApp {
         self.recordings.refreshed = true;
         match app_data_file("recordings").and_then(|p| recording::list(&p)) {
             Ok(c) => self.recordings.catalog = c,
-            Err(e) => self.status = format!("Archiv nicht lesbar: {e:#}"),
+            Err(e) => self.status = format!("Cannot read archive: {e:#}"),
         };
+    }
+
+    fn recorded_application_checks_ui(&mut self, ui: &mut Ui, recording: &Recording) {
+        use crate::application_checks::recorded_ui as checks;
+        ui.collapsing("Application checks from this recording",|ui| {
+            ui.label("Derive visible-state candidates from this finished recording's local redacted OCR. Recorded text is an observation, not proof of application success. Nothing is sent or executed.");
+            if self.recordings.check_source.as_ref().is_some_and(|source|source.source.id!=recording.id) {
+                self.recordings.check_source=None;self.recordings.check_review=None;self.recordings.check_chosen.clear();
+            }
+            if ui.add_enabled(recording.finished,egui::Button::new("Derive recorded visible checkpoints")).clicked() {
+                self.recordings.check_review=None;self.recordings.check_chosen.clear();
+                match checks::derive(recording) {Ok(source)=>self.recordings.check_source=Some(source),Err(error)=>{self.recordings.check_source=None;self.status=error.to_string();}}
+            }
+            let Some(source)=self.recordings.check_source.clone() else{return;};
+            let Some(profile)=self.profiles.iter().find(|p|p.id==source.source.profile).cloned() else{ui.label("The recorded target profile is missing; restore its mapping before preparing checks.");return;};
+            ui.label(format!("Recorded profile: {} · Current endpoint: {}:{} · {}",profile.id,profile.host,profile.port,profile.name));
+            ui.small("Choose up to four observed words. Only a limited UI-state vocabulary is suggested; OCR with secret-field hints is omitted. Review the original images. Backend results are not inferred.");
+            for (index,candidate) in source.candidates.iter().enumerate() {
+                let mut selected=self.recordings.check_chosen.contains(&index);
+                if ui.checkbox(&mut selected,format!("{} · frame {} · observed {}",candidate.word,candidate.frame+1,candidate.at)).changed() {
+                    self.recordings.check_review=None;
+                    if selected {self.recordings.check_chosen.insert(index);} else {self.recordings.check_chosen.remove(&index);}
+                }
+            }
+            if ui.checkbox(&mut self.recordings.check_include_procedure,"Include the currently loaded demonstrated procedure before these checks").changed(){self.recordings.check_review=None;}
+            let procedure=self.recordings.check_include_procedure.then(||self.teaching.teacher.procedure.clone());
+            if let Some(procedure)=&procedure {
+                ui.small("The demonstration is selected separately; timestamps do not align it automatically to this recording. Review every action and parameter slot for this target. Live replay uses existing native OCR and per-step approvals.");
+                ui.collapsing("Demonstrated actions and assertions to review",|ui|{ui.monospace(serde_json::to_string_pretty(procedure).unwrap_or_default());});
+            } else {ui.small("Select at least two observed checkpoints: an initial screen and a final screen. The workflow pauses for the operator; it does not infer login clicks.");}
+            let now=chrono::Utc::now();
+            if let Some(review)=&self.recordings.check_review {
+                if checks::prepare(recording,&profile,&self.recordings.check_chosen,procedure.as_ref(),review,now).is_err(){self.recordings.check_review=None;}
+            }
+            let valid=checks::review(&source.source,&profile,&self.recordings.check_chosen,procedure.as_ref(),now);
+            if let Err(error)=&valid {ui.label(error.to_string());}
+            let mut reviewed=self.recordings.check_review.is_some();
+            if ui.add_enabled(valid.is_ok(),egui::Checkbox::new(&mut reviewed,"I reviewed the recorded images, exact target, selected expected states, and optional demonstration. Prepare this workflow only.")).changed() {
+                self.recordings.check_review=if reviewed {valid.ok()} else {None};
+            }
+            if ui.add_enabled(self.recordings.check_review.is_some(),egui::Button::new("Prepare recorded application-check workflow")).clicked() {
+                let result=(||->anyhow::Result<()> {
+                    let fresh=recording::list(&app_data_file("recordings")?)?.into_iter().find(|r|r.id==recording.id).ok_or_else(||anyhow::anyhow!("Recording is no longer available"))?;
+                    let review=self.recordings.check_review.as_ref().ok_or_else(||anyhow::anyhow!("Review is missing"))?;
+                    let plan=checks::prepare(&fresh,&profile,&self.recordings.check_chosen,procedure.as_ref(),review,chrono::Utc::now())?;
+                    self.prepare_recorded_check_workflow(plan)
+                })();
+                self.recordings.check_review=None;
+                self.status=match result {Ok(())=>"Recorded checks prepared in Workflows. Review and approve there before any execution.".into(),Err(error)=>error.to_string()};
+            }
+        });
     }
 }

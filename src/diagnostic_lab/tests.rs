@@ -18,7 +18,7 @@ fn diagnostic_preview_explains_three_outcomes_without_mutating_real_case() {
     assert_eq!(branches[1].compatible, vec![Probe::Service]);
     assert_eq!(branches[1].known, 1);
     assert_eq!(branches[1].next, Some(Probe::Dns));
-    assert!(!branches[1].conclusion.starts_with("Alle vier"));
+    assert!(!branches[1].conclusion.starts_with("All four"));
     assert_eq!(branches[2].assumed, Value::Unknown);
     assert_eq!(branches[2].compatible, Probe::ALL);
     assert_eq!(branches[2].known, 0);
@@ -36,7 +36,7 @@ fn diagnostic_preview_models_contradiction_and_attempt_exhaustion() {
     assert_eq!(branches[0].compatible, vec![Probe::Service]);
     assert!(branches[1].compatible.is_empty());
     assert_eq!(branches[1].next, None);
-    assert!(branches[1].conclusion.starts_with("Keine Hypothese"));
+    assert!(branches[1].conclusion.starts_with("No hypothesis"));
     assert!(case.preview(Probe::Service, now).is_err());
 
     let mut unavailable = Case::new(config(Scenario::Unavailable), now).unwrap();
@@ -60,7 +60,7 @@ fn diagnostic_preview_respects_expiry_and_requires_all_confirmations() {
     let branches = case.preview(Probe::Dependency, now).unwrap();
     assert_eq!(branches[0].known, 4);
     assert_eq!(branches[0].compatible, vec![Probe::Dns]);
-    assert!(branches[0].conclusion.contains("kein Nachweis"));
+    assert!(branches[0].conclusion.contains("does not prove"));
     assert_eq!(branches[1].compatible.len(), 0);
     assert_eq!(branches[2].known, 3);
     assert_eq!(branches[2].next, Some(Probe::Dependency));
@@ -114,7 +114,7 @@ fn diagnostic_single_fault_requires_all_four_confirmations() {
         for index in 0..4 {
             let a = c.assess(now);
             assert_eq!(a.known, index);
-            assert!(!a.conclusion().starts_with("Alle vier"));
+            assert!(!a.conclusion().starts_with("All four"));
             c.simulate(a.next.unwrap(), now).unwrap();
         }
         let a = c.assess(now);
@@ -122,7 +122,7 @@ fn diagnostic_single_fault_requires_all_four_confirmations() {
         assert_eq!(a.compatible().len(), 1);
         assert_eq!(a.compatible()[0].cause, cause);
         assert!(a.next.is_none());
-        assert!(a.conclusion().contains("kein Nachweis"));
+        assert!(a.conclusion().contains("does not prove"));
     }
 }
 #[test]
@@ -146,7 +146,7 @@ fn diagnostic_multiple_faults_and_healthy_checks_expose_model_gaps() {
         }
         let a = c.assess(now);
         assert!(a.compatible().is_empty());
-        assert!(a.conclusion().contains("Keine Hypothese"));
+        assert!(a.conclusion().contains("No hypothesis"));
     }
 }
 #[test]
@@ -161,7 +161,7 @@ fn diagnostic_unknown_attempts_never_count_as_passes() {
     assert_eq!(a.known, 0);
     assert_eq!(a.compatible().len(), 4);
     assert!(a.next.is_none());
-    assert!(a.conclusion().contains("unzureichend"));
+    assert!(a.conclusion().contains("Insufficient"));
     assert!(c.request(Probe::Service, now).is_err());
     assert!(
         c.assess(now + chrono::Duration::seconds(301))

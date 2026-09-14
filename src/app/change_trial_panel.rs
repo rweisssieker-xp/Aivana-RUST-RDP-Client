@@ -53,7 +53,7 @@ impl State {
             Err(_) => {
                 self.records.clear();
                 self.store_error = true;
-                self.notice = "Versuchsspeicher nicht lesbar; neue Versuche gesperrt".into();
+                self.notice = "Trial storage cannot be read; new trials are blocked".into();
             }
         }
     }
@@ -73,7 +73,7 @@ impl State {
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     self.worker = None;
-                    self.notice = "Versuch unterbrochen. Gespeicherten Rückweg prüfen.".into();
+                    self.notice = "Trial interrupted. Check the saved rollback.".into();
                     self.reload(&journal.id);
                 }
                 Err(_) => {
@@ -83,75 +83,75 @@ impl State {
             }
         }
         ui.separator();
-        ui.heading("Änderung & Fehler im Klon erproben");
-        ui.label("Starttyp eines Anwendungsdienstes ändern → HTTP prüfen → Dienst stoppen und Ausfall nachweisen → Dienst starten → Checkpoint zurückspielen und Ausgangszustand prüfen.");
-        ui.label("Nur dieser isolierte Klon. Erste Version: Automatic ↔ Manual, eine öffentliche HTTP-Prüfung, keine Updates oder beliebigen Skripte. Ein positiver Test belegt keinen Start nach einem Neustart des Betriebssystems.");
-        ui.label("Erfordert Standardprüfpunkte mit Arbeitsspeicher und einen Klon ohne vorhandene Prüfpunkte. Neue Relayne-Klone werden entsprechend eingerichtet; ältere Klone im Hyper-V-Manager prüfen.");
+        ui.heading("Test changes and failures in a clone");
+        ui.label("Change an application service startup type → check HTTP → stop the service and verify the failure → start the service → restore the checkpoint and verify the initial state.");
+        ui.label("This isolated clone only. Initial version: Automatic ↔ Manual, one public HTTP check, no updates or arbitrary scripts. A passing test does not demonstrate startup after an operating system restart.");
+        ui.label("Requires standard checkpoints with memory and a clone without existing checkpoints. New Relayne clones are configured accordingly; check older clones in Hyper-V Manager.");
         ui.add_enabled_ui(!self.busy() && !lab_busy, |ui| {
-            if ui.button("Versuchsbelege laden").clicked(){self.reload(&journal.id);}
-            ui.horizontal(|ui|{ui.label("Anwendungsdienst");ui.text_edit_singleline(&mut self.service);});
-            ui.horizontal(|ui|{ui.label("Neuer Starttyp");ui.selectable_value(&mut self.startup,Startup::Automatic,"Automatisch");ui.selectable_value(&mut self.startup,Startup::Manual,"Manuell");});
-            ui.horizontal(|ui|{ui.label("Loopback-HTTP-URL");ui.text_edit_singleline(&mut self.health.url);});
-            ui.horizontal(|ui|{ui.label("Erwarteter Status");ui.add(egui::DragValue::new(&mut self.health.expected_status).range(100..=599));ui.label("Text im Ergebnis");ui.text_edit_singleline(&mut self.health.body_marker);});
-            ui.horizontal(|ui|{ui.label("Gastbenutzer für Versuch/Rückweg");ui.text_edit_singleline(&mut self.user);});
-            ui.horizontal(|ui|{ui.label("Gastpasswort (nur für diesen Lauf)");ui.add(egui::TextEdit::singleline(&mut self.password).password(true));});
+            if ui.button("Load trial evidence").clicked(){self.reload(&journal.id);}
+            ui.horizontal(|ui|{ui.label("Application service");ui.text_edit_singleline(&mut self.service);});
+            ui.horizontal(|ui|{ui.label("New startup type");ui.selectable_value(&mut self.startup,Startup::Automatic,"Automatic");ui.selectable_value(&mut self.startup,Startup::Manual,"Manual");});
+            ui.horizontal(|ui|{ui.label("Loopback HTTP URL");ui.text_edit_singleline(&mut self.health.url);});
+            ui.horizontal(|ui|{ui.label("Expected status");ui.add(egui::DragValue::new(&mut self.health.expected_status).range(100..=599));ui.label("Text in result");ui.text_edit_singleline(&mut self.health.body_marker);});
+            ui.horizontal(|ui|{ui.label("Guest user for trial/rollback");ui.text_edit_singleline(&mut self.user);});
+            ui.horizontal(|ui|{ui.label("Guest password (this run only)");ui.add(egui::TextEdit::singleline(&mut self.password).password(true));});
             let blocked=self.store_error || self.records.iter().any(Record::unresolved) || self.records.len()>=100;
-            if ui.add_enabled(!blocked,egui::Button::new("Versuch vorbereiten …")).clicked(){
+            if ui.add_enabled(!blocked,egui::Button::new("Prepare trial …")).clicked(){
                 let spec=Spec{service:self.service.trim().into(),startup:self.startup,health:self.health.clone()};
                 match spec.validate(){Ok(())=>{self.review=Some((journal.clone(),spec));self.restore_review=None;},Err(e)=>self.notice=e.to_string()}
             }
-            if blocked {ui.label("Ein ungeklärter Versuch oder ein Speicherproblem sperrt weitere Änderungen in diesem Klon.");}
+            if blocked {ui.label("An unresolved trial or a storage problem blocks further changes in this clone.");}
             if let Some((lab,spec))=self.review.clone(){
                 ui.group(|ui|{
-                    ui.strong("Geprüfte Auswahl ausführen");
-                    ui.label(format!("Klon: {} · VM {}\nDienst: {} → {}\nHTTP: {} · Status {} · Text: {}",lab.name,lab.vm_id,spec.service,spec.startup.label(),spec.health.url,spec.health.expected_status,spec.health.body_marker));
-                    ui.label("Erzeugt einen Checkpoint und einen echten Dienstausfall im Klon. Alle Änderungen seit dem Checkpoint werden beim Rückweg verworfen. Keine parallele Nutzung dieses Klons während des Versuchs.");
+                    ui.strong("Run reviewed selection");
+                    ui.label(format!("Clone: {} · VM {}\nService: {} → {}\nHTTP: {} · Status {} · Text: {}",lab.name,lab.vm_id,spec.service,spec.startup.label(),spec.health.url,spec.health.expected_status,spec.health.body_marker));
+                    ui.label("Creates a checkpoint and a real service outage in the clone. Rollback discards all changes since the checkpoint. Do not use this clone concurrently during the trial.");
                     ui.horizontal(|ui|{
-                        if ui.add_enabled(!blocked && !self.user.trim().is_empty() && !self.password.is_empty(),egui::Button::new("Diesen Klonversuch jetzt ausführen")).clicked(){
+                        if ui.add_enabled(!blocked && !self.user.trim().is_empty() && !self.password.is_empty(),egui::Button::new("Run this clone trial now")).clicked(){
                             let user=self.user.clone();let password=std::mem::take(&mut self.password);
                             let(tx,rx)=std::sync::mpsc::channel();self.worker=Some(rx);self.review=None;
                             std::thread::spawn(move||{let result=change_trial::run(lab,spec,user,password).map(|record|{
-                                if record.proof.as_ref().is_some_and(|p|p.passed()){"Änderung, Fehler, Reparatur und Rückweg nachgewiesen.".into()}
-                                else if record.unresolved(){"Versuch nicht bestanden; Rückweg ungeklärt. Gespeicherten Checkpoint wiederherstellen.".into()}
-                                else{"Versuch nicht bestanden. Klon unverändert oder Rückweg bestätigt; Phasen im Beleg prüfen.".into()}
-                            }).map_err(|_|"Versuch nicht abgeschlossen. Belege laden und Rückweg prüfen.".into());let _=tx.send(result);});
+                                if record.proof.as_ref().is_some_and(|p|p.passed()){"Change, failure, repair, and rollback verified.".into()}
+                                else if record.unresolved(){"Trial failed; rollback unresolved. Restore the saved checkpoint.".into()}
+                                else{"Trial failed. Clone unchanged or rollback confirmed; review the phases in the evidence.".into()}
+                            }).map_err(|_|"Trial incomplete. Load the evidence and check the rollback.".into());let _=tx.send(result);});
                         }
-                        if ui.button("Vorschau verwerfen").clicked(){self.review=None;}
+                        if ui.button("Discard preview").clicked(){self.review=None;}
                     });
                 });
             }
-            ui.strong("Gespeicherte Versuche");
+            ui.strong("Saved trials");
             for record in &self.records {
                 ui.group(|ui|{
-                    ui.label(format!("{} · {} · {} → {}",record.request.started.format("%d.%m.%Y %H:%M UTC"),record.request.id,record.request.spec.service,record.request.spec.startup.label()));
+                    ui.label(format!("{} · {} · {} → {}",record.request.started.format("%m/%d/%Y %H:%M UTC"),record.request.id,record.request.spec.service,record.request.spec.startup.label()));
                     if let Some(p)=&record.proof {
-                        ui.label(format!("Baseline {} · Änderung {} · Ausfall {} · Reparatur {} · Rückweg {}",mark(p.baseline),mark(p.changed),mark(p.fault_observed),mark(p.repaired),mark(p.returned)));
-                        ui.label(if p.passed(){"Bestanden — historischer Klonbeleg, keine Produktionsfreigabe"}else{"Nicht bestanden"});
-                        if p.untouched{ui.label("Vor einer Änderung abgebrochen; Klon unverändert.");}
-                    }else{ui.label("Kein Abschlussbeleg; Zustand ungeklärt.");}
-                    if record.recovered{ui.label("Rückweg separat bestätigt; Versuch bleibt ohne Erfolgsnachweis.");}
-                    if record.unresolved() && ui.button(format!("Rückweg für {} vorbereiten …",record.request.id)).clicked(){self.restore_review=Some(record.request.id);self.review=None;}
+                        ui.label(format!("Baseline {} · Change {} · Outage {} · Repair {} · Rollback {}",mark(p.baseline),mark(p.changed),mark(p.fault_observed),mark(p.repaired),mark(p.returned)));
+                        ui.label(if p.passed(){"Passed — historical clone evidence, no production approval"}else{"Failed"});
+                        if p.untouched{ui.label("Stopped before making a change; clone unchanged.");}
+                    }else{ui.label("No completion evidence; state unresolved.");}
+                    if record.recovered{ui.label("Rollback confirmed separately; trial still has no evidence of success.");}
+                    if record.unresolved() && ui.button(format!("Prepare rollback for {} …",record.request.id)).clicked(){self.restore_review=Some(record.request.id);self.review=None;}
                 });
             }
             if let Some(id)=self.restore_review {
-                ui.label(format!("Checkpoint Relayne-Trial-{id} zurückspielen und HTTP sowie Starttyp prüfen. Änderungen im Klon seit diesem Checkpoint werden verworfen."));
-                if ui.add_enabled(!self.user.trim().is_empty() && !self.password.is_empty(),egui::Button::new("Gespeicherten Rückweg jetzt ausführen")).clicked(){
+                ui.label(format!("Restore checkpoint Relayne-Trial-{id} and check HTTP and startup type. Changes in the clone since this checkpoint will be discarded."));
+                if ui.add_enabled(!self.user.trim().is_empty() && !self.password.is_empty(),egui::Button::new("Run saved rollback now")).clicked(){
                     let lab=journal.clone();let user=self.user.clone();let password=std::mem::take(&mut self.password);
                     let(tx,rx)=std::sync::mpsc::channel();self.worker=Some(rx);self.restore_review=None;
-                    std::thread::spawn(move||{let _=tx.send(change_trial::recover(lab,id,user,password).map(|_|"Rückweg bestätigt, eigener Checkpoint entfernt.".into()).map_err(|_|"Rückweg nicht bestätigt. VM und Checkpoint müssen geprüft werden; weitere Versuche bleiben gesperrt.".into()));});
+                    std::thread::spawn(move||{let _=tx.send(change_trial::recover(lab,id,user,password).map(|_|"Rollback confirmed; trial checkpoint removed.".into()).map_err(|_|"Rollback not confirmed. Check the VM and checkpoint; further trials remain blocked.".into()));});
                 }
-                if ui.button("Rückweg verwerfen").clicked(){self.restore_review=None;}
+                if ui.button("Discard rollback").clicked(){self.restore_review=None;}
             }
         });
         if self.busy() {
             ui.spinner();
-            ui.label("Klonversuch läuft. Bei Abbruch bleibt der gespeicherte Auftrag zur Klärung erhalten.");
+            ui.label("Clone trial running. If canceled, the saved job remains available for investigation.");
         }
         ui.label(&self.notice);
     }
 }
 fn mark(value: bool) -> &'static str {
-    if value { "belegt" } else { "nicht belegt" }
+    if value { "verified" } else { "not verified" }
 }
 
 #[cfg(test)]

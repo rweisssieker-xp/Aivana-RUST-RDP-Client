@@ -16,8 +16,8 @@ use std::{
 use uuid::Uuid;
 #[path = "http_health.rs"]
 pub(crate) mod http_health;
-pub(crate) mod learning;
 pub(crate) mod impact;
+pub(crate) mod learning;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HttpGetStep {
@@ -63,7 +63,7 @@ impl HealthCheck {
                 && !path.chars().any(char::is_control)
                 && contains.len() <= 1024 =>
             {
-                anyhow::ensure!(followups.len() <= 3, "Maximal vier HTTP-Prüfschritte");
+                anyhow::ensure!(followups.len() <= 3, "At most four HTTP check steps");
                 for step in followups {
                     step.options.validate(*tls)?;
                     Self::Http {
@@ -79,7 +79,7 @@ impl HealthCheck {
                 Ok(())
             }
             _ => bail!(
-                "Ungültiger Healthcheck; nur öffentlicher Pfad ohne Query/Token, begrenztes Antwortmuster"
+                "Invalid health check; use a public path without query/token and a bounded response pattern"
             ),
         }
     }
@@ -105,11 +105,9 @@ impl HealthCheck {
             at: Utc::now(),
             passed: result.as_ref().is_ok_and(|v| *v),
             detail: match result {
-                Ok(true) => "Erfolgskriterium erfüllt".into(),
-                Ok(false) => "Erfolgskriterium nicht erfüllt".into(),
-                Err(_) => {
-                    "Prüfung nicht erfolgreich (Verbindung, Timeout oder Antwortgrenze)".into()
-                }
+                Ok(true) => "Success criterion satisfied".into(),
+                Ok(false) => "Success criterion not satisfied".into(),
+                Err(_) => "Check unsuccessful (connection, timeout, or response limit)".into(),
             },
         }
     }
@@ -173,10 +171,10 @@ impl ExecutionPlan {
             !self.restart
                 || (self.desired == ServiceState::Running
                     && matches!(self.health, HealthCheck::Http { .. })),
-            "Neustart benötigt Running und HTTP-Nachweis"
+            "Restart requires Running and HTTP evidence"
         );
         if self.mappings.is_empty() || self.mappings.len() > 32 {
-            bail!("1–32 Zielzuordnungen erforderlich");
+            bail!("1–32 target mappings required");
         }
         let mut hosts = std::collections::BTreeSet::new();
         let mut labs = std::collections::BTreeSet::new();
@@ -190,14 +188,14 @@ impl ExecutionPlan {
                         || !labs.insert(target.profile_id)
                         || !vms.insert(target.host.clone())
                     {
-                        bail!("Ungültige oder doppelte Lab-/VM-Zuordnung");
+                        bail!("Invalid or duplicate lab/VM mapping");
                     }
                     continue;
                 }
                 intelligence::service_spec(target, &self.service, None)?;
                 // WinRM uses host, not the saved RDP port or profile identity.
                 if !hosts.insert(target.host.trim_end_matches('.').to_ascii_lowercase()) {
-                    bail!("Produktion und Test müssen verschiedene, eindeutige Hosts sein");
+                    bail!("Production and test must use distinct unique hosts");
                 }
             }
         }
@@ -259,7 +257,7 @@ impl Run {
                 .iter()
                 .any(|m| m.staging.protocol == crate::promotion::LAB_PROTOCOL)
         {
-            bail!("Hyper-V-Proben müssen über den Lab-Adapter ausgeführt werden");
+            bail!("Hyper-V rehearsals must run through the lab adapter");
         }
         let hash = plan.hash()?;
         let targets = plan
@@ -343,7 +341,7 @@ impl Run {
                 };
                 t.health = Some(evidence);
             }
-            _ => bail!("Healthantwort ohne passenden laufenden Prüfschritt"),
+            _ => bail!("Health response has no matching running check step"),
         }
         self.advance();
         Ok(())
@@ -368,7 +366,7 @@ impl Run {
                 if !matches!(t.phase, Phase::Passed | Phase::Restored | Phase::Failed) {
                     t.phase = Phase::Unknown;
                     t.evidence
-                        .push("Neustart: kein automatisches Fortsetzen oder Wiederholen".into());
+                        .push("Restart: no automatic continuation or retry".into());
                 }
             }
             self.finished = Some(Utc::now());
@@ -378,7 +376,7 @@ impl Run {
         let target = &mut self.targets[self.current];
         let original = target
             .before
-            .ok_or_else(|| anyhow::anyhow!("Ausgangszustand fehlt"))?;
+            .ok_or_else(|| anyhow::anyhow!("Initial state is missing"))?;
         let (before, desired) = if restore {
             (self.plan.desired, original)
         } else {
@@ -389,7 +387,7 @@ impl Run {
             || v["before"] != before.label()
             || v["desired"] != desired.label()
         {
-            bail!("Antwort passt nicht zum geprüften Auftrag");
+            bail!("Response does not match the reviewed mission");
         }
         target.phase = if v["verified"] == true
             && v["actual"] == desired.label()
@@ -579,11 +577,11 @@ impl Journal {
     }
     pub fn save(&self, path: &Path) -> Result<()> {
         if !cfg!(windows) {
-            bail!("Windows DPAPI erforderlich");
+            bail!("Windows DPAPI required");
         }
         let raw = serde_json::to_vec(self)?;
         if raw.len() > 16 * 1024 * 1024 {
-            bail!("Journalgrenze erreicht");
+            bail!("Journal limit reached");
         }
         security::atomic_write(path, &security::protect_secret(&raw)?)
     }
@@ -592,7 +590,7 @@ impl Journal {
             return Ok(Self::default());
         }
         if path.metadata()?.len() > 24 * 1024 * 1024 {
-            bail!("Journal zu groß");
+            bail!("Journal is too large");
         }
         let mut book: Self =
             serde_json::from_slice(&security::unprotect_secret(&std::fs::read(path)?)?)?;
@@ -608,7 +606,7 @@ impl Journal {
                     })
                 })
             {
-                bail!("Journal enthält inkonsistente Ziel- oder Planbindung");
+                bail!("Journal contains inconsistent target or plan binding");
             }
             run.interrupt_after_restart();
         }
@@ -723,82 +721,150 @@ mod tests {
 
     fn learning_http_plan() -> ExecutionPlan {
         let mut p = plan();
-        p.health = HealthCheck::Http { port: 80, path: "/health".into(), status: 200, contains: "healthy".into(), tls: false, followups: vec![] };
+        p.health = HealthCheck::Http {
+            port: 80,
+            path: "/health".into(),
+            status: 200,
+            contains: "healthy".into(),
+            tls: false,
+            followups: vec![],
+        };
         p
     }
 
     #[test]
     fn impact_uses_target_health_time_not_batch_completion() {
-        let p=learning_http_plan();let selected=p.mappings[0].production.clone();
-        let mut run=completed_success(p,false);
-        let now=Utc::now();let start=now-chrono::Duration::minutes(10);
-        run.targets[0].captured=Some(start);run.targets[0].baseline.as_mut().unwrap().at=start;
-        run.targets[0].health.as_mut().unwrap().at=start+chrono::Duration::seconds(20);run.finished=Some(now);
-        let journal=Journal{runs:vec![run]};let before=serde_json::to_value(&journal).unwrap();
-        let report=impact::report(&journal,&selected,now);
-        assert_eq!(report.production.repaired,1);assert_eq!(report.production.duration_samples,1);
-        assert_eq!(report.production.median_observation_to_health_ms,Some(20_000.0));
-        assert!(!report.roi_measured);assert!(!report.labor_savings_measured);
-        assert_eq!(serde_json::to_value(&journal).unwrap(),before);
+        let p = learning_http_plan();
+        let selected = p.mappings[0].production.clone();
+        let mut run = completed_success(p, false);
+        let now = Utc::now();
+        let start = now - chrono::Duration::minutes(10);
+        run.targets[0].captured = Some(start);
+        run.targets[0].baseline.as_mut().unwrap().at = start;
+        run.targets[0].health.as_mut().unwrap().at = start + chrono::Duration::seconds(20);
+        run.finished = Some(now);
+        let journal = Journal { runs: vec![run] };
+        let before = serde_json::to_value(&journal).unwrap();
+        let report = impact::report(&journal, &selected, now);
+        assert_eq!(report.production.repaired, 1);
+        assert_eq!(report.production.duration_samples, 1);
+        assert_eq!(
+            report.production.median_observation_to_health_ms,
+            Some(20_000.0)
+        );
+        assert!(!report.roi_measured);
+        assert!(!report.labor_savings_measured);
+        assert_eq!(serde_json::to_value(&journal).unwrap(), before);
     }
 
     #[test]
     fn impact_keeps_failures_and_rehearsals_out_of_success_duration() {
-        let p=learning_http_plan();let selected=p.mappings[0].production.clone();
-        let rehearsal=completed_success(p.clone(),true);let mut failed=completed_success(p,false);failed.targets[0].phase=Phase::Failed;
-        let report=impact::report(&Journal{runs:vec![rehearsal,failed]},&selected,Utc::now());
-        assert_eq!(report.production.failed,1);assert_eq!(report.production.repaired,0);
-        assert_eq!(report.production.median_observation_to_health_ms,None);
-        assert_eq!(report.rehearsal.repaired,1);assert_eq!(report.rehearsal.duration_samples,1);
-        assert_eq!(report.samples.len(),1);assert!(report.samples[0].rehearsal);
+        let p = learning_http_plan();
+        let selected = p.mappings[0].production.clone();
+        let rehearsal = completed_success(p.clone(), true);
+        let mut failed = completed_success(p, false);
+        failed.targets[0].phase = Phase::Failed;
+        let report = impact::report(
+            &Journal {
+                runs: vec![rehearsal, failed],
+            },
+            &selected,
+            Utc::now(),
+        );
+        assert_eq!(report.production.failed, 1);
+        assert_eq!(report.production.repaired, 0);
+        assert_eq!(report.production.median_observation_to_health_ms, None);
+        assert_eq!(report.rehearsal.repaired, 1);
+        assert_eq!(report.rehearsal.duration_samples, 1);
+        assert_eq!(report.samples.len(), 1);
+        assert!(report.samples[0].rehearsal);
     }
 
     #[test]
     fn learning_repair_history_is_target_bound_and_separates_rehearsal() {
-        let p=learning_http_plan(); let selected=p.mappings[0].production.clone();
-        let good=completed_success(p.clone(),false);
-        let rehearsal=completed_success(p,true);
-        let mut other=learning_http_plan();other.mappings[0].production=target("other");
-        let other=completed_success(other,false);
-        let rows=learning::rank(&Journal{runs:vec![good,rehearsal,other]},&selected,Utc::now());
-        assert_eq!(rows.len(),1);assert_eq!(rows[0].lesson.production.successes,1);
-        assert_eq!(rows[0].lesson.rehearsal.successes,1);assert_eq!(rows[0].excluded,1);
-        assert!(rows[0].eligible());assert_eq!(rows[0].score,5);
+        let p = learning_http_plan();
+        let selected = p.mappings[0].production.clone();
+        let good = completed_success(p.clone(), false);
+        let rehearsal = completed_success(p, true);
+        let mut other = learning_http_plan();
+        other.mappings[0].production = target("other");
+        let other = completed_success(other, false);
+        let rows = learning::rank(
+            &Journal {
+                runs: vec![good, rehearsal, other],
+            },
+            &selected,
+            Utc::now(),
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].lesson.production.successes, 1);
+        assert_eq!(rows[0].lesson.rehearsal.successes, 1);
+        assert_eq!(rows[0].excluded, 1);
+        assert!(rows[0].eligible());
+        assert_eq!(rows[0].score, 5);
     }
 
     #[test]
     fn learning_new_adverse_result_retracts_prior_recommendation() {
-        let p=learning_http_plan();let selected=p.mappings[0].production.clone();
-        let mut good=completed_success(p.clone(),false);
-        let past=Utc::now()-chrono::Duration::days(1);
-        good.finished=Some(past);good.targets[0].captured=Some(past);
-        good.targets[0].baseline.as_mut().unwrap().at=past;good.targets[0].health.as_mut().unwrap().at=past;
-        let mut bad=completed_success(p,false);bad.targets[0].phase=Phase::Restored;
-        let rows=learning::rank(&Journal{runs:vec![bad,good]},&selected,Utc::now());
-        assert_eq!(rows[0].lesson.production.successes,1);assert_eq!(rows[0].lesson.production.restored,1);
-        assert!(!rows[0].eligible());assert_eq!(rows[0].score,-3);
+        let p = learning_http_plan();
+        let selected = p.mappings[0].production.clone();
+        let mut good = completed_success(p.clone(), false);
+        let past = Utc::now() - chrono::Duration::days(1);
+        good.finished = Some(past);
+        good.targets[0].captured = Some(past);
+        good.targets[0].baseline.as_mut().unwrap().at = past;
+        good.targets[0].health.as_mut().unwrap().at = past;
+        let mut bad = completed_success(p, false);
+        bad.targets[0].phase = Phase::Restored;
+        let rows = learning::rank(
+            &Journal {
+                runs: vec![bad, good],
+            },
+            &selected,
+            Utc::now(),
+        );
+        assert_eq!(rows[0].lesson.production.successes, 1);
+        assert_eq!(rows[0].lesson.production.restored, 1);
+        assert!(!rows[0].eligible());
+        assert_eq!(rows[0].score, -3);
     }
 
     #[test]
     fn learning_rejects_duplicates_expired_and_future_records() {
-        let p=learning_http_plan();let selected=p.mappings[0].production.clone();
-        let good=completed_success(p.clone(),false);
-        let mut old=completed_success(p.clone(),false);old.finished=Some(Utc::now()-chrono::Duration::days(91));
-        let mut future=completed_success(p,false);future.finished=Some(Utc::now()+chrono::Duration::days(1));
-        let rows=learning::rank(&Journal{runs:vec![good.clone(),good,old,future]},&selected,Utc::now());
-        assert_eq!(rows[0].excluded,4);assert_eq!(rows[0].lesson.production.successes,0);assert!(!rows[0].eligible());
+        let p = learning_http_plan();
+        let selected = p.mappings[0].production.clone();
+        let good = completed_success(p.clone(), false);
+        let mut old = completed_success(p.clone(), false);
+        old.finished = Some(Utc::now() - chrono::Duration::days(91));
+        let mut future = completed_success(p, false);
+        future.finished = Some(Utc::now() + chrono::Duration::days(1));
+        let rows = learning::rank(
+            &Journal {
+                runs: vec![good.clone(), good, old, future],
+            },
+            &selected,
+            Utc::now(),
+        );
+        assert_eq!(rows[0].excluded, 4);
+        assert_eq!(rows[0].lesson.production.successes, 0);
+        assert!(!rows[0].eligible());
     }
 
     #[test]
     fn learning_healthy_noop_and_tcp_are_not_repair_success() {
-        let p=learning_http_plan();let selected=p.mappings[0].production.clone();
-        let mut noop=completed_success(p,false);noop.targets[0].before=Some(ServiceState::Running);
-        noop.targets[0].baseline.as_mut().unwrap().passed=true;
-        let rows=learning::rank(&Journal{runs:vec![noop]},&selected,Utc::now());
-        assert_eq!(rows[0].lesson.production.unknown,1);assert!(!rows[0].eligible());
-        assert!(rows[0].gaps.contains(&"gap_baseline"));assert!(rows[0].gaps.contains(&"gap_transition"));
-        let tcp=completed_success(plan(),false);let selected=tcp.plan.mappings[0].production.clone();
-        assert!(!learning::rank(&Journal{runs:vec![tcp]},&selected,Utc::now())[0].eligible());
+        let p = learning_http_plan();
+        let selected = p.mappings[0].production.clone();
+        let mut noop = completed_success(p, false);
+        noop.targets[0].before = Some(ServiceState::Running);
+        noop.targets[0].baseline.as_mut().unwrap().passed = true;
+        let rows = learning::rank(&Journal { runs: vec![noop] }, &selected, Utc::now());
+        assert_eq!(rows[0].lesson.production.unknown, 1);
+        assert!(!rows[0].eligible());
+        assert!(rows[0].gaps.contains(&"gap_baseline"));
+        assert!(rows[0].gaps.contains(&"gap_transition"));
+        let tcp = completed_success(plan(), false);
+        let selected = tcp.plan.mappings[0].production.clone();
+        assert!(!learning::rank(&Journal { runs: vec![tcp] }, &selected, Utc::now())[0].eligible());
     }
     #[test]
     fn execution_lessons_group_hosts_but_separate_rehearsal_and_health_plan() {

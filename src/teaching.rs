@@ -98,10 +98,10 @@ impl Procedure {
             || self.steps.is_empty()
             || self.steps.len() > MAX_STEPS
         {
-            bail!("Ablauf oder Bildgröße ungültig");
+            bail!("Invalid workflow or image dimensions");
         }
         if self.success.trim().is_empty() || self.recovery.trim().is_empty() {
-            bail!("Erfolgskriterium und Wiederherstellung ergänzen");
+            bail!("Add success criteria and recovery instructions");
         }
         if self.title.len() > 256 || self.success.len() > 4096 || self.recovery.len() > 4096 {
             bail!("Notizen zu lang");
@@ -116,7 +116,7 @@ impl Procedure {
         {
             if !crate::vision::safe_anchor_text(&anchor.label) || anchor.context.len() > 256 {
                 bail!(
-                    "Sichtbare Nachbedingung benötigt ein nicht vertrauliches Zielwort und gültigen Kontext"
+                    "A visible postcondition requires a nonconfidential target word and valid context"
                 );
             }
         }
@@ -130,7 +130,7 @@ impl Procedure {
                         .context_offset
                         .is_some_and(|(x, y)| !x.is_finite() || !y.is_finite())
                 {
-                    bail!("Ungültiger übertragbarer Anker");
+                    bail!("Invalid transferable anchor");
                 }
             } else if let Step::Parameter { name } = step {
                 crate::transferable::validate_parameter(name)?;
@@ -139,7 +139,7 @@ impl Procedure {
                     || anchor.label.len() > 256
                     || anchor.context.len() > 256
                 {
-                    bail!("Ungültiger semantischer Anker");
+                    bail!("Invalid semantic anchor");
                 }
             } else {
                 self.actions(step, self.dimensions, "")?;
@@ -184,7 +184,7 @@ impl Procedure {
         {
             let screen = screen.ok_or_else(|| anyhow::anyhow!("Aktuelles Zielbild lokal lesen"))?;
             if !screen.matches(frame) {
-                bail!("OCR veraltet: Zielbild erneut lesen");
+                bail!("OCR is stale: read the target image again");
             }
             let (x, y) = target.resolve(screen)?.center();
             return Ok(vec![if *double {
@@ -210,7 +210,7 @@ impl Procedure {
             let screen =
                 screen.ok_or_else(|| anyhow::anyhow!("Zuerst aktuelles Bild lokal lesen"))?;
             if !screen.matches(frame) {
-                bail!("OCR veraltet: aktuelles Bild erneut lesen und freigeben");
+                bail!("OCR is stale: read and approve the current image again");
             }
             let (x, y) = screen.resolve(anchor)?.center();
             return Ok(vec![if *double {
@@ -240,17 +240,17 @@ impl Procedure {
     }
     pub fn actions(&self, step: &Step, size: (u16, u16), text: &str) -> Result<Vec<InputAction>> {
         if size != self.dimensions {
-            bail!("Bildgröße geändert: Ablauf erneut prüfen / vormachen");
+            bail!("Image dimensions changed: review or demonstrate the workflow again");
         }
         let point = |x: u16, y: u16| -> Result<()> {
             if x >= size.0 || y >= size.1 {
-                bail!("Koordinate außerhalb des Bildes");
+                bail!("Coordinate outside the image");
             }
             Ok(())
         };
         Ok(match *step {
             Step::IconClick { .. } | Step::SemanticClick { .. } | Step::TransferClick { .. } => {
-                bail!("Semantischer Schritt benötigt frische OCR desselben Bildes")
+                bail!("A semantic step requires fresh OCR from the same image")
             }
             Step::Click {
                 x,
@@ -271,7 +271,7 @@ impl Procedure {
             }
             Step::Navigation { code } => {
                 if !navigation(code) {
-                    bail!("Taste nicht freigegeben");
+                    bail!("Key not authorized");
                 }
                 vec![
                     InputAction::Key {
@@ -287,7 +287,7 @@ impl Procedure {
             Step::Parameter { ref name } => {
                 crate::transferable::validate_parameter(name)?;
                 if text.is_empty() || text.len() > 4096 {
-                    bail!("Parameterwert fehlt oder zu lang");
+                    bail!("Parameter value missing or too long");
                 }
                 vec![InputAction::TypeText {
                     text: text.to_owned(),
@@ -331,12 +331,12 @@ pub fn verify_visible_assertion(
     after: (Uuid, u64, chrono::DateTime<chrono::Utc>),
 ) -> Result<crate::vision::Bounds> {
     if frame.session_id != after.0 || frame.captured_at <= after.2 {
-        bail!("Ein neueres Bild derselben Zielsitzung ist erforderlich");
+        bail!("A newer image from the same target session is required");
     }
     let screen =
-        screen.ok_or_else(|| anyhow::anyhow!("Aktuelle OCR für Ergebnisnachweis fehlt"))?;
+        screen.ok_or_else(|| anyhow::anyhow!("Current OCR for outcome evidence is missing"))?;
     if !screen.matches(frame) {
-        bail!("Ergebnis-OCR gehört nicht zum aktuellen Zielbild");
+        bail!("Outcome OCR does not belong to the current target image");
     }
     screen.resolve(expected)
 }

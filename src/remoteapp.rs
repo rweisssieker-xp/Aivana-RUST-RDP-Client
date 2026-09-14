@@ -11,14 +11,14 @@ pub struct RemoteAppOptions {
 }
 fn value(value: &str) -> anyhow::Result<&str> {
     if value.len() > 4096 || value.chars().any(char::is_control) {
-        anyhow::bail!("RemoteApp-Wert enthält Steuerzeichen oder ist zu lang");
+        anyhow::bail!("RemoteApp value contains control characters or is too long");
     }
     Ok(value)
 }
 pub fn rdp_document(profile: &ConnectionProfile, app: &RemoteAppOptions) -> anyhow::Result<String> {
     crate::rd_gateway::validate_host(&profile.host)?;
     if profile.port == 0 || app.program.trim().is_empty() {
-        anyhow::bail!("RemoteApp-Programm und gültiger Zielport erforderlich");
+        anyhow::bail!("RemoteApp program and a valid destination port are required");
     }
     let host = if profile.host.contains(':') {
         format!("[{}]", profile.host)
@@ -63,7 +63,7 @@ pub fn launch(profile: &ConnectionProfile, app: &RemoteAppOptions) -> anyhow::Re
             .creation_flags(0x08000000)
             .output()?;
         if !secured.status.success() {
-            anyhow::bail!("RemoteApp-Temporärverzeichnis konnte nicht geschützt werden");
+            anyhow::bail!("Unable to protect the RemoteApp temporary directory");
         }
         let file_path = directory.join("launch.rdp");
         let mut file = std::fs::OpenOptions::new()
@@ -98,7 +98,7 @@ pub fn launch(profile: &ConnectionProfile, app: &RemoteAppOptions) -> anyhow::Re
 }
 #[cfg(not(windows))]
 pub fn launch(_: &ConnectionProfile, _: &RemoteAppOptions) -> anyhow::Result<()> {
-    anyhow::bail!("RemoteApp benötigt den Windows-RDP-Client");
+    anyhow::bail!("RemoteApp requires the Windows RDP client");
 }
 #[cfg(test)]
 mod tests {

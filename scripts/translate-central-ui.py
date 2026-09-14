@@ -1,0 +1,61 @@
+"""One-time, exact-literal English migration. Never translate protocol identifiers."""
+from pathlib import Path
+
+translations = {
+    "Screenshot erfassen": "Capture screenshot",
+    "LLM handoff braucht zuerst eine aktive Session.": "LLM handoff requires an active session first.",
+    "Diagnose die aktive Session, sammle Evidenz, und schlage den naechsten sicheren Schritt vor.": "Diagnose the active session, collect evidence, and suggest the next safe step.",
+    "Diagnose den aktuellen Remote-Desktop und sammle nur sichere Evidenz.": "Diagnose the current remote desktop and collect only safe evidence.",
+    "Unterstuetze den sicheren Login, ohne Credentials offenzulegen oder zu speichern.": "Assist with secure login without exposing or storing credentials.",
+    "Standard RDP Security nicht unterstuetzt": "Standard RDP Security is not supported",
+    "Auf dem Server TLS/NLA fuer RDP aktivieren oder einen zusaetzlichen Standard-RDP-Security-Backendpfad implementieren.": "Enable TLS/NLA for RDP on the server or add a compatible Standard RDP Security backend.",
+    "Root Cause: {} ist per Netzwerk erreichbar, bietet aber nur altes Standard RDP Security an. Relayne nutzt kein mstsc und das aktuelle native IronRDP-Backend kann diesen Modus nicht oeffnen. Fix: TLS/NLA auf dem Host aktivieren oder Backend erweitern.": "Root cause: {} is reachable over the network but only offers legacy Standard RDP Security. This native backend cannot open that mode. Enable TLS/NLA on the host or use a compatible backend.",
+    "Autopilot gestoppt: RDP-Session ist nicht verbunden.": "Autopilot stopped: the RDP session is not connected.",
+    "Einstellungen": "Settings",
+    "Analysiere Black-Screen- oder Frozen-Session-Signale und schlage sichere Recovery-Schritte vor.": "Analyze black-screen or frozen-session signals and suggest safe recovery steps.",
+    "Sammle verwertbare Incident-Evidenz fuer Ticket, Timeline und Runbook.": "Collect useful incident evidence for the ticket, timeline, and runbook.",
+    "Noch kein Framebuffer fuer Observation vorhanden.": "No framebuffer is available for observation yet.",
+    "Credential: gespeichert": "Credentials: saved",
+    "Credential: Referenz vorhanden, Secret fehlt": "Credentials: reference exists, but the secret is missing",
+    "Frame {}x{}, Texture fehlt": "Frame {}x{}, texture missing",
+    "Texture vorhanden, Frame fehlt": "Texture available, frame missing",
+    "Noch kein Frame": "No frame yet",
+    "Profile geladen": "Profiles loaded",
+    "Lokale KI-Diagnose wartet auf Preflight oder Sessiondaten.": "Local AI diagnosis is waiting for preflight or session data.",
+    "Ungültige Rechneradresse: {err}": "Invalid host address: {err}",
+    "Der Port muss zwischen 1 und 65535 liegen.": "The port must be between 1 and 65535.",
+    "Gateway-Einstellungen ungültig: {err}": "Invalid gateway settings: {err}",
+    "Gateway-Zugang konnte nicht geschützt gespeichert werden: {err}": "Could not securely store gateway credentials: {err}",
+    "Zugang konnte nicht geschützt gespeichert werden: {err}": "Could not securely store credentials: {err}",
+    "Profilspeicher nicht verfügbar": "Profile store unavailable",
+    "Profil konnte nicht gespeichert werden: {err}": "Could not save profile: {err}",
+    "Profil gespeichert": "Profile saved",
+    "VNC-Profile können verwaltet werden; ein VNC-Verbindungsbackend ist nicht implementiert.": "VNC profiles can be managed; a VNC connection backend is not implemented.",
+    "Kein TLS-Zertifikat pruefbar; Verbindung bleibt blockiert.": "Cannot verify the TLS certificate; connection remains blocked.",
+    "TLS-Zertifikat nicht pruefbar": "Cannot verify TLS certificate",
+    "RDP-Server muss TLS/NLA anbieten oder ein unterstuetzter Backendpfad muss ergaenzt werden.": "The RDP server must support TLS/NLA, or a compatible backend must be added.",
+    "RDP ist erreichbar, aber der TLS-/Certificate-Probe ist fehlgeschlagen. Relayne blockiert den Connect, damit kein unsicherer Fallback als Trust-Entscheidung gespeichert wird.": "RDP is reachable, but the TLS certificate probe failed. Relayne blocks the connection so an insecure fallback cannot be saved as a trust decision.",
+    "{}:{} nutzt Standard RDP Security ohne TLS-Zertifikat. Relayne versucht den nativen Legacy-Backendpfad.": "{}:{} uses Standard RDP Security without a TLS certificate. Relayne is trying the native legacy backend.",
+    "Vorprüfung fehlt; Verbindung bleibt blockiert.": "Preflight is missing; connection remains blocked.",
+    "{}:{} bietet kein TLS/NLA-Zertifikat an. Standard RDP Security wird vom nativen IronRDP-Backend nicht unterstuetzt.": "{}:{} does not provide a TLS/NLA certificate. The native IronRDP backend does not support Standard RDP Security.",
+    "Neu": "New", "Bearbeiten": "Edit", "Verbinden": "Connect",
+    "Zertifikat vertrauen": "Trust certificate", "Zertifikat ablehnen": "Reject certificate",
+    "Zugang prüfen": "Check credentials", "Zugang löschen": "Delete credentials",
+    "Ausgewählt": "Selected", "Profil bearbeiten": "Edit profile", "Neues Profil": "New profile",
+    "Protokoll": "Protocol", "Rechneradresse": "Host address", "Benutzername": "Username",
+    "Domäne": "Domain", "Gruppe": "Group", "Passwort": "Password", "Schlagwörter": "Tags", "Favorit": "Favorite",
+    "SSH/SFTP verwendet OpenSSH-Schlüssel oder Agent. Das gespeicherte Profilpasswort wird dabei nicht an OpenSSH übergeben.": "SSH/SFTP uses OpenSSH keys or an agent. The saved profile password is not passed to OpenSSH.",
+    "Profil speichern": "Save profile",
+    "RemoteApp mit eingebettetem Windows-Control öffnen": "Open RemoteApp with the embedded Windows control",
+    "Darstellung, Verbindungen und KI-Unterstützung.": "Appearance, connections, and AI assistance.",
+    "KI Diagnose & Computer Use": "AI Diagnosis & Computer Use", "Lokale KI: {}": "Local AI: {}",
+    "Credential: kein Profil ausgewaehlt": "Credentials: no profile selected",
+    "Credential: fehlt, Passwort eintragen und Save Profile klicken": "Credentials: missing; enter a password and click Save profile",
+    "Gateway-Hinweis (nicht protokolliert)": "Gateway notice (not logged)",
+}
+path = Path(__file__).resolve().parents[1] / "src/app.rs"
+source = path.read_text(encoding="utf-8")
+for german, english in translations.items():
+    source = source.replace('"' + german + '"', '"' + english + '"')
+source = source.replace("KI ", "AI ").replace("AI/KI", "AI").replace("KI/AI", "AI")
+path.write_text(source, encoding="utf-8", newline="")

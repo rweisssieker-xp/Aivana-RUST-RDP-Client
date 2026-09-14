@@ -44,6 +44,9 @@ const ACTIVE_GOAL_OBJECTIVE: &str =
 
 mod capture;
 mod release_panel;
+mod commerce_panel;
+mod ticket_inbox_panel;
+mod escalation_panel;
 mod learned_repair_panel;
 mod impact_panel;
 mod change_history_panel;
@@ -221,6 +224,8 @@ pub struct AivanaApp {
     recovery_daemon: recovery_daemon_panel::RecoveryDaemonState,
     recovery_extensions: recovery_extensions_panel::ExtensionsState,
     warning_reviews: impact_panel::ReviewState,
+    commerce: commerce_panel::State,
+    ticket_inbox: ticket_inbox_panel::State,
     workflow_ocr: workflow_ocr::WorkflowOcrState,
     collaboration_capture: collaboration_capture::CaptureState,
 }
@@ -236,7 +241,7 @@ impl AivanaApp {
 
         let (store, profiles, status) = match ProfileStore::new() {
             Ok(store) => match store.load() {
-                Ok(profiles) => (Some(store), profiles, "Profile geladen".to_owned()),
+                Ok(profiles) => (Some(store), profiles, "Profiles loaded".to_owned()),
                 Err(err) => (
                     Some(store),
                     Vec::new(),
@@ -305,7 +310,7 @@ impl AivanaApp {
             approvals: Vec::new(),
             active_runbook_execution: None,
             diagnostics: Vec::new(),
-            ai_diagnosis: "Lokale KI-Diagnose wartet auf Preflight oder Sessiondaten.".to_owned(),
+            ai_diagnosis: "Local AI diagnosis is waiting for preflight or session data.".to_owned(),
             computer_use_status: "Computer Use wartet auf einen Framebuffer.".to_owned(),
             certificate_notice: "Certificate Trust wartet auf einen Host.".to_owned(),
             remote_view_mode: RemoteViewMode::Fit,
@@ -335,6 +340,8 @@ impl AivanaApp {
             recovery_daemon: recovery_daemon_panel::RecoveryDaemonState::default(),
             recovery_extensions: recovery_extensions_panel::ExtensionsState::default(),
             warning_reviews: impact_panel::ReviewState::default(),
+            commerce: commerce_panel::State::default(),
+            ticket_inbox: ticket_inbox_panel::State::default(),
             workflow_ocr: workflow_ocr::WorkflowOcrState::default(),
             collaboration_capture: collaboration_capture::CaptureState::default(),
         }
@@ -408,7 +415,7 @@ impl AivanaApp {
 
     fn save_draft(&mut self) {
         if let Err(err) = crate::rd_gateway::validate_host(self.draft.host.trim()) {
-            self.status = format!("Ungültige Rechneradresse: {err}");
+            self.status = format!("Invalid host address: {err}");
             return;
         }
         if self
@@ -419,14 +426,14 @@ impl AivanaApp {
             .filter(|port| *port > 0)
             .is_none()
         {
-            self.status = "Der Port muss zwischen 1 und 65535 liegen.".to_owned();
+            self.status = "The port must be between 1 and 65535.".to_owned();
             return;
         }
         if let Err(err) = crate::rd_gateway::validate_gateway(
             &self.draft.options.gateway,
             self.draft.port.parse().unwrap_or(3389),
         ) {
-            self.status = format!("Gateway-Einstellungen ungültig: {err}");
+            self.status = format!("Invalid gateway settings: {err}");
             return;
         }
         if !self.draft.options.gateway.use_profile_credentials
@@ -445,7 +452,7 @@ impl AivanaApp {
                 Ok(reference) => self.draft.options.gateway.credential_id = Some(reference.id),
                 Err(err) => {
                     self.status =
-                        format!("Gateway-Zugang konnte nicht geschützt gespeichert werden: {err}");
+                        format!("Could not securely store gateway credentials: {err}");
                     return;
                 }
             }
@@ -503,7 +510,7 @@ impl AivanaApp {
         profile.updated_at = Utc::now();
         if let Some(secret) = draft_secret {
             if let Err(err) = self.credentials.save(&mut profile, secret) {
-                self.status = format!("Zugang konnte nicht geschützt gespeichert werden: {err}");
+                self.status = format!("Could not securely store credentials: {err}");
                 return;
             }
         }
@@ -517,16 +524,16 @@ impl AivanaApp {
         let result = self
             .store
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Profilspeicher nicht verfügbar"))
+            .ok_or_else(|| anyhow::anyhow!("Profile store unavailable"))
             .and_then(|store| store.save(&profiles));
         if let Err(err) = result {
-            self.status = format!("Profil konnte nicht gespeichert werden: {err}");
+            self.status = format!("Could not save profile: {err}");
             return;
         }
         self.profiles = profiles;
         self.selected_profile = Some(id);
         self.load_profile_into_editor(id);
-        self.status = "Profil gespeichert".to_owned();
+        self.status = "Profile saved".to_owned();
     }
 
     fn connect_selected(&mut self) {
@@ -551,7 +558,7 @@ impl AivanaApp {
                 return;
             }
             if profile.protocol == Protocol::Vnc {
-                self.status="VNC-Profile können verwaltet werden; ein VNC-Verbindungsbackend ist nicht implementiert.".into();
+                self.status="VNC profiles can be managed; a VNC connection backend is not implemented.".into();
                 return;
             }
         }
@@ -574,21 +581,21 @@ impl AivanaApp {
             Err(err) => {
                 self.status = format!("RDP certificate probe failed: {err}");
                 self.certificate_notice =
-                    "Kein TLS-Zertifikat pruefbar; Verbindung bleibt blockiert.".to_owned();
+                    "Cannot verify the TLS certificate; connection remains blocked.".to_owned();
                 self.diagnostics = vec![DiagnosticFinding {
                     class: crate::models::DiagnosticClass::Tls,
                     severity: DiagnosticSeverity::Error,
-                    title: "TLS-Zertifikat nicht pruefbar".to_owned(),
+                    title: "Cannot verify TLS certificate".to_owned(),
                     detail: err.to_string(),
-                    fix: "RDP-Server muss TLS/NLA anbieten oder ein unterstuetzter Backendpfad muss ergaenzt werden.".to_owned(),
+                    fix: "The RDP server must support TLS/NLA, or a compatible backend must be added.".to_owned(),
                 }];
-                self.ai_diagnosis = "RDP ist erreichbar, aber der TLS-/Certificate-Probe ist fehlgeschlagen. Relayne blockiert den Connect, damit kein unsicherer Fallback als Trust-Entscheidung gespeichert wird.".to_owned();
+                self.ai_diagnosis = "RDP is reachable, but the TLS certificate probe failed. Relayne blocks the connection so an insecure fallback cannot be saved as a trust decision.".to_owned();
                 return;
             }
         };
         if legacy_standard_rdp {
             self.certificate_notice = format!(
-                "{}:{} nutzt Standard RDP Security ohne TLS-Zertifikat. Relayne versucht den nativen Legacy-Backendpfad.",
+                "{}:{} uses Standard RDP Security without a TLS certificate. Relayne is trying the native legacy backend.",
                 profile.host, profile.port
             );
         } else {
@@ -608,7 +615,7 @@ impl AivanaApp {
         }
 
         let Some(report) = report else {
-            self.status = "Vorprüfung fehlt; Verbindung bleibt blockiert.".into();
+            self.status = "Preflight is missing; connection remains blocked.".into();
             return;
         };
         self.ai_diagnosis = format_ai_explanation(&self.ai.explain_failure(&report));
@@ -654,18 +661,18 @@ impl AivanaApp {
     fn block_standard_rdp_security(&mut self, profile: &ConnectionProfile, detail: &str) {
         self.status = format!("{} uses unsupported Standard RDP Security", profile.host);
         self.certificate_notice = format!(
-            "{}:{} bietet kein TLS/NLA-Zertifikat an. Standard RDP Security wird vom nativen IronRDP-Backend nicht unterstuetzt.",
+            "{}:{} does not provide a TLS/NLA certificate. The native IronRDP backend does not support Standard RDP Security.",
             profile.host, profile.port
         );
         self.diagnostics = vec![DiagnosticFinding {
             class: crate::models::DiagnosticClass::Protocol,
             severity: DiagnosticSeverity::Error,
-            title: "Standard RDP Security nicht unterstuetzt".to_owned(),
+            title: "Standard RDP Security is not supported".to_owned(),
             detail: detail.to_owned(),
-            fix: "Auf dem Server TLS/NLA fuer RDP aktivieren oder einen zusaetzlichen Standard-RDP-Security-Backendpfad implementieren.".to_owned(),
+            fix: "Enable TLS/NLA for RDP on the server or add a compatible Standard RDP Security backend.".to_owned(),
         }];
         self.ai_diagnosis = format!(
-            "Root Cause: {} ist per Netzwerk erreichbar, bietet aber nur altes Standard RDP Security an. Relayne nutzt kein mstsc und das aktuelle native IronRDP-Backend kann diesen Modus nicht oeffnen. Fix: TLS/NLA auf dem Host aktivieren oder Backend erweitern.",
+            "Root cause: {} is reachable over the network but only offers legacy Standard RDP Security. This native backend cannot open that mode. Enable TLS/NLA on the host or use a compatible backend.",
             profile.host
         );
     }
@@ -746,7 +753,7 @@ impl AivanaApp {
         {
             self.autopilot.status = AutopilotStatus::Failed;
             self.computer_use_status =
-                "Autopilot gestoppt: RDP-Session ist nicht verbunden.".to_owned();
+                "Autopilot stopped: the RDP session is not connected.".to_owned();
             return;
         }
 
@@ -1079,8 +1086,8 @@ impl AivanaApp {
 
     fn persist_autopilot_preferences(&mut self) {
         match save_autopilot_preferences(&AutopilotPreferences::from(&self.autopilot)) {
-            Ok(()) => self.status = "KI preferences saved".to_owned(),
-            Err(err) => self.status = format!("Could not save KI preferences: {err}"),
+            Ok(()) => self.status = "AI preferences saved".to_owned(),
+            Err(err) => self.status = format!("Could not save AI preferences: {err}"),
         }
     }
 
@@ -1233,25 +1240,25 @@ impl AivanaApp {
                 egui::TextEdit::singleline(&mut self.search)
                     .hint_text("Search name, host, group, tag"),
             );
-            if action_button(ui, "Neu", 88.0, ActionTone::Neutral).clicked() {
+            if action_button(ui, "New", 88.0, ActionTone::Neutral).clicked() {
                 self.start_new_profile();
             }
-            if action_button(ui, "Bearbeiten", 88.0, ActionTone::Neutral).clicked() {
+            if action_button(ui, "Edit", 88.0, ActionTone::Neutral).clicked() {
                 self.edit_selected_profile();
             }
-            if action_button(ui, "Verbinden", 108.0, ActionTone::Primary).clicked() {
+            if action_button(ui, "Connect", 108.0, ActionTone::Primary).clicked() {
                 self.connect_selected();
             }
-            if action_button(ui, "Zertifikat vertrauen", 122.0, ActionTone::Primary).clicked() {
+            if action_button(ui, "Trust certificate", 122.0, ActionTone::Primary).clicked() {
                 self.trust_selected_certificate();
             }
-            if action_button(ui, "Zertifikat ablehnen", 126.0, ActionTone::Danger).clicked() {
+            if action_button(ui, "Reject certificate", 126.0, ActionTone::Danger).clicked() {
                 self.reject_selected_certificate();
             }
-            if action_button(ui, "Zugang prüfen", 112.0, ActionTone::Neutral).clicked() {
+            if action_button(ui, "Check credentials", 112.0, ActionTone::Neutral).clicked() {
                 self.test_selected_credential();
             }
-            if action_button(ui, "Zugang löschen", 124.0, ActionTone::Danger).clicked() {
+            if action_button(ui, "Delete credentials", 124.0, ActionTone::Danger).clicked() {
                 self.delete_selected_credential();
             }
         });
@@ -1331,7 +1338,7 @@ impl AivanaApp {
                     painter.text(
                         pos2(rect.right() - 14.0, rect.top() + 14.0),
                         egui::Align2::RIGHT_TOP,
-                        "Ausgewählt",
+                        "Selected",
                         FontId::proportional(14.0),
                         tw::BLUE_700,
                     );
@@ -1347,9 +1354,9 @@ impl AivanaApp {
     fn profile_editor(&mut self, ui: &mut Ui) {
         panel(ui, |ui| {
             ui.heading(if self.editing_profile.is_some() {
-                "Profil bearbeiten"
+                "Edit profile"
             } else {
-                "Neues Profil"
+                "New profile"
             });
             ui.label(
                 RichText::new(self.credential_status_label())
@@ -1359,7 +1366,7 @@ impl AivanaApp {
             ui.add_space(8.0);
             let draft = &mut self.draft;
             ui.horizontal_wrapped(|ui| {
-                ui.label("Protokoll");
+                ui.label("Protocol");
                 let previous = draft.protocol.clone();
                 ui.selectable_value(&mut draft.protocol, Protocol::Rdp, "RDP");
                 ui.selectable_value(&mut draft.protocol, Protocol::Ssh, "SSH / SFTP");
@@ -1371,37 +1378,37 @@ impl AivanaApp {
                 }
             });
             if draft.protocol == Protocol::Ssh {
-                ui.label("SSH/SFTP verwendet OpenSSH-Schlüssel oder Agent. Das gespeicherte Profilpasswort wird dabei nicht an OpenSSH übergeben.");
+                ui.label("SSH/SFTP uses OpenSSH keys or an agent. The saved profile password is not passed to OpenSSH.");
             }
             ui.columns(2, |columns| {
                 text_field(&mut columns[0], "Name", &mut draft.name);
-                text_field(&mut columns[1], "Rechneradresse", &mut draft.host);
+                text_field(&mut columns[1], "Host address", &mut draft.host);
             });
             ui.columns(2, |columns| {
                 text_field(&mut columns[0], "Port", &mut draft.port);
-                text_field(&mut columns[1], "Benutzername", &mut draft.username);
+                text_field(&mut columns[1], "Username", &mut draft.username);
             });
             ui.columns(2, |columns| {
-                text_field(&mut columns[0], "Domäne", &mut draft.domain);
-                text_field(&mut columns[1], "Gruppe", &mut draft.group);
+                text_field(&mut columns[0], "Domain", &mut draft.domain);
+                text_field(&mut columns[1], "Group", &mut draft.group);
             });
             if draft.protocol == Protocol::Rdp {
-                password_field(ui, "Passwort", &mut draft.password);
+                password_field(ui, "Password", &mut draft.password);
             }
-            text_field(ui, "Schlagwörter", &mut draft.tags);
-            ui.checkbox(&mut draft.favorite, "Favorit");
+            text_field(ui, "Tags", &mut draft.tags);
+            ui.checkbox(&mut draft.favorite, "Favorite");
             if self.draft.protocol == Protocol::Rdp {
                 self.workbench_profile_options(ui);
             }
             ui.add_space(12.0);
-            if action_button(ui, "Profil speichern", 132.0, ActionTone::Primary).clicked() {
+            if action_button(ui, "Save profile", 132.0, ActionTone::Primary).clicked() {
                 self.save_draft();
             }
             if let Some(profile) = self.selected_profile().cloned().filter(|p| {
                 p.protocol == Protocol::Rdp && !p.options.remote_app.program.trim().is_empty()
             }) {
                 if ui
-                    .button("RemoteApp mit eingebettetem Windows-Control öffnen")
+                    .button("Open RemoteApp with the embedded Windows control")
                     .clicked()
                 {
                     self.protocols.launch = Some(profile);
@@ -1414,11 +1421,11 @@ impl AivanaApp {
         page_header(
             ui,
             "Approval Center",
-            "Review KI Computer Use actions before they can mutate remote state.",
+            "Review AI Computer Use actions before they can mutate remote state.",
         );
         panel(ui, |ui| {
             if self.approvals.is_empty() {
-                ui.label("No pending KI approvals.");
+                ui.label("No pending AI approvals.");
                 return;
             }
 
@@ -1570,7 +1577,7 @@ impl AivanaApp {
                 ));
             }
             ui.add_space(10.0);
-            ui.heading("KI Operations");
+            ui.heading("AI Operations");
             let selected_session_id = self.selected_session;
             let has_frame = selected_session_id
                 .is_some_and(|session_id| self.latest_frames.contains_key(&session_id));
@@ -1611,7 +1618,7 @@ impl AivanaApp {
                     build_ai_action_brief(&selected_host, &self.diagnostics, &[], &[], &[])
                 });
             ui.label(
-                RichText::new("KI Action Brief")
+                RichText::new("AI Action Brief")
                     .strong()
                     .color(tw::SLATE_800),
             );
@@ -1630,7 +1637,7 @@ impl AivanaApp {
             ui.horizontal_wrapped(|ui| {
                 if ui.button("Prime Diagnose Autopilot").clicked() {
                     self.autopilot.goal =
-                        "Diagnose die aktive Session, sammle Evidenz, und schlage den naechsten sicheren Schritt vor."
+                        "Diagnose the active session, collect evidence, and suggest the next safe step."
                             .to_owned();
                     self.persist_autopilot_preferences();
                     self.view = View::Sessions;
@@ -1656,13 +1663,13 @@ impl AivanaApp {
                             format!("Workspace copied LLM handoff, {} bytes.", prompt.len());
                     } else {
                         self.computer_use_status =
-                            "LLM handoff braucht zuerst eine aktive Session.".to_owned();
+                            "LLM handoff requires an active session first.".to_owned();
                     }
                 }
                 if ui.button("Copy Action Brief").clicked() {
                     ui.ctx().copy_text(action_brief.clone());
                     self.computer_use_status =
-                        format!("Workspace copied KI action brief, {} bytes.", action_brief.len());
+                        format!("Workspace copied AI action brief, {} bytes.", action_brief.len());
                 }
                 if ui.button("Copy Guardrails").clicked() {
                     ui.ctx().copy_text(guardrail_brief.clone());
@@ -1738,8 +1745,8 @@ impl AivanaApp {
     fn settings_view(&mut self, ui: &mut Ui) {
         page_header(
             ui,
-            "Einstellungen",
-            "Darstellung, Verbindungen und KI-Unterstützung.",
+            "Settings",
+            "Appearance, connections, and AI assistance.",
         );
         self.workbench_display_settings(ui);
         panel(ui, |ui| {
@@ -1764,7 +1771,7 @@ impl AivanaApp {
         });
         ui.add_space(12.0);
         panel(ui, |ui| {
-            ui.heading("KI Verification Center");
+            ui.heading("AI Verification Center");
             let live_gate_args = default_rdp_live_env_args();
             let cli_readiness = build_ki_readiness_cli_report_from_args(&live_gate_args);
             let preferences_saved = app_data_file("autopilot-preferences.json")
@@ -1904,7 +1911,7 @@ impl AivanaApp {
                     .color(tw::SLATE_800),
             );
             ui.horizontal_wrapped(|ui| {
-                if ui.button("Save KI Preferences").clicked() {
+                if ui.button("Save AI Preferences").clicked() {
                     self.persist_autopilot_preferences();
                 }
                 if ui.button("Copy Smoke Command").clicked() {
@@ -1944,7 +1951,7 @@ impl AivanaApp {
                 }
                 if ui.button("Copy Verification Brief").clicked() {
                     ui.ctx().copy_text(report.to_markdown());
-                    self.status = "KI verification brief copied".to_owned();
+                    self.status = "AI verification brief copied".to_owned();
                 }
                 if ui.button("Copy Smoke Evidence").clicked() {
                     ui.ctx().copy_text(smoke_evidence.clone());
@@ -2014,11 +2021,11 @@ impl AivanaApp {
                 }
                 if ui.button("Copy Goal Audit").clicked() {
                     ui.ctx().copy_text(completion_audit.to_markdown());
-                    self.status = "KI goal audit copied".to_owned();
+                    self.status = "AI goal audit copied".to_owned();
                 }
                 if ui.button("Copy Next Gate").clicked() {
                     ui.ctx().copy_text(next_blocking_action.clone());
-                    self.status = "Next KI gate copied".to_owned();
+                    self.status = "Next AI gate copied".to_owned();
                 }
                 if ui.button("Copy Next Gate JSON").clicked() {
                     match serde_json::to_string_pretty(&build_next_live_gate_report(
@@ -2028,10 +2035,10 @@ impl AivanaApp {
                             let json = redact_secret_text(&json);
                             ui.ctx().copy_text(json.clone());
                             self.status =
-                                format!("Next KI gate JSON copied, {} bytes.", json.len());
+                                format!("Next AI gate JSON copied, {} bytes.", json.len());
                         }
                         Err(err) => {
-                            self.status = format!("Next KI gate JSON failed: {err}");
+                            self.status = format!("Next AI gate JSON failed: {err}");
                         }
                     }
                 }
@@ -2212,10 +2219,10 @@ impl AivanaApp {
                         Ok(path) => {
                             report.audit_path = Some(path.display().to_string());
                             let _ = save_completion_audit_report(&report);
-                            self.status = format!("KI goal audit exported to {}", path.display());
+                            self.status = format!("AI goal audit exported to {}", path.display());
                         }
                         Err(err) => {
-                            self.status = format!("KI goal audit export failed: {err}");
+                            self.status = format!("AI goal audit export failed: {err}");
                         }
                     }
                 }
@@ -2270,14 +2277,14 @@ impl AivanaApp {
     }
 
     fn ai_session_panel(&mut self, ui: &mut Ui, session_id: Uuid) {
-        ui.heading("KI Diagnose & Computer Use");
+        ui.heading("AI Diagnosis & Computer Use");
         if !self.diagnostics.is_empty() {
             ui.label("Preflight findings:");
             for finding in &self.diagnostics {
                 ui.label(format!("- {}: {}", finding.title, finding.fix));
             }
         }
-        ui.label(format!("Lokale KI: {}", self.ai_diagnosis));
+        ui.label(format!("Local AI: {}", self.ai_diagnosis));
         ui.label(format!("Computer Use: {}", self.computer_use_status));
         ui.separator();
         ui.label(
@@ -2289,25 +2296,25 @@ impl AivanaApp {
         ui.horizontal_wrapped(|ui| {
             if ui.button("Diagnose").clicked() {
                 self.autopilot.goal =
-                    "Diagnose den aktuellen Remote-Desktop und sammle nur sichere Evidenz."
+                    "Diagnose the current remote desktop and collect only safe evidence."
                         .to_owned();
                 preferences_changed = true;
             }
             if ui.button("Login Assist").clicked() {
                 self.autopilot.goal =
-                    "Unterstuetze den sicheren Login, ohne Credentials offenzulegen oder zu speichern."
+                    "Assist with secure login without exposing or storing credentials."
                         .to_owned();
                 preferences_changed = true;
             }
             if ui.button("Black Screen").clicked() {
                 self.autopilot.goal =
-                    "Analysiere Black-Screen- oder Frozen-Session-Signale und schlage sichere Recovery-Schritte vor."
+                    "Analyze black-screen or frozen-session signals and suggest safe recovery steps."
                         .to_owned();
                 preferences_changed = true;
             }
             if ui.button("Evidence").clicked() {
                 self.autopilot.goal =
-                    "Sammle verwertbare Incident-Evidenz fuer Ticket, Timeline und Runbook."
+                    "Collect useful incident evidence for the ticket, timeline, and runbook."
                         .to_owned();
                 preferences_changed = true;
             }
@@ -2544,7 +2551,7 @@ impl AivanaApp {
                         observation.summary, action.decision, action.risk
                     );
                     self.timeline
-                        .append_snapshot("KI screen observation".to_owned(), frame);
+                        .append_snapshot("AI screen observation".to_owned(), frame);
                     self.timeline.append_event(
                         session_id,
                         None,
@@ -2553,7 +2560,7 @@ impl AivanaApp {
                     );
                 } else {
                     self.computer_use_status =
-                        "Noch kein Framebuffer fuer Observation vorhanden.".to_owned();
+                        "No framebuffer is available for observation yet.".to_owned();
                 }
             }
         });
@@ -2730,14 +2737,14 @@ impl AivanaApp {
 
     fn credential_status_label(&self) -> String {
         let Some(profile) = self.selected_profile() else {
-            return "Credential: kein Profil ausgewaehlt".to_owned();
+            return "Credentials: no profile selected".to_owned();
         };
         match profile.credential_id {
             Some(credential_id) if self.credentials.has_credential(credential_id) => {
-                "Credential: gespeichert".to_owned()
+                "Credentials: saved".to_owned()
             }
-            Some(_) => "Credential: Referenz vorhanden, Secret fehlt".to_owned(),
-            None => "Credential: fehlt, Passwort eintragen und Save Profile klicken".to_owned(),
+            Some(_) => "Credentials: reference exists, but the secret is missing".to_owned(),
+            None => "Credentials: missing; enter a password and click Save profile".to_owned(),
         }
     }
 
@@ -2747,9 +2754,9 @@ impl AivanaApp {
             self.textures.get(&session_id),
         ) {
             (Some(frame), Some(_)) => format!("Frame {}x{}", frame.width, frame.height),
-            (Some(frame), None) => format!("Frame {}x{}, Texture fehlt", frame.width, frame.height),
-            (None, Some(_)) => "Texture vorhanden, Frame fehlt".to_owned(),
-            (None, None) => "Noch kein Frame".to_owned(),
+            (Some(frame), None) => format!("Frame {}x{}, texture missing", frame.width, frame.height),
+            (None, Some(_)) => "Texture available, frame missing".to_owned(),
+            (None, None) => "No frame yet".to_owned(),
         }
     }
 
@@ -3345,7 +3352,7 @@ fn timeline_message(event: &EngineEvent) -> (SessionEventKind, String) {
     match event {
         EngineEvent::GatewayMessage { .. } => (
             SessionEventKind::Diagnostic,
-            "Gateway-Hinweis (nicht protokolliert)".into(),
+            "Gateway notice (not logged)".into(),
         ),
         EngineEvent::StatusChanged { status, .. } => (
             SessionEventKind::ConnectionStage,
@@ -3473,7 +3480,7 @@ struct KiVerificationReport {
 impl KiVerificationReport {
     fn to_markdown(&self) -> String {
         format!(
-            "# Relayne KI Verification\n\n- OpenAI key: {}\n- RDP smoke env: {}\n- Preferences: {}\n- Active sessions: {}\n\n{}\n\nNext: {}\n",
+            "# Relayne AI Verification\n\n- OpenAI key: {}\n- RDP smoke env: {}\n- Preferences: {}\n- Active sessions: {}\n\n{}\n\nNext: {}\n",
             if self.openai_key_set {
                 "ready"
             } else {
@@ -3667,7 +3674,7 @@ fn build_ki_readiness_cli_report_with_inputs(
         missing_requirements.push("AIVANA_RDP_TEST_*".to_owned());
     }
     if !preferences_saved {
-        missing_requirements.push("saved KI preferences".to_owned());
+        missing_requirements.push("saved AI preferences".to_owned());
     }
     if latest_rdp_preflight_evidence.is_none() {
         missing_requirements.push("persisted RDP preflight evidence".to_owned());
@@ -3785,7 +3792,7 @@ fn save_ki_evidence_bundle_report_to_dir(
 ) -> anyhow::Result<std::path::PathBuf> {
     std::fs::create_dir_all(dir)?;
     let markdown = format!(
-        "# Relayne KI Evidence Bundle\n\n- Bundle: `{}`\n- Created: {}\n- Provider: {}\n- Model: {}\n- Goal: {}\n- Readiness score: {}%\n- Missing requirements: {}\n\n## RDP Preflight Evidence\n{}\n\n## RDP Smoke Evidence\n{}\n\n## Live Gate Evidence\n{}\n\n## AI Brief Pack\n{}\n\n## Next Step\n{}\n",
+        "# Relayne AI Evidence Bundle\n\n- Bundle: `{}`\n- Created: {}\n- Provider: {}\n- Model: {}\n- Goal: {}\n- Readiness score: {}%\n- Missing requirements: {}\n\n## RDP Preflight Evidence\n{}\n\n## RDP Smoke Evidence\n{}\n\n## Live Gate Evidence\n{}\n\n## AI Brief Pack\n{}\n\n## Next Step\n{}\n",
         report.bundle_id,
         report.created_at,
         redact_secret_text(&report.provider),
@@ -3851,7 +3858,7 @@ pub struct CompletionAuditReport {
 impl CompletionAuditReport {
     fn to_markdown(&self) -> String {
         let mut out = String::new();
-        let _ = writeln!(out, "# Relayne KI Goal Audit");
+        let _ = writeln!(out, "# Relayne AI Goal Audit");
         let _ = writeln!(out);
         let _ = writeln!(out, "- Audit: `{}`", self.audit_id);
         let _ = writeln!(out, "- Created: {}", self.generated_at);
@@ -5376,7 +5383,7 @@ pub fn build_command_index() -> serde_json::Value {
                 "output": "json",
                 "persists": true,
                 "artifacts": ["autopilot-preferences.json"],
-                "purpose": "Headless parity for the GUI Save KI Preferences action; persists current/default KI autopilot preferences without printing secrets.",
+                "purpose": "Headless parity for the GUI Save AI Preferences action; persists current/default AI autopilot preferences without printing secrets.",
                 "success_condition": "preferences_saved == true in --ki-readiness-report"
             },
             {
@@ -5384,7 +5391,7 @@ pub fn build_command_index() -> serde_json::Value {
                 "output": "json",
                 "persists": true,
                 "artifacts": ["ki-readiness-reports/*.json"],
-                "purpose": "OpenAI, RDP, KI preference, preflight, smoke, and live-gate readiness evidence."
+                "purpose": "OpenAI, RDP, AI preference, preflight, smoke, and live-gate readiness evidence."
             },
             {
                 "name": "--ai-brief-pack",
@@ -5397,7 +5404,7 @@ pub fn build_command_index() -> serde_json::Value {
                     "ai-brief-packs/<pack-id>/verification-brief.md",
                     "ai-brief-packs/<pack-id>/manifest.json"
                 ],
-                "purpose": "Headless export of redacted AI/KI action, prompt-library, runbook, and verification briefs for LLM handoff."
+                "purpose": "Headless export of redacted AI/AI action, prompt-library, runbook, and verification briefs for LLM handoff."
             },
             {
                 "name": "--ki-evidence-bundle",
@@ -6260,7 +6267,7 @@ fn build_goal_evidence_matrix_with_next_gate(
         "completion_rule": "Do not claim complete until achieved=true and uncovered_requirements is empty; live RDP requires rdp-proof-check.ok=true with fresh matching env-file/preflight/smoke host-port evidence plus persisted connected=true framebuffer/input evidence.",
         "success_criteria": [
             "Native Rust RDP implementation is present.",
-            "AI/KI cockpit and LLM handoff commands are available.",
+            "AI/AI cockpit and LLM handoff commands are available.",
             "Operator workflow is GUI-friendly and auditable.",
             "Secrets are redacted in shared evidence.",
             "Hosted OpenAI CUA path is ready when configured.",
@@ -6538,7 +6545,7 @@ pub fn build_gui_operator_actions(audit: &CompletionAuditReport) -> String {
     );
     let _ = writeln!(out);
     let _ = writeln!(out, "## Verification Center");
-    let _ = writeln!(out, "1. Open Workspaces, then KI Verification Center.");
+    let _ = writeln!(out, "1. Open Workspaces, then AI Verification Center.");
     let _ = writeln!(
         out,
         "2. Confirm the RDP env source line; when rdp-live.env exists locally it should show .\\rdp-live.env."
@@ -7668,7 +7675,7 @@ fn build_completion_audit_report_with_inputs(
         redact_secret_text(&readiness.missing_requirements.join(", "))
     };
     items.push(CompletionAuditItem {
-        requirement: "Maximum KI/AI USP features".to_owned(),
+        requirement: "Maximum AI USP features".to_owned(),
         artifact: "src/autopilot.rs, src/computer_use.rs, src/app.rs".to_owned(),
         evidence: format!(
             "Provider={} model={} readiness_score={} readiness_missing={} latest_ai_pack={}",
@@ -7685,9 +7692,9 @@ fn build_completion_audit_report_with_inputs(
         blocking: false,
     });
     items.push(CompletionAuditItem {
-        requirement: "GUI-friendly KI cockpit and operator workflow".to_owned(),
+        requirement: "GUI-friendly AI cockpit and operator workflow".to_owned(),
         artifact:
-            "Workspace KI Operations, Autopilot Mission Control, Approval Center, Verification Center"
+            "Workspace AI Operations, Autopilot Mission Control, Approval Center, Verification Center"
                 .to_owned(),
         evidence: "GUI exposes goal presets, guarded start/pause/resume/abort, CUA preflight briefs, automatic local rdp-live.env detection for Verification Center reports, env-save command copy, env-file-check command copy, RDP env fill guide copy, live-gate sequence copy, structured next-gate JSON copy, command-index JSON copy, evidence matrix JSON copy, hard evidence check JSON copy, handoff-check JSON copy, handoff risk JSON/command/evidence/export, verification snapshot JSON copy/export, RDP proof check JSON copy, RDP proof prompt copy, RDP recovery plan copy with acceptance criteria, direct live evidence requirements, and proxy-evidence rejection, RDP recovery plan command copy, live-gate doctor JSON copy, live-gate operator brief copy, LLM review prompt copy with summary.md Early LLM Triage and operator-handoff-risk-summary.json cross-check, live-gate LLM plan copy, LLM action-contract JSON copy/export with summary.md Early LLM Triage, direct_live_evidence_requirements, early_triage_artifacts, evidence success signals, and proxy-evidence rejection rules, handoff-check evidence summary, copy/export actions, and readiness status.".to_owned(),
         next_action: "Use the Verification Center to copy the Goal Audit and hand it to an operator or LLM reviewer.".to_owned(),
@@ -7696,7 +7703,7 @@ fn build_completion_audit_report_with_inputs(
     });
     items.push(CompletionAuditItem {
         requirement: "Guarded approvals, redaction, and auditable evidence".to_owned(),
-        artifact: "src/policy.rs, src/security.rs, KI evidence bundle, readiness reports".to_owned(),
+        artifact: "src/policy.rs, src/security.rs, AI evidence bundle, readiness reports".to_owned(),
         evidence: "Policy-gated mutations, redacted reports, bundle.md, manifest.json, and central secret redaction are implemented.".to_owned(),
         next_action: "Review generated Markdown before sharing outside the operator environment.".to_owned(),
         status: "met".to_owned(),
@@ -7726,7 +7733,7 @@ fn build_completion_audit_report_with_inputs(
         requirement: "Headless CI/handoff verification artifacts".to_owned(),
         artifact: "--save-ki-preferences, --ai-brief-pack, --rdp-env-fill-guide, --rdp-env-file-check, --rdp-preflight, --rdp-proof-check, --rdp-proof-recovery-plan, --live-gate, --live-gate-sequence, --live-gate-doctor, --live-gate-operator-brief, --llm-review-prompt, --llm-live-gate-plan, --llm-action-contract, --ki-readiness-report, --ki-evidence-bundle, --completion-audit, --goal-evidence-matrix, --goal-evidence-check, --command-index, --operator-handoff-pack, --operator-handoff-check, --operator-handoff-risk-summary, --verification-snapshot".to_owned(),
         evidence: format!(
-            "KI preferences save, AI brief pack, RDP env fill guide, RDP env-file check, RDP proof check, RDP proof recovery plan, live-gate sequence, readiness JSON, preflight evidence, live-gate doctor JSON, live-gate operator brief Markdown, LLM review prompt, LLM live-gate plan, LLM action contract, evidence bundle, completion audit, goal evidence matrix, hard goal evidence check, command index, operator handoff pack, handoff-pack validation, handoff risk summary, and verification snapshot can be emitted without launching the GUI. latest_preflight={}",
+            "AI preferences save, AI brief pack, RDP env fill guide, RDP env-file check, RDP proof check, RDP proof recovery plan, live-gate sequence, readiness JSON, preflight evidence, live-gate doctor JSON, live-gate operator brief Markdown, LLM review prompt, LLM live-gate plan, LLM action contract, evidence bundle, completion audit, goal evidence matrix, hard goal evidence check, command index, operator handoff pack, handoff-pack validation, handoff risk summary, and verification snapshot can be emitted without launching the GUI. latest_preflight={}",
             redact_secret_text(&latest_preflight)
         ),
         next_action: "Attach the latest JSON/Markdown artifacts to handoff or CI evidence, then run cargo run -- --save-ki-preferences, cargo run -- --ai-brief-pack, cargo run -- --live-gate-sequence, cargo run -- --rdp-proof-check --rdp-env-file .\\rdp-live.env, cargo run -- --rdp-proof-recovery-plan --rdp-env-file .\\rdp-live.env, cargo run -- --live-gate-doctor --rdp-env-file .\\rdp-live.env, cargo run -- --live-gate-operator-brief --rdp-env-file .\\rdp-live.env, cargo run -- --llm-review-prompt, cargo run -- --llm-live-gate-plan --rdp-env-file .\\rdp-live.env, cargo run -- --llm-action-contract --rdp-env-file .\\rdp-live.env, cargo run -- --goal-evidence-check --rdp-env-file .\\rdp-live.env, cargo run -- --operator-handoff-check, cargo run -- --operator-handoff-risk-summary --rdp-env-file .\\rdp-live.env, and cargo run -- --verification-snapshot --rdp-env-file .\\rdp-live.env.".to_owned(),
@@ -7827,7 +7834,7 @@ fn build_ki_verification_report_with_inputs(
         missing.push("AIVANA_RDP_TEST_*");
     }
     if !preferences_saved {
-        missing.push("saved KI preferences");
+        missing.push("saved AI preferences");
     }
 
     let key_context = if autopilot.settings.provider == AutopilotProviderKind::OpenAiComputerUse {
@@ -8835,84 +8842,84 @@ fn validate_handoff_content_consistency(
     validate_goal_evidence_matrix_checklist_evidence_contains(
         &matrix,
         "goal-evidence-matrix",
-        "GUI-friendly KI cockpit and operator workflow",
+        "GUI-friendly AI cockpit and operator workflow",
         "LLM review prompt copy with summary.md Early LLM Triage",
         content_mismatches,
     );
     validate_goal_evidence_matrix_checklist_evidence_contains(
         &matrix,
         "goal-evidence-matrix",
-        "GUI-friendly KI cockpit and operator workflow",
+        "GUI-friendly AI cockpit and operator workflow",
         "operator-handoff-risk-summary.json cross-check",
         content_mismatches,
     );
     validate_goal_evidence_matrix_checklist_evidence_contains(
         &matrix,
         "goal-evidence-matrix",
-        "GUI-friendly KI cockpit and operator workflow",
+        "GUI-friendly AI cockpit and operator workflow",
         "LLM action-contract JSON copy/export with summary.md Early LLM Triage",
         content_mismatches,
     );
     validate_goal_evidence_matrix_checklist_evidence_contains(
         &matrix,
         "goal-evidence-matrix",
-        "GUI-friendly KI cockpit and operator workflow",
+        "GUI-friendly AI cockpit and operator workflow",
         "early_triage_artifacts",
         content_mismatches,
     );
     validate_goal_evidence_matrix_checklist_evidence_contains(
         &matrix,
         "goal-evidence-matrix",
-        "GUI-friendly KI cockpit and operator workflow",
+        "GUI-friendly AI cockpit and operator workflow",
         "direct_live_evidence_requirements",
         content_mismatches,
     );
     validate_goal_evidence_matrix_checklist_evidence_contains(
         &matrix,
         "goal-evidence-matrix",
-        "GUI-friendly KI cockpit and operator workflow",
+        "GUI-friendly AI cockpit and operator workflow",
         "evidence success signals",
         content_mismatches,
     );
     validate_goal_evidence_matrix_checklist_evidence_contains(
         goal_check.get("matrix").unwrap_or(&serde_json::Value::Null),
         "goal-evidence-check.matrix",
-        "GUI-friendly KI cockpit and operator workflow",
+        "GUI-friendly AI cockpit and operator workflow",
         "LLM review prompt copy with summary.md Early LLM Triage",
         content_mismatches,
     );
     validate_goal_evidence_matrix_checklist_evidence_contains(
         goal_check.get("matrix").unwrap_or(&serde_json::Value::Null),
         "goal-evidence-check.matrix",
-        "GUI-friendly KI cockpit and operator workflow",
+        "GUI-friendly AI cockpit and operator workflow",
         "operator-handoff-risk-summary.json cross-check",
         content_mismatches,
     );
     validate_goal_evidence_matrix_checklist_evidence_contains(
         goal_check.get("matrix").unwrap_or(&serde_json::Value::Null),
         "goal-evidence-check.matrix",
-        "GUI-friendly KI cockpit and operator workflow",
+        "GUI-friendly AI cockpit and operator workflow",
         "LLM action-contract JSON copy/export with summary.md Early LLM Triage",
         content_mismatches,
     );
     validate_goal_evidence_matrix_checklist_evidence_contains(
         goal_check.get("matrix").unwrap_or(&serde_json::Value::Null),
         "goal-evidence-check.matrix",
-        "GUI-friendly KI cockpit and operator workflow",
+        "GUI-friendly AI cockpit and operator workflow",
         "early_triage_artifacts",
         content_mismatches,
     );
     validate_goal_evidence_matrix_checklist_evidence_contains(
         goal_check.get("matrix").unwrap_or(&serde_json::Value::Null),
         "goal-evidence-check.matrix",
-        "GUI-friendly KI cockpit and operator workflow",
+        "GUI-friendly AI cockpit and operator workflow",
         "direct_live_evidence_requirements",
         content_mismatches,
     );
     validate_goal_evidence_matrix_checklist_evidence_contains(
         goal_check.get("matrix").unwrap_or(&serde_json::Value::Null),
         "goal-evidence-check.matrix",
-        "GUI-friendly KI cockpit and operator workflow",
+        "GUI-friendly AI cockpit and operator workflow",
         "evidence success signals",
         content_mismatches,
     );
@@ -11938,7 +11945,7 @@ mod tests {
         let manifest = std::fs::read_to_string(saved.join("manifest.json")).unwrap();
         let _ = std::fs::remove_dir_all(saved);
 
-        assert!(markdown.contains("Relayne KI Evidence Bundle"));
+        assert!(markdown.contains("Relayne AI Evidence Bundle"));
         assert!(markdown.contains("password=[REDACTED]"));
         assert!(markdown.contains("token=[REDACTED]"));
         assert!(markdown.contains("secret=[REDACTED]"));
@@ -12368,7 +12375,7 @@ mod tests {
                 .iter()
                 .any(|item| item.requirement.contains("OpenAI CUA") && item.blocking)
         );
-        assert!(markdown.contains("Relayne KI Goal Audit"));
+        assert!(markdown.contains("Relayne AI Goal Audit"));
         assert!(markdown.contains("Prompt-to-Artifact Checklist"));
         assert!(markdown.contains("Live Gate Runbook"));
         assert!(markdown.contains("next: Set OPENAI_API_KEY"));
@@ -14208,7 +14215,7 @@ mod tests {
             .and_then(|items| {
                 items.iter_mut().find(|item| {
                     item.get("requirement").and_then(|value| value.as_str())
-                        == Some("GUI-friendly KI cockpit and operator workflow")
+                        == Some("GUI-friendly AI cockpit and operator workflow")
                 })
             })
         {
@@ -14228,7 +14235,7 @@ mod tests {
             .and_then(|items| {
                 items.iter_mut().find(|item| {
                     item.get("requirement").and_then(|value| value.as_str())
-                        == Some("GUI-friendly KI cockpit and operator workflow")
+                        == Some("GUI-friendly AI cockpit and operator workflow")
                 })
             })
         {
@@ -17303,7 +17310,7 @@ mod tests {
 
         assert!(brief.contains("Relayne Runbook LLM Brief"));
         assert!(brief.contains("selected runbook"));
-        assert!(brief.contains("Screenshot erfassen"));
+        assert!(brief.contains("Capture screenshot"));
         assert!(brief.contains("password=[REDACTED]"));
         assert!(!brief.contains("hunter2"));
     }

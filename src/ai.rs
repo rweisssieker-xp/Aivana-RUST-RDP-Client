@@ -23,14 +23,14 @@ impl AiProvider for LocalAiProvider {
     fn explain_failure(&self, report: &PreflightReport) -> AiExplanation {
         if report.findings.is_empty() {
             return AiExplanation {
-                title: "Keine lokalen Fehler gefunden".to_owned(),
-                likely_root_cause: "Preflight hat keine blockierenden lokalen Probleme erkannt."
+                title: "No local errors found".to_owned(),
+                likely_root_cause: "Preflight found no blocking local issues."
                     .to_owned(),
                 evidence: vec![AiEvidence {
                     source: "preflight".to_owned(),
-                    detail: "Keine Findings vorhanden.".to_owned(),
+                    detail: "No findings are available.".to_owned(),
                 }],
-                next_safe_step: "Verbindung starten und Timeline beobachten.".to_owned(),
+                next_safe_step: "Start the connection and monitor the timeline.".to_owned(),
                 risk: RiskLevel::ReadOnly,
                 confidence: 0.72,
             };
@@ -71,7 +71,7 @@ impl AiProvider for LocalAiProvider {
             .count();
         SessionSummary {
             headline: format!(
-                "Session enthaelt {} Ereignisse, davon {} Fehlerhinweise.",
+                "The session contains {} events, including {} error indicators.",
                 events.len(),
                 errors
             ),
@@ -119,27 +119,27 @@ impl AiProvider for LocalAiProvider {
         let (name, reason) = if lower.contains("credssp") || lower.contains("nla") {
             (
                 "NLA/CredSSP Problem",
-                "Credential- oder NLA-Hinweise im Kontext erkannt.",
+                "Credential or NLA indicators were found in the context.",
             )
         } else if lower.contains("certificate") || lower.contains("cert") {
             (
                 "Certificate Changed Investigation",
-                "Zertifikatsrisiko im Kontext erkannt.",
+                "A certificate risk was found in the context.",
             )
         } else if lower.contains("disconnect") {
             (
                 "Repeated Disconnects",
-                "Wiederholte Trennungen im Kontext erkannt.",
+                "Repeated disconnections were found in the context.",
             )
         } else if lower.contains("black") || lower.contains("slow") {
             (
                 "Slow Login / Black Screen",
-                "Langsamer Login oder schwarzer Bildschirm erkannt.",
+                "A slow login or black screen was detected.",
             )
         } else {
             (
-                "DNS/TCP/RDP-Port Diagnose",
-                "Sicherer Netzwerk-Preflight ist der beste erste Schritt.",
+                "DNS/TCP/RDP port diagnosis",
+                "A safe network preflight is the best first step.",
             )
         };
 
@@ -158,21 +158,21 @@ impl AiProvider for LocalAiProvider {
                 .iter()
                 .find(|event| event.to_lowercase().contains("error"))
                 .cloned()
-                .unwrap_or_else(|| "Keine eindeutige Root Cause gefunden.".to_owned()),
+                .unwrap_or_else(|| "No clear root cause was found.".to_owned()),
             customer_text: format!(
-                "Die Remote-Session wurde analysiert. Es wurden {} Ereignisse ausgewertet und sichere Diagnosebeweise gesammelt.",
+                "The remote session was analyzed. {} events were reviewed and safe diagnostic evidence was collected.",
                 events.len()
             ),
-            internal_note: "Timeline, KI-Beobachtungen und Policy-Entscheidungen pruefen."
+            internal_note: "Review the timeline, AI observations, and policy decisions."
                 .to_owned(),
-            open_tasks: vec!["Bei Bedarf mutierende Schritte separat freigeben.".to_owned()],
+            open_tasks: vec!["Approve state-changing steps separately if needed.".to_owned()],
         }
     }
 
     fn compare_sessions(&self, current: &[String], previous: &[String]) -> ChangeSummary {
         ChangeSummary {
             headline: format!(
-                "Aktuelle Session: {} Events, vorherige Referenz: {} Events.",
+                "Current session: {} events; previous reference: {} events.",
                 current.len(),
                 previous.len()
             ),

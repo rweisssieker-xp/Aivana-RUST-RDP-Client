@@ -135,7 +135,7 @@ pub struct AutopilotController {
 impl Default for AutopilotController {
     fn default() -> Self {
         Self {
-            goal: "Diagnose den Remote-Desktop und fuehre den naechsten sicheren Schritt aus."
+            goal: "Diagnose the remote desktop and perform the next safe step."
                 .to_owned(),
             status: AutopilotStatus::Idle,
             settings: AutopilotSettings::default(),

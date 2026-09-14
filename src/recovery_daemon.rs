@@ -34,13 +34,13 @@ fn current_user() -> Result<String> {
             unsafe { GetUserNameExW(2, buffer.as_mut_ptr(), &mut size) } != 0
                 && size > 0
                 && (size as usize) < buffer.len(),
-            "Windows-Benutzeridentität nicht lesbar"
+            "Cannot read Windows user identity"
         );
         Ok(String::from_utf16(&buffer[..size as usize])?)
     }
     #[cfg(not(windows))]
     {
-        anyhow::bail!("Benötigt Windows")
+        anyhow::bail!("Requires Windows")
     }
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -63,12 +63,12 @@ impl Consent {
     ) -> Result<()> {
         ensure!(
             id == self.contract_id && self.plan_hash == plan.hash()?,
-            "Freigabe passt nicht zum exakten Plan und seinen Klonen"
+            "Approval does not match the exact plan and its clones"
         );
-        ensure!(now < self.expires, "Hintergrundfreigabe abgelaufen");
+        ensure!(now < self.expires, "Background approval expired");
         ensure!(
             !drill || (self.drill && !self.user.trim().is_empty() && !self.password.is_empty()),
-            "Keine Klonfreigabe mit Gastzugang"
+            "No clone approval with guest credentials"
         );
         Ok(())
     }
@@ -92,15 +92,18 @@ impl Settings {
             return Ok(Self::default());
         };
         let raw = security::unprotect_secret(&bytes)?;
-        ensure!(raw.len() <= 2 * 1024 * 1024, "Hintergrundspeicher zu groß");
+        ensure!(
+            raw.len() <= 2 * 1024 * 1024,
+            "Background store is too large"
+        );
         let mut settings: Self =
-            serde_json::from_slice(&raw).context("Hintergrundspeicher beschädigt")?;
+            serde_json::from_slice(&raw).context("Background store is corrupted")?;
         settings.validate()?;
         settings.source_digest = Some(digest(&bytes));
         Ok(settings)
     }
     fn validate(&self) -> Result<()> {
-        ensure!(self.consents.len() <= 128, "Zu viele Freigaben");
+        ensure!(self.consents.len() <= 128, "Too many approvals");
         let mut ids = std::collections::BTreeSet::new();
         for c in &self.consents {
             ensure!(
@@ -112,11 +115,11 @@ impl Settings {
                     && c.password.len() <= 4096
                     && (!c.drill || (!c.user.trim().is_empty() && !c.password.is_empty()))
                     && (c.drill || (c.user.is_empty() && c.password.is_empty())),
-                "Freigabe ungültig"
+                "Invalid approval"
             );
             ensure!(
                 c.expires <= Utc::now() + chrono::Duration::hours(168),
-                "Freigabe maximal 168 Stunden"
+                "Approval cannot exceed 168 hours"
             );
         }
         Ok(())
@@ -129,12 +132,12 @@ impl Settings {
         let _lock = lock(&format!("{name}.lock"))?;
         ensure!(
             read(name)?.map(|bytes| digest(&bytes)) == self.source_digest,
-            "Freigaben wurden parallel geändert; neu laden"
+            "Approvals changed concurrently; reload"
         );
         let bytes = security::protect_secret(&serde_json::to_vec(self)?)?;
         ensure!(
             bytes.len() <= 2 * 1024 * 1024,
-            "Hintergrundspeicher zu groß"
+            "Background store is too large"
         );
         security::atomic_write(&security::app_data_file(name)?, &bytes)?;
         self.source_digest = Some(digest(&bytes));
@@ -180,7 +183,7 @@ impl Notices {
                 "changed" | "failed" | "drill-failed" | "storage" | "expired" | "due" | "missing"
             ) && Utc::now() >= previous.at + chrono::Duration::hours(1)
             {
-                return self.push(contract_id, &format!("{kind}-escalated"), "Seit mindestens einer Stunde offen: Recovery-Nachweise oder Hintergrundfreigabe prüfen");
+                return self.push(contract_id, &format!("{kind}-escalated"), "Unresolved for at least one hour: review recovery evidence or background approval");
             }
             return false;
         }
@@ -220,7 +223,7 @@ fn notify(id: Uuid, kind: &str, message: &str) -> Result<()> {
     }
     Ok(())
 }
-const HINT_SCRIPT: &str = r#"Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $n=New-Object System.Windows.Forms.NotifyIcon; try {$n.Icon=[System.Drawing.SystemIcons]::Warning; $n.Visible=$true; $n.ShowBalloonTip(5000,'Relayne Recovery','Neue Recovery-Meldung. Hintergrundbereich in Relayne oeffnen.',[System.Windows.Forms.ToolTipIcon]::Warning); Start-Sleep -Seconds 6} finally {$n.Dispose()}"#;
+const HINT_SCRIPT: &str = r#"Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $n=New-Object System.Windows.Forms.NotifyIcon; try {$n.Icon=[System.Drawing.SystemIcons]::Warning; $n.Visible=$true; $n.ShowBalloonTip(5000,'Relayne Recovery','New recovery notification. Open Background in Relayne.',[System.Windows.Forms.ToolTipIcon]::Warning); Start-Sleep -Seconds 6} finally {$n.Dispose()}"#;
 fn windows_hint() -> Result<()> {
     let mut cmd = std::process::Command::new("powershell.exe");
     cmd.args(["-NoProfile", "-NonInteractive", "-Command", HINT_SCRIPT]);
@@ -248,7 +251,7 @@ fn bounded_process(
         if started.elapsed() > timeout {
             let _ = child.kill();
             let _ = child.wait();
-            anyhow::bail!("Lokaler Windows-Helfer überschreitet Zeitlimit");
+            anyhow::bail!("Local Windows helper timed out");
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
@@ -258,8 +261,11 @@ fn load<T: serde::de::DeserializeOwned + Default>(name: &str) -> Result<T> {
         return Ok(T::default());
     };
     let raw = security::unprotect_secret(&bytes)?;
-    ensure!(raw.len() <= 2 * 1024 * 1024, "Hintergrundspeicher zu groß");
-    serde_json::from_slice(&raw).context("Hintergrundspeicher beschädigt")
+    ensure!(
+        raw.len() <= 2 * 1024 * 1024,
+        "Background store is too large"
+    );
+    serde_json::from_slice(&raw).context("Background store is corrupted")
 }
 fn read(name: &str) -> Result<Option<Vec<u8>>> {
     let path = security::app_data_file(name)?;
@@ -270,13 +276,13 @@ fn read(name: &str) -> Result<Option<Vec<u8>>> {
     };
     ensure!(
         file.metadata()?.len() <= 2 * 1024 * 1024,
-        "Hintergrundspeicher zu groß"
+        "Background store is too large"
     );
     let mut bytes = vec![];
     file.take(2 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
     ensure!(
         bytes.len() <= 2 * 1024 * 1024,
-        "Hintergrundspeicher zu groß"
+        "Background store is too large"
     );
     Ok(Some(bytes))
 }
@@ -284,7 +290,7 @@ fn save<T: Serialize>(name: &str, value: &T) -> Result<()> {
     let bytes = security::protect_secret(&serde_json::to_vec(value)?)?;
     ensure!(
         bytes.len() <= 2 * 1024 * 1024,
-        "Hintergrundspeicher zu groß"
+        "Background store is too large"
     );
     security::atomic_write(&security::app_data_file(name)?, &bytes)
 }
@@ -299,37 +305,37 @@ fn lock(name: &str) -> Result<std::fs::File> {
             .truncate(false)
             .share_mode(0)
             .open(security::app_data_file(name)?)
-            .context("Hintergrundvorgang läuft bereits")
+            .context("Background operation is already running")
     }
     #[cfg(not(windows))]
     {
         let _ = name;
-        anyhow::bail!("Benötigt Windows")
+        anyhow::bail!("Requires Windows")
     }
 }
 fn active(id: Uuid, plan: &ExecutionPlan, drill: bool) -> Result<Consent> {
     let settings = Settings::load()?;
-    ensure!(settings.enabled, "Hintergrundarbeit deaktiviert");
+    ensure!(settings.enabled, "Background work is disabled");
     let consent = settings
         .consents
         .into_iter()
         .find(|c| c.contract_id == id)
-        .context("Freigabe entfernt")?;
+        .context("Approval removed")?;
     consent.authorizes(id, plan, Utc::now(), drill)?;
     let book = Book::load(&security::app_data_file(CONTRACTS)?)?;
     let current = book
         .contracts
         .iter()
         .find(|c| c.id == id)
-        .context("Vertrag entfernt")?;
+        .context("Contract removed")?;
     ensure!(
         current.enabled && current.plan.hash()? == plan.hash()?,
-        "Vertrag pausiert oder geändert"
+        "Contract paused or changed"
     );
     let profiles = crate::services::ProfileStore::new()?.load()?;
     ensure!(
         profiles_match(plan, &profiles),
-        "Produktionsprofil geändert oder entfernt"
+        "Production profile changed or removed"
     );
     Ok(consent)
 }
@@ -345,7 +351,7 @@ fn observe_check(
     let started = Utc::now();
     let (fingerprints, error) = match observer(plan) {
         Ok(f) => (f, None),
-        Err(_) => (vec![], Some("Produktionsvergleich fehlgeschlagen".into())),
+        Err(_) => (vec![], Some("Production comparison failed".into())),
     };
     Check {
         started,
@@ -365,10 +371,10 @@ fn rehearse(contract: &mut crate::recovery_contracts::Contract) -> Result<()> {
             .find(|l| {
                 l.id == mapping.staging.profile_id.to_string() && l.vm_id == mapping.staging.host
             })
-            .context("Autorisierter Klon fehlt oder VM wurde ersetzt")?;
+            .context("Authorized clone is missing or the VM was replaced")?;
         ensure!(
             crate::promotion::lab_target(&lab)?.host == mapping.staging.host,
-            "Klon nicht bereit"
+            "Clone is not ready"
         );
         crate::equivalence::observe(&contract.plan, &lab, &consent.user, &consent.password)?;
         let consent = active(contract.id, &contract.plan, true)?;
@@ -398,7 +404,7 @@ pub fn run_once() -> Result<usize> {
     if !settings.enabled {
         return Ok(0);
     }
-    ensure!(settings.consents.len() <= 128, "Zu viele Freigaben");
+    ensure!(settings.consents.len() <= 128, "Too many approvals");
     let path = security::app_data_file(CONTRACTS)?;
     let mut count = 0;
     for consent in settings.consents.iter().take(128) {
@@ -411,7 +417,7 @@ pub fn run_once() -> Result<usize> {
             notify(
                 consent.contract_id,
                 "missing",
-                "Vertrag fehlt; Freigabe entfernen oder neu konfigurieren",
+                "Contract is missing; remove or reconfigure approval",
             )?;
             continue;
         };
@@ -423,7 +429,7 @@ pub fn run_once() -> Result<usize> {
             notify(
                 c.id,
                 "expired",
-                "Freigabe abgelaufen, entfernt oder Plan geändert; Hintergrundarbeit pausiert",
+                "Approval expired, was removed, or the plan changed; background work paused",
             )?;
             continue;
         }
@@ -441,7 +447,7 @@ pub fn run_once() -> Result<usize> {
                 notify(
                     consent.contract_id,
                     "storage",
-                    "Vergleich nicht vollständig gespeichert; Ausführung gesperrt oder erneutes Laden erforderlich",
+                    "Comparison was not fully saved; execution blocked or reload required",
                 )?;
                 return Err(e);
             }
@@ -457,7 +463,7 @@ pub fn run_once() -> Result<usize> {
                 notify(
                     saved.id,
                     "ready",
-                    "Produktionsvergleich wieder erfolgreich; Frist für Generalprobe bleibt unverändert",
+                    "Production comparison succeeded again; rehearsal deadline is unchanged",
                 )?;
             }
         }
@@ -467,13 +473,13 @@ pub fn run_once() -> Result<usize> {
             notify(
                 c.id,
                 "changed",
-                "Produktionsänderung erkannt; Nachweise entwertet",
+                "Production change detected; evidence invalidated",
             )?;
         } else if c.last_check.as_ref().is_some_and(|c| c.error.is_some()) {
             notify(
                 c.id,
                 "failed",
-                "Produktionsvergleich fehlgeschlagen; Zustand unbekannt",
+                "Production comparison failed; state is unknown",
             )?;
         }
         if count >= 4 {
@@ -501,14 +507,14 @@ pub fn run_once() -> Result<usize> {
                         notify(
                             consent.contract_id,
                             "renewed",
-                            "Echte Klon-Generalprobe bestanden; Vertrag mit frischen Nachweisen erneuert",
+                            "Actual clone rehearsal passed; contract renewed with fresh evidence",
                         )?;
                     }
                     Err(_) => {
                         notify(
                             consent.contract_id,
                             "drill-failed",
-                            "Klon-Generalprobe fehlgeschlagen; keine Erneuerung. Lab-Journal und Zugang prüfen; frühester Neuversuch in einer Stunde",
+                            "Clone rehearsal failed; no renewal. Review lab journal and credentials; retry no sooner than one hour",
                         )?;
                     }
                 }
@@ -517,7 +523,7 @@ pub fn run_once() -> Result<usize> {
                 notify(
                     c.id,
                     "due",
-                    "Neue Klon-Generalprobe fällig; keine unbeaufsichtigte Klonfreigabe",
+                    "New clone rehearsal is due; no unattended clone approval",
                 )?;
             }
         }
@@ -539,12 +545,12 @@ fn task_xml(executable: &Path, user: &str) -> Result<String> {
             .replace('"', "&quot;")
             .replace('\'', "&apos;")
     }
-    let executable = executable.to_str().context("Ungültiger Programmpfad")?;
+    let executable = executable.to_str().context("Invalid executable path")?;
     ensure!(
         !executable.chars().any(char::is_control)
             && !user.is_empty()
             && !user.chars().any(char::is_control),
-        "Ungültiger Programmpfad"
+        "Invalid executable path"
     );
     Ok(format!(
         r#"<?xml version="1.0" encoding="UTF-16"?><Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Triggers><TimeTrigger><Repetition><Interval>PT5M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition><StartBoundary>{}</StartBoundary><Enabled>true</Enabled></TimeTrigger></Triggers><Principals><Principal id="Author"><UserId>{}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><ExecutionTimeLimit>PT2H</ExecutionTimeLimit><Enabled>true</Enabled></Settings><Actions Context="Author"><Exec><Command>{}</Command><Arguments>--recovery-worker-once</Arguments></Exec></Actions></Task>"#,
@@ -574,13 +580,13 @@ fn scheduler(args: &[&std::ffi::OsStr]) -> Result<()> {
         if started.elapsed() > std::time::Duration::from_secs(15) {
             let _ = child.kill();
             let _ = child.wait();
-            anyhow::bail!("Aufgabenplanung überschreitet Zeitlimit; Windows-Aufgabenstatus prüfen");
+            anyhow::bail!("Task Scheduler timed out; check Windows task status");
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     };
     ensure!(
         status.success(),
-        "Windows-Aufgabenplanung fehlgeschlagen; Rechte und Aufgabenplanung prüfen"
+        "Windows Task Scheduler failed; check permissions and Task Scheduler"
     );
     Ok(())
 }
@@ -588,7 +594,7 @@ pub fn install_task() -> Result<()> {
     let settings = Settings::load()?;
     ensure!(
         settings.enabled && settings.consents.iter().any(|c| c.expires > Utc::now()),
-        "Zuerst ausdrückliche Freigaben speichern"
+        "Save explicit approvals first"
     );
     let path = security::app_data_file(&format!("recovery-task-{}.xml", Uuid::new_v4()))?;
     let xml = task_xml(&std::env::current_exe()?, &current_user()?)?;

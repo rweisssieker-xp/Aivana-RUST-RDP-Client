@@ -37,7 +37,7 @@ fn digest(b: &[u8]) -> String {
 pub fn matches_plan(package: &crate::workflow::Package, c: &Contract) -> Result<()> {
     ensure!(
         c.plan.mappings.len() == 1,
-        "Katalog unterstützt eine eindeutige Zielzuordnung je Paket"
+        "The catalog supports one unambiguous target mapping per package"
     );
     let host = &c.plan.mappings[0].production.host;
     let same = |t: &crate::workflow::Target| {
@@ -45,12 +45,12 @@ pub fn matches_plan(package: &crate::workflow::Package, c: &Contract) -> Result<
     };
     ensure!(
         package.plan.restore.is_empty() && package.plan.steps.len() == 1,
-        "Paket muss genau eine gebundene Dienstoperation enthalten; keine zusätzlichen Restore-Schritte"
+        "The package must contain exactly one bound service operation and no additional restore steps"
     );
     for s in &package.plan.preconditions {
         ensure!(
             matches!(&s.action,Action::WinRm{target,operation:WinOperation::Inventory|WinOperation::Services|WinOperation::Processes|WinOperation::Events,..} if same(target)),
-            "Nicht lesende oder anders gebundene Paketvoraussetzung"
+            "The package prerequisite is not read-only or has a different binding"
         );
     }
     let restart = serde_json::to_value(&c.plan)?["restart"].as_bool() == Some(true);
@@ -84,7 +84,7 @@ pub fn matches_plan(package: &crate::workflow::Package, c: &Contract) -> Result<
     };
     ensure!(
         valid,
-        "Paketoperation passt nicht zur geprobten Dienständerung"
+        "The package operation does not match the rehearsed service change"
     );
     let crate::execution::HealthCheck::Http {
         port,
@@ -95,19 +95,19 @@ pub fn matches_plan(package: &crate::workflow::Package, c: &Contract) -> Result<
         followups,
     } = &c.plan.health
     else {
-        anyhow::bail!("HTTP-Nachweis erforderlich")
+        anyhow::bail!("HTTP evidence is required")
     };
     let mut checks = vec![(path, *status, contains)];
     for step in followups {
         ensure!(
             step.options == Default::default(),
-            "Katalogbeleg benötigt öffentliche GET-Prüfungen"
+            "Catalog evidence requires public GET checks"
         );
         checks.push((&step.path, step.status, &step.contains));
     }
     ensure!(
         package.plan.verification.len() == checks.len(),
-        "Paketprüfungen passen nicht zu Klonbelegen"
+        "Package checks do not match clone evidence"
     );
     let target = if host.contains(':') {
         format!("[{host}]")
@@ -124,7 +124,7 @@ pub fn matches_plan(package: &crate::workflow::Package, c: &Contract) -> Result<
         );
         ensure!(
             matches!(&step.action,Action::Http{url,method:crate::workflow::HttpMethod::Get,form,secret_fields,status:s,body_contains,json_equals} if url==&expected && *s==status && form.is_empty()&&secret_fields.is_empty()&&json_equals.is_empty()&&body_contains.as_deref().unwrap_or_default()==contains),
-            "Paket-HTTP-Test weicht vom tatsächlichen Beleg ab"
+            "The package HTTP check differs from the actual evidence"
         );
     }
     Ok(())
@@ -139,7 +139,7 @@ impl Entry {
         matches_plan(&p, c)?;
         ensure!(
             c.readiness(chrono::Utc::now()) == Readiness::Ready,
-            "Wiederherstellungsplan nicht aktuell"
+            "The recovery plan is not current"
         );
         crate::promotion::check_receipts(&c.plan, &c.references, chrono::Utc::now())?;
         let baseline =
@@ -202,14 +202,14 @@ impl Catalog {
             Err(e) => return Err(e),
         };
         let clear = crate::security::unprotect_secret(&bytes)?;
-        ensure!(clear.len() <= LIMIT, "Katalog zu groß");
+        ensure!(clear.len() <= LIMIT, "Catalog too large");
         let mut c: Self = serde_json::from_slice(&clear)?;
         c.validate()?;
         c.source = Some(digest(&bytes));
         Ok(c)
     }
     fn validate(&self) -> Result<()> {
-        ensure!(self.entries.len() <= 64, "Maximal 64 Katalogeinträge");
+        ensure!(self.entries.len() <= 64, "At most 64 catalog entries are allowed");
         let mut ids = std::collections::BTreeSet::new();
         for e in &self.entries {
             ensure!(
@@ -218,7 +218,7 @@ impl Catalog {
                     && e.signed_package.len() <= 512 * 1024
                     && e.plan_hash.len() == 64
                     && e.fingerprints.len() == 1,
-                "Ungültiger Katalogeintrag"
+                "Invalid catalog entry"
             );
             for fp in &e.fingerprints {
                 fp.validate()?;
@@ -254,12 +254,12 @@ impl Catalog {
         };
         ensure!(
             current == self.source,
-            "Katalog parallel geändert; neu laden"
+            "The catalog changed concurrently; reload it"
         );
         let raw = serde_json::to_vec(self)?;
-        ensure!(raw.len() <= LIMIT, "Katalog zu groß");
+        ensure!(raw.len() <= LIMIT, "Catalog too large");
         let enc = crate::security::protect_secret(&raw)?;
-        ensure!(enc.len() <= LIMIT, "Katalog zu groß");
+        ensure!(enc.len() <= LIMIT, "Catalog too large");
         crate::security::atomic_write(path, &enc)?;
         self.source = Some(digest(&enc));
         Ok(())
@@ -271,14 +271,14 @@ fn read(path: &Path) -> Result<Vec<u8>> {
     std::fs::File::open(path)?
         .take((LIMIT + 1) as u64)
         .read_to_end(&mut b)?;
-    ensure!(b.len() <= LIMIT, "Katalog zu groß");
+    ensure!(b.len() <= LIMIT, "Catalog too large");
     Ok(b)
 }
 /// Produce an inert package candidate directly from a supported proved plan; signing is explicit.
 pub fn candidate(c: &Contract) -> Result<crate::workflow::Package> {
     ensure!(
         c.plan.mappings.len() == 1,
-        "Ein Ziel je Katalogpaket erforderlich"
+        "One target is required per catalog package"
     );
     let host = c.plan.mappings[0].production.host.clone();
     let restart = serde_json::to_value(&c.plan)?["restart"].as_bool() == Some(true);
@@ -304,13 +304,13 @@ pub fn candidate(c: &Contract) -> Result<crate::workflow::Package> {
         followups,
     } = &c.plan.health
     else {
-        anyhow::bail!("HTTP erforderlich")
+        anyhow::bail!("HTTP is required")
     };
     let mut checks = vec![(path, *status, contains)];
     for s in followups {
         ensure!(
             s.options == Default::default(),
-            "Nur öffentliche GETs im Katalog"
+            "Only public GET requests are allowed in the catalog"
         );
         checks.push((&s.path, s.status, &s.contains));
     }

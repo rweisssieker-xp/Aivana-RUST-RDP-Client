@@ -88,7 +88,7 @@ impl ProbeCoordinator {
             Ok(result) => result,
             Err(TryRecvError::Empty) => return None,
             Err(TryRecvError::Disconnected) => (
-                Err("Zertifikatsprüfung wurde unerwartet beendet.".into()),
+                Err("Certificate check ended unexpectedly.".into()),
                 None,
             ),
         };
@@ -117,7 +117,7 @@ impl AivanaApp {
     }
     pub(super) fn begin_certificate_probe(&mut self, intent: ProbeIntent) {
         let Some(profile) = self.selected_profile().cloned() else {
-            self.status = "Bitte zuerst einen Rechner auswählen.".into();
+            self.status = "Select a computer first.".into();
             return;
         };
         if intent == ProbeIntent::Connect {
@@ -133,7 +133,7 @@ impl AivanaApp {
                 self.selected_session = Some(id);
                 self.desktop.focus = true;
                 self.view = View::Sessions;
-                self.status = format!("Bestehende Sitzung für {} geöffnet.", profile.name);
+                self.status = format!("Opened existing session for {}.", profile.name);
                 return;
             }
         }
@@ -146,9 +146,9 @@ impl AivanaApp {
         };
         let name = profile.name.clone();
         if self.connection_probe.begin(profile, intent) {
-            self.status = format!("Zertifikat und Verbindung für {name} werden geprüft …");
+            self.status = format!("Checking certificate and connection for {name} …");
         } else {
-            self.status = "Eine Verbindungsprüfung läuft bereits. Bitte Ergebnis abwarten.".into();
+            self.status = "A connection check is already running. Wait for the result.".into();
         }
     }
 
@@ -158,7 +158,7 @@ impl AivanaApp {
         };
         if !still_selected(&result.profile, self.selected_profile()) {
             self.status = format!(
-                "Prüfung für {} verworfen: Auswahl oder Profil wurde geändert.",
+                "Discarded check for {}: selection or profile changed.",
                 result.profile.name
             );
             return;
@@ -173,9 +173,9 @@ impl AivanaApp {
                 if is_standard_rdp_security_error(&error) {
                     self.block_standard_rdp_security(&result.profile, &error);
                 } else {
-                    self.status = format!("Zertifikatsprüfung fehlgeschlagen: {error}");
+                    self.status = format!("Certificate check failed: {error}");
                     self.certificate_notice =
-                        "Kein echtes TLS-Zertifikat erhalten. Vertrauensstatus unverändert.".into();
+                        "No actual TLS certificate received. Trust status unchanged.".into();
                 }
                 return;
             }
@@ -204,10 +204,10 @@ impl AivanaApp {
             }
             ProbeIntent::Inspect => {
                 self.certificate_notice = format!(
-                    "{}:{} Fingerabdruck: {fingerprint}",
+                    "{}:{} Fingerprint: {fingerprint}",
                     profile.host, profile.port
                 );
-                self.status = format!("Zertifikatsprüfung für {} abgeschlossen.", profile.name);
+                self.status = format!("Certificate check completed for {}.", profile.name);
             }
             ProbeIntent::Connect => unreachable!(),
         }

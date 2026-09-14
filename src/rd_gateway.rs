@@ -75,7 +75,7 @@ impl std::fmt::Debug for GatewayOptions {
 
 pub fn validate_host(host: &str) -> Result<()> {
     if host.is_empty() || host.trim() != host || host.len() > 253 {
-        bail!("Host fehlt oder ist ungültig");
+        bail!("Host is missing or invalid");
     }
     if host.parse::<IpAddr>().is_ok() {
         return Ok(());
@@ -90,10 +90,10 @@ pub fn validate_host(host: &str) -> Result<()> {
                 .bytes()
                 .all(|c| c.is_ascii_alphanumeric() || c == b'-')
     }) {
-        bail!("Host muss ein DNS-Name oder eine IP-Adresse sein (ohne URL/Pfad/Port)");
+        bail!("Host must be a DNS name or IP address (without URL, path, or port)");
     }
     if dns.bytes().all(|c| c.is_ascii_digit() || c == b'.') {
-        bail!("Ungültige IP-Adresse");
+        bail!("Invalid IP address");
     }
     Ok(())
 }
@@ -104,15 +104,15 @@ pub fn validate_gateway(options: &GatewayOptions, target_port: u16) -> Result<()
     }
     validate_host(&options.host)?;
     if options.port == 0 {
-        bail!("Gateway-Port muss zwischen 1 und 65535 liegen");
+        bail!("Gateway port must be between 1 and 65535");
     }
     if options.host.contains(':') {
         bail!(
-            "Diese RD-Gateway-Version unterstützt keine IPv6-Gateway-Adresse; bitte DNS-Namen verwenden"
+            "This RD Gateway version does not support an IPv6 gateway address; use a DNS name"
         );
     }
     if target_port == 0 {
-        bail!("Zielport muss zwischen 1 und 65535 liegen");
+        bail!("Destination port must be between 1 and 65535");
     }
     Ok(())
 }
@@ -173,7 +173,7 @@ impl GatewayStream {
             format!("{domain}\\{username}")
         };
         if !options.paa && (user.is_empty() || password.is_empty()) {
-            bail!("RD Gateway benötigt Benutzername und Kennwort");
+            bail!("RD Gateway requires a username and password");
         }
         let target = ironrdp_mstsgu::GwConnectTarget {
             ntlm: options.ntlm,
@@ -192,8 +192,8 @@ impl GatewayStream {
             .build()?;
         let (client, local_addr) = runtime.block_on(async {
             tokio::time::timeout(Duration::from_secs(120), ironrdp_mstsgu::GwClient::connect(&target, "Relayne" )).await
-        }).context("RD-Gateway-Verbindungszeit überschritten")?
-            .map_err(|error| anyhow::anyhow!("RD-Gateway-Verbindung fehlgeschlagen ({error}). Gateway-Zertifikat, WebSocket-Unterstützung und Authentifizierungsmodus prüfen. NTLM-MFA am zweiten Faktor bestätigen; PAA benötigt einen vom Gateway-Anbieter ausgestellten Cookie. Keine automatische Wiederholung."))?;
+        }).context("RD Gateway connection timed out")?
+            .map_err(|error| anyhow::anyhow!("RD Gateway connection failed ({error}). Verify the gateway certificate, WebSocket support, and authentication mode. Confirm the second factor for NTLM MFA; PAA requires a cookie issued by the gateway provider. No automatic retry."))?;
         Ok((
             Self {
                 client,

@@ -7,6 +7,54 @@ pub const SELLER: &str =
 pub const CONTACT: &str = "info@aivana-gmbh.ai · +49 521 92278996";
 pub const REGISTER: &str = "Amtsgericht Bielefeld · HRB 46421 · USt-IdNr. DE459356027";
 pub const SOURCE: &str = "https://aivana-gmbh.ai/Imprint";
+pub const ENGLISH_DOCUMENTS: &[(&str, &str)] = &[
+    (
+        "Production delivery and backup",
+        include_str!("../docs/distribution/en-US/delivery.md"),
+    ),
+    (
+        "Logged-out background operation",
+        include_str!("../docs/distribution/en-US/background.md"),
+    ),
+    (
+        "Acceptance inventory",
+        include_str!("../docs/distribution/en-US/acceptance.md"),
+    ),
+    (
+        "Stripe subscriptions",
+        include_str!("../docs/distribution/en-US/commerce.md"),
+    ),
+    (
+        "Recorded application checks",
+        include_str!("../docs/distribution/en-US/application-checks.md"),
+    ),
+    (
+        "Ticket intake",
+        include_str!("../docs/distribution/en-US/ticket-intake.md"),
+    ),
+    (
+        "External escalation authorization",
+        include_str!("../docs/distribution/en-US/escalation.md"),
+    ),
+    (
+        "Privacy data-flow draft",
+        include_str!("../docs/distribution/en-US/privacy.md"),
+    ),
+    (
+        "Support",
+        include_str!("../docs/distribution/en-US/support.md"),
+    ),
+    (
+        "Commercial terms review",
+        include_str!("../docs/distribution/en-US/terms-review.md"),
+    ),
+    (
+        "English localization coverage",
+        include_str!("../docs/distribution/en-US/localization.md"),
+    ),
+];
+pub const THIRD_PARTY_NOTICES: &str =
+    include_str!("../docs/distribution/en-US/third-party/NOTICES.txt");
 
 pub const GATES: [(&str, &str); 5] = [
     (
@@ -31,9 +79,38 @@ pub const GATES: [(&str, &str); 5] = [
     ),
 ];
 
+pub fn gates(locale: Locale) -> [(&'static str, &'static str); 5] {
+    if locale == Locale::EnUs {
+        [
+            (
+                "Delivery and publisher identity",
+                "Production packaging, pinned signature checks, bounded updates, backups and rollback scripts are implemented. A real signing identity, trusted release channel and production acceptance remain required.",
+            ),
+            (
+                "Stripe and account access",
+                "Server-side Checkout, Customer Portal and verified subscription status are implemented. Stripe configuration, approved Price/tax treatment and actual provider acceptance remain required; live commerce is not enabled by default.",
+            ),
+            (
+                "Privacy, dependency notices and support",
+                "English data-flow, support and terms drafts plus a dependency inventory are provided. Legal approval, unresolved dependency notices and binding support terms remain open.",
+            ),
+            (
+                "Operational acceptance",
+                "Local capability and build-hash inventory is available. Real RDP, Gateway, WinRM, Hyper-V, multi-monitor, provider and logged-out task scenarios still require explicit acceptance.",
+            ),
+            (
+                "English product coverage",
+                "US English is the default for new settings. Product panels and runtime messages have been translated; existing user-authored content, operating-system messages and historical engineering documents retain their source language.",
+            ),
+        ]
+    } else {
+        GATES
+    }
+}
+
 pub fn guide(locale: Locale) -> &'static str {
     match locale {
-        Locale::EnUs => include_str!("../docs/distribution/en-US/guide.md"),
+        Locale::EnUs => include_str!("../docs/distribution/en-US/manual.md"),
         Locale::De => include_str!("../docs/distribution/de/guide.md"),
         Locale::Fr => include_str!("../docs/distribution/fr/guide.md"),
         Locale::It => include_str!("../docs/distribution/it/guide.md"),
@@ -46,7 +123,7 @@ pub fn report(locale: Locale) -> serde_json::Value {
         "locale": locale.tag(), "channel": "development", "sale_ready": false,
         "checkout_enabled": false, "commercial_entitlement": false,
         "seller": SELLER, "contact": CONTACT, "source": SOURCE, "source_checked": "2026-09-13",
-        "open_requirements": GATES.iter().map(|(title,detail)| serde_json::json!({
+        "open_requirements": gates(locale).iter().map(|(title,detail)| serde_json::json!({
             "title": crate::localization::tr(locale,title), "detail":crate::localization::tr(locale,detail)
         })).collect::<Vec<_>>()
     })

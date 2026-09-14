@@ -45,7 +45,7 @@ impl Default for State {
             book: result.unwrap_or_default(),
             store_error: error,
             selected: None,
-            incident: "Die Anwendung ist nicht erreichbar.".into(),
+            incident: "The application is unreachable.".into(),
             service: "ExampleService".into(),
             application: "https://app.example.invalid/".into(),
             dependency: "https://dependency.example.invalid/health".into(),
@@ -60,7 +60,7 @@ impl Default for State {
             read_review: None,
             comparison: None,
             notice: if error {
-                "Diagnosespeicher nicht lesbar".into()
+                "Cannot read diagnostic storage".into()
             } else {
                 String::new()
             },
@@ -71,7 +71,7 @@ impl Default for State {
                 mode: Mode::Simulation,
                 scenario: Some(Scenario::Dns),
                 target: None,
-                incident: "Dev-Beispiel: Anwendung nicht erreichbar".into(),
+                incident: "Dev example: application unreachable".into(),
                 service: state.service.clone(),
                 application: state.application.clone(),
                 dependency: state.dependency.clone(),
@@ -150,7 +150,7 @@ impl State {
         let (_, id, request) = self.pending.take().unwrap();
         self.queue.clear_finished();
         let Some(result) = result else {
-            self.notice = "Prüfung ohne Abschluss; keine neue Beobachtung übernommen".into();
+            self.notice = "Check did not complete; no new observation accepted".into();
             return;
         };
         let value = d::adapter::value(&request, &result).unwrap_or(Value::Unknown);
@@ -159,7 +159,7 @@ impl State {
             match case.record(&request, value, result.finished.into()) {
                 Ok(()) => {
                     if self.save(next) {
-                        self.notice = format!("Lesende Prüfung: {}", value.label());
+                        self.notice = format!("Read-only check: {}", value.label());
                         self.clear_review();
                     }
                 }
@@ -168,64 +168,64 @@ impl State {
         }
     }
     fn draw_foresight(ui: &mut egui::Ui, case: &Case, probe: Probe, now: chrono::DateTime<Utc>) {
-        egui::CollapsingHeader::new("Was würde diese Prüfung klären?")
+        egui::CollapsingHeader::new("What would this check clarify?")
             .default_open(true)
             .show(ui, |ui| {
-                ui.label(format!("Gedankliche Vorschau: {}", probe.label()));
-                ui.label("Annahmen, keine Messwerte. Die Vorschau verändert keine Diagnose und führt keine Prüfung aus. Sie zeigt Möglichkeiten, keine Wahrscheinlichkeiten.");
+                ui.label(format!("Hypothetical preview: {}", probe.label()));
+                ui.label("Assumptions, not measurements. The preview does not change a diagnosis or run a check. It shows possibilities, not probabilities.");
                 match case.preview(probe, now) {
                     Ok(branches) => {
                         for branch in branches {
                             ui.group(|ui| {
-                                ui.strong(format!("Falls {} …", branch.assumed.label()));
+                                ui.strong(format!("If {} …", branch.assumed.label()));
                                 let causes = branch.compatible.iter().map(|p| p.cause()).collect::<Vec<_>>().join(", ");
                                 ui.label(if causes.is_empty() {
-                                    "Dann passt keine Modellhypothese: weitere Ursachen oder mehrere Fehler prüfen.".into()
+                                    "Then no model hypothesis matches: investigate other causes or multiple failures.".into()
                                 } else {
-                                    format!("Weiter möglich: {causes}")
+                                    format!("Still possible: {causes}")
                                 });
-                                ui.label(format!("Dann auswertbare Prüfungen: {}/4", branch.known));
+                                ui.label(format!("Checks that can then be evaluated: {}/4", branch.known));
                                 ui.label(branch.conclusion);
                                 if let Some(next) = branch.next {
-                                    ui.label(format!("Danach empfohlen: {}", next.label()));
+                                    ui.label(format!("Recommended next: {}", next.label()));
                                 }
                             });
                         }
                     }
-                    Err(error) => { ui.label(format!("Keine aktuelle Vorschau: {error}")); }
+                    Err(error) => { ui.label(format!("No current preview: {error}")); }
                 }
             });
     }
 
     fn draw_comparison(&mut self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new("Dev-Szenariovergleich · sieben feste Fälle")
+        egui::CollapsingHeader::new("Dev scenario comparison · seven fixed cases")
             .default_open(self.comparison.is_some())
             .show(ui, |ui| {
-            ui.label("Lokaler Modelltest im Speicher: keine Verbindungen und keine gespeicherten Diagnosefälle. Keine Messung von KI-Qualität oder realer Störungsbehebung.");
-            if ui.button("Alle sieben Simulationen vergleichen").clicked() {
+            ui.label("Local model test in memory: no connections or saved diagnostic cases. Does not measure AI quality or real incident resolution.");
+            if ui.button("Compare all seven simulations").clicked() {
                 match d::comparison::run(Utc::now()) {
                     Ok(report) => self.comparison = Some(report),
                     Err(error) => {
                         self.comparison = None;
-                        self.notice = format!("Szenariovergleich fehlgeschlagen: {error}");
+                        self.notice = format!("Scenario comparison failed: {error}");
                     }
                 }
             }
             if let Some(report) = &self.comparison {
-                ui.strong(format!("DEV-SIMULATION: {}/{} Erwartungen erfüllt", report.passed(), report.rows.len()));
-                ui.label(format!("Modell: {} · {} UTC", report.model_version, report.generated_at.format("%Y-%m-%d %H:%M:%S")));
+                ui.strong(format!("DEV SIMULATION: {}/{} expectations met", report.passed(), report.rows.len()));
+                ui.label(format!("Model: {} · {} UTC", report.model_version, report.generated_at.format("%Y-%m-%d %H:%M:%S")));
                 for row in &report.rows {
                     ui.push_id(format!("comparison-{:?}", row.scenario), |ui| {
-                        ui.collapsing(format!("{} · {} · {} Prüfungen", row.scenario.label(), if row.passed { "Erwartung erfüllt" } else { "ABWEICHUNG" }, row.steps.len()), |ui| {
-                            ui.label(format!("Erwartet: {}", row.expected.label()));
-                            ui.label(format!("Ermittelt: {}", row.actual.label()));
+                        ui.collapsing(format!("{} · {} · {} checks", row.scenario.label(), if row.passed { "Expectation met" } else { "MISMATCH" }, row.steps.len()), |ui| {
+                            ui.label(format!("Expected: {}", row.expected.label()));
+                            ui.label(format!("Determined: {}", row.actual.label()));
                             for (index, step) in row.steps.iter().enumerate() {
-                                ui.label(format!("{}. {}: {} · {} unterscheidbare Hypothesenpaare", index + 1, step.probe.label(), step.value.label(), step.distinguished_pairs));
+                                ui.label(format!("{}. {}: {} · {} distinguishable hypothesis pairs", index + 1, step.probe.label(), step.value.label(), step.distinguished_pairs));
                             }
                         });
                     });
                 }
-                if ui.button("Simulationsvergleich als JSON kopieren").clicked() {
+                if ui.button("Copy simulation comparison as JSON").clicked() {
                     match serde_json::to_string_pretty(report) {
                         Ok(json) => ui.ctx().copy_text(json),
                         Err(error) => self.notice = error.to_string(),
@@ -238,43 +238,43 @@ impl State {
     pub fn draw(&mut self, ui: &mut egui::Ui, profile: Option<&ConnectionProfile>) {
         self.poll(profile);
         self.draw_comparison(ui);
-        ui.label("Modell: ein dominanter Fehler bei Dienst, DNS, TLS oder HTTP-Abhängigkeit. Mehrere Fehler und unbekannte Ursachen bleiben ausdrücklich möglich. Übereinstimmung mit einem Modell ist kein Kausalitätsnachweis.");
+        ui.label("Model: one dominant failure in a service, DNS, TLS, or HTTP dependency. Multiple failures and unknown causes remain possible. Matching a model does not establish causation.");
         ui.add_enabled_ui(self.pending.is_none(),|ui|{
-            if ui.button("Diagnosefälle neu laden").clicked(){
+            if ui.button("Reload diagnostic cases").clicked(){
                 match Book::path().and_then(|p|Book::load(&p)){Ok(book)=>{self.book=book;self.store_error=false;self.clear_review();},Err(e)=>{self.store_error=true;self.notice=e.to_string();}}
             }
-            egui::ComboBox::from_id_salt("diagnostic_case").selected_text(self.selected.and_then(|id|self.book.cases.iter().find(|c|c.id==id)).map(|c|format!("{} · {:?}",c.config.incident,c.config.mode)).unwrap_or("Diagnosefall wählen".into())).show_ui(ui,|ui|{
+            egui::ComboBox::from_id_salt("diagnostic_case").selected_text(self.selected.and_then(|id|self.book.cases.iter().find(|c|c.id==id)).map(|c|format!("{} · {:?}",c.config.incident,c.config.mode)).unwrap_or("Select diagnostic case".into())).show_ui(ui,|ui|{
                 let mut changed=false;
                 for case in &self.book.cases {if ui.selectable_value(&mut self.selected,Some(case.id),format!("{} · {:?} · {}",case.config.incident,case.config.mode,case.created.format("%H:%M UTC"))).changed(){changed=true;}}
                 if changed{self.clear_review();}
             });
-            ui.collapsing("Neuen Diagnosefall vorbereiten",|ui|{
-                ui.horizontal_wrapped(|ui|{ui.selectable_value(&mut self.mode,Mode::Simulation,"Dev-Simulation (ohne Verbindung)");ui.selectable_value(&mut self.mode,Mode::ReadOnly,"Spätere lesende Prüfung");});
+            ui.collapsing("Prepare new diagnostic case",|ui|{
+                ui.horizontal_wrapped(|ui|{ui.selectable_value(&mut self.mode,Mode::Simulation,"Dev simulation (no connection)");ui.selectable_value(&mut self.mode,Mode::ReadOnly,"Subsequent read-only check");});
                 if self.mode==Mode::Simulation {
                     egui::ComboBox::from_id_salt("diagnostic_scenario").selected_text(self.scenario.label()).show_ui(ui,|ui|{for s in Scenario::ALL{ui.selectable_value(&mut self.scenario,s,s.label());}});
-                    ui.label("Beispielwerte und simulierte Ergebnisse; keine Aussagen über echte Systeme.");
-                }else{ui.label(format!("Ausgewähltes Profil: {}. WinRM verwendet die aktuelle Windows-Identität; es werden keine gespeicherten RDP-Passwörter übernommen.",profile.map(|p|p.name.as_str()).unwrap_or("keines")));}
-                ui.label("Störung");ui.text_edit_multiline(&mut self.incident);
-                ui.horizontal(|ui|{ui.label("Anwendungsdienst");ui.text_edit_singleline(&mut self.service);});
-                ui.horizontal(|ui|{ui.label("HTTPS-Anwendung mit DNS-Namen");ui.text_edit_singleline(&mut self.application);});
-                ui.horizontal(|ui|{ui.label("Öffentliche HTTP(S)-Abhängigkeitsprüfung");ui.text_edit_singleline(&mut self.dependency);});
-                if ui.add_enabled(!self.store_error && self.book.cases.len()<64,egui::Button::new("Fallvorschau erstellen")).clicked(){
+                    ui.label("Example values and simulated results; no claims about real systems.");
+                }else{ui.label(format!("Selected profile: {}. WinRM uses the current Windows identity; saved RDP passwords are not used.",profile.map(|p|p.name.as_str()).unwrap_or("none")));}
+                ui.label("Incident");ui.text_edit_multiline(&mut self.incident);
+                ui.horizontal(|ui|{ui.label("Application service");ui.text_edit_singleline(&mut self.service);});
+                ui.horizontal(|ui|{ui.label("HTTPS application with DNS name");ui.text_edit_singleline(&mut self.application);});
+                ui.horizontal(|ui|{ui.label("Public HTTP(S) dependency check");ui.text_edit_singleline(&mut self.dependency);});
+                if ui.add_enabled(!self.store_error && self.book.cases.len()<64,egui::Button::new("Create case preview")).clicked(){
                     let config=Config{mode:self.mode,scenario:if self.mode==Mode::Simulation{Some(self.scenario)}else{None},target:if self.mode==Mode::ReadOnly{profile.map(Target::from_profile)}else{None},incident:self.incident.clone(),service:self.service.trim().into(),application:self.application.trim().into(),dependency:self.dependency.trim().into()};
                     match config.validate(){Ok(())=>self.review=Some(config),Err(e)=>self.notice=e.to_string()}
                 }
                 if let Some(config)=self.review.clone(){
                     ui.group(|ui|{
-                        ui.strong("Eingefrorene Fallkonfiguration");
-                        ui.label(format!("Störung: {}",config.incident));
-                        ui.label(format!("{:?} · {}\nDienst: {}\nAnwendung: {}\nAbhängigkeit: {}",config.mode,config.target.as_ref().map(|t|t.host.as_str()).unwrap_or("kein Host"),config.service,config.application,config.dependency));
-                        ui.label("Speichern führt keine Prüfung aus. Jede reale Leseprüfung benötigt anschließend eine eigene Vorschau und Freigabe.");
-                        if ui.add_enabled(!self.store_error,egui::Button::new("Diesen Fall speichern")).clicked(){
+                        ui.strong("Frozen case configuration");
+                        ui.label(format!("Incident: {}",config.incident));
+                        ui.label(format!("{:?} · {}\nService: {}\nApplication: {}\nDependency: {}",config.mode,config.target.as_ref().map(|t|t.host.as_str()).unwrap_or("no host"),config.service,config.application,config.dependency));
+                        ui.label("Saving does not run a check. Each real read-only check then requires its own preview and approval.");
+                        if ui.add_enabled(!self.store_error,egui::Button::new("Save this case")).clicked(){
                             match Case::new(config,Utc::now()){
                                 Ok(case)=>{let id=case.id;let mut next=self.book.clone();next.cases.push(case);if self.save(next){self.selected=Some(id);self.review=None;self.clear_review();}}
                                 Err(e)=>self.notice=e.to_string(),
                             }
                         }
-                        if ui.button("Fallvorschau verwerfen").clicked(){self.review=None;}
+                        if ui.button("Discard case preview").clicked(){self.review=None;}
                     });
                 }
             });
@@ -288,22 +288,22 @@ impl State {
             let assessment = case.assess(now);
             ui.separator();
             ui.strong(if case.config.mode == Mode::Simulation {
-                "DEV-SIMULATION — keine echte Systembeobachtung"
+                "DEV SIMULATION — no actual system observation"
             } else {
-                "Lesende Diagnose — keine Reparaturfreigabe"
+                "Read-only diagnosis — no repair approval"
             });
             ui.label(&case.config.incident);
             ui.label(format!(
-                "Prüfumgebung: {} · Dienst: {}",
+                "Check environment: {} · Service: {}",
                 case.config
                     .target
                     .as_ref()
                     .map(|t| t.host.as_str())
-                    .unwrap_or("lokales Dev-Szenario"),
+                    .unwrap_or("local dev scenario"),
                 case.config.service
             ));
             if let Some(s) = case.config.scenario {
-                ui.label(format!("Simuliertes Szenario: {}", s.label()));
+                ui.label(format!("Simulated scenario: {}", s.label()));
             }
             ui.label(assessment.conclusion());
             for c in &assessment.candidates {
@@ -312,83 +312,83 @@ impl State {
                         "{} · {}",
                         c.cause.cause(),
                         if c.contradicts.is_empty() {
-                            "noch vereinbar"
+                            "still consistent"
                         } else {
-                            "widerspricht Beobachtungen"
+                            "contradicts observations"
                         }
                     ),
                     |ui| {
                         for p in &c.supports {
-                            ui.label(format!("Passt zur Erwartung: {}", p.label()));
+                            ui.label(format!("Matches expectation: {}", p.label()));
                         }
                         for p in &c.contradicts {
-                            ui.label(format!("Widerspruch: {}", p.label()));
+                            ui.label(format!("Contradiction: {}", p.label()));
                         }
                         for p in &c.missing {
-                            ui.label(format!("Fehlt oder nicht feststellbar: {}", p.label()));
+                            ui.label(format!("Missing or undetermined: {}", p.label()));
                         }
                     },
                 );
             }
             if let Some(next) = assessment.next {
                 if assessment.pairs == 0 {
-                    ui.label(format!("Weitere Modellprüfung nötig: {}", next.label()));
+                    ui.label(format!("Further model check needed: {}", next.label()));
                 } else {
                     ui.label(format!(
-                        "Nächste lokale Empfehlung: {} · unterscheidet {} Hypothesenpaare",
+                        "Next local recommendation: {} · distinguishes {} hypothesis pairs",
                         next.label(),
                         assessment.pairs
                     ));
                 }
             }
             ui.add_enabled_ui(self.pending.is_none() && !self.store_error,|ui|{
-                egui::ComboBox::from_id_salt("diagnostic_probe").selected_text(self.chosen.or(assessment.next).map(|p|p.label()).unwrap_or("Keine Prüfung verfügbar")).show_ui(ui,|ui|{
+                egui::ComboBox::from_id_salt("diagnostic_probe").selected_text(self.chosen.or(assessment.next).map(|p|p.label()).unwrap_or("No check available")).show_ui(ui,|ui|{
                     for p in Probe::ALL {if case.request(p,now).is_ok(){ui.selectable_value(&mut self.chosen,Some(p),p.label());}}
                 });
             if let Some(probe)=self.chosen.or(assessment.next).filter(|p|case.request(*p,now).is_ok()){
                 Self::draw_foresight(ui, &case, probe, now);
                 if case.config.mode==Mode::Simulation {
-                        if ui.button("Diese Prüfung lokal simulieren").clicked(){
+                        if ui.button("Simulate this check locally").clicked(){
                             let mut next=self.book.clone();let selected=next.cases.iter_mut().find(|c|c.id==case.id).unwrap();
-                            match selected.simulate(probe,now){Ok(())=>{if self.save(next){self.clear_review();self.notice="Simulierte Beobachtung gespeichert".into();}},Err(e)=>self.notice=e.to_string()}
+                            match selected.simulate(probe,now){Ok(())=>{if self.save(next){self.clear_review();self.notice="Simulated observation saved".into();}},Err(e)=>self.notice=e.to_string()}
                         }
                     } else {
                         let matches=profile.is_some_and(|p|case.config.target.as_ref().is_some_and(|t|t.matches(p)));
-                        if ui.add_enabled(matches,egui::Button::new("Lesende Prüfung vorbereiten …")).clicked(){self.read_review=case.request(probe,now).ok().map(|r|(case.id,r));}
-                        if !matches{ui.label("Das gespeicherte Windows-Profil muss unverändert ausgewählt sein.");}
+                        if ui.add_enabled(matches,egui::Button::new("Prepare read-only check …")).clicked(){self.read_review=case.request(probe,now).ok().map(|r|(case.id,r));}
+                        if !matches{ui.label("The saved Windows profile must remain selected and unchanged.");}
                     }
                 }
                 if let Some((id,request))=self.read_review.clone().filter(|(id,_)|*id==case.id){
                     if let Ok(spec)=d::adapter::build(&case,&request){
-                        ui.collapsing("Exakten Leseauftrag prüfen",|ui|{ui.monospace(spec.preview());});
-                        ui.label(format!("Liest auf {}: {}. Keine Dienst- oder VM-Änderung.",case.config.target.as_ref().map(|t|t.host.as_str()).unwrap_or("—"),request.probe.label()));
+                        ui.collapsing("Review exact read-only job",|ui|{ui.monospace(spec.preview());});
+                        ui.label(format!("Reads on {}: {}. No service or VM changes.",case.config.target.as_ref().map(|t|t.host.as_str()).unwrap_or("—"),request.probe.label()));
                         let current=profile.is_some_and(|p|case.config.target.as_ref().is_some_and(|t|t.matches(p))) && now>=request.started && now.signed_duration_since(request.started)<chrono::Duration::seconds(120) && case.request(request.probe,now).is_ok();
-                        if ui.add_enabled(current,egui::Button::new("Diesen Leseauftrag jetzt freigeben")).clicked(){
+                        if ui.add_enabled(current,egui::Button::new("Approve this read-only job now")).clicked(){
                             // Refresh execution timestamp without changing the reviewed command identity.
                             let mut request=request;request.started=Utc::now();
                             match self.queue.enqueue(spec){Ok(job)=>{self.pending=Some((job,id,request));self.read_review=None;},Err(e)=>self.notice=e}
                         }
-                        if ui.button("Leseauftrag verwerfen").clicked(){self.read_review=None;}
+                        if ui.button("Discard read-only job").clicked(){self.read_review=None;}
                     }
                 }
-                ui.collapsing("KI-Prüfvorschlag offline vorbereiten",|ui|{
-                    ui.label("Kopiert einen strukturierten Auftrag mit Störung und aktuellen Prüfergebnissen. Keine Hostnamen aus Profilen, Zugangsdaten oder API-Aufrufe. KI-Text wird niemals zum Befund oder ausführbaren Code.");
-                    if ui.button("KI-Prüfauftrag kopieren").clicked(){match case.ai_prompt(now){Ok(text)=>ui.ctx().copy_text(text),Err(e)=>self.notice=e.to_string()}}
-                    if ui.add(egui::TextEdit::multiline(&mut self.ai_json).hint_text("JSON-Vorschlag einfügen").desired_rows(3)).changed(){self.ai_preview=None;}
-                    if ui.button("Vorschlag prüfen").clicked(){match case.proposal(&self.ai_json,now){Ok(p)=>self.ai_preview=Some(p),Err(e)=>{self.ai_preview=None;self.notice=e.to_string();}}}
+                ui.collapsing("Prepare AI check suggestion offline",|ui|{
+                    ui.label("Copies a structured request with the incident and current check results. No hostnames from profiles, credentials, or API calls. AI text never becomes a finding or executable code.");
+                    if ui.button("Copy AI check request").clicked(){match case.ai_prompt(now){Ok(text)=>ui.ctx().copy_text(text),Err(e)=>self.notice=e.to_string()}}
+                    if ui.add(egui::TextEdit::multiline(&mut self.ai_json).hint_text("Paste JSON suggestion").desired_rows(3)).changed(){self.ai_preview=None;}
+                    if ui.button("Review suggestion").clicked(){match case.proposal(&self.ai_json,now){Ok(p)=>self.ai_preview=Some(p),Err(e)=>{self.ai_preview=None;self.notice=e.to_string();}}}
                     if let Some(p)=&self.ai_preview{
                         ui.label(format!("{}: {}",p.probe.label(),p.rationale));
-                        if ui.button("Geprüfte Prüfauswahl übernehmen").clicked(){match case.proposal(&self.ai_json,now){Ok(p)=>{self.chosen=Some(p.probe);self.ai_preview=None;self.read_review=None;},Err(e)=>self.notice=e.to_string()}}
+                        if ui.button("Adopt reviewed check selection").clicked(){match case.proposal(&self.ai_json,now){Ok(p)=>{self.chosen=Some(p.probe);self.ai_preview=None;self.read_review=None;},Err(e)=>self.notice=e.to_string()}}
                     }
                 });
-                if ui.button("Diagnosebericht als JSON kopieren").clicked(){
+                if ui.button("Copy diagnostic report as JSON").clicked(){
                     if let Ok(text)=serde_json::to_string_pretty(&serde_json::json!({"kind":"diagnostic-model-report","not_a_causal_or_repair_proof":true,"mode":case.config.mode,"case":case,"conclusion":assessment.conclusion(),"as_of":now})){ui.ctx().copy_text(text);}
                 }
             });
-            ui.collapsing("Beobachtungsverlauf", |ui| {
+            ui.collapsing("Observation history", |ui| {
                 for o in case.observations.iter().rev() {
                     ui.label(format!(
-                        "{} · {:?} · {}: {} · Auftrag {}",
+                        "{} · {:?} · {}: {} · Job {}",
                         o.at.format("%H:%M:%S UTC"),
                         o.mode,
                         o.probe.label(),
@@ -397,13 +397,13 @@ impl State {
                     ));
                 }
                 ui.label(
-                    "Nur Beobachtungen der letzten fünf Minuten tragen die aktuelle Bewertung.",
+                    "Only observations from the last five minutes contribute to the current assessment.",
                 );
             });
         }
         if self.pending.is_some() {
             ui.spinner();
-            if ui.button("Leseprüfung abbrechen").clicked() {
+            if ui.button("Cancel read-only check").clicked() {
                 if let Some((id, _, _)) = &self.pending {
                     if let Some(job) = self.queue.jobs.iter().find(|j| j.id == *id) {
                         job.cancel();
@@ -416,7 +416,7 @@ impl State {
         if self.store_error {
             ui.colored_label(
                 egui::Color32::RED,
-                "Speicherproblem: Übernahmen sind bis zum erfolgreichen Neuladen gesperrt.",
+                "Storage problem: adopting results is blocked until reloading succeeds.",
             );
         }
         ui.label(&self.notice);

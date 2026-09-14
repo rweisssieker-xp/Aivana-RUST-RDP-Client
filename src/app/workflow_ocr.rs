@@ -33,7 +33,7 @@ fn verify_current_screen(
         || elapsed.num_seconds() > 20
     {
         return Err(
-            "Neues Bild nach Beginn des Prüfschritts erforderlich; Bild geändert oder veraltet"
+            "A new image captured after the check started is required; image changed or outdated"
                 .into(),
         );
     }
@@ -87,28 +87,28 @@ impl AivanaApp {
         {
             self.workflow_ocr.pending = None;
             self.workflow_ocr.notice =
-                "Prüfschritt geändert oder OCR-Zeitlimit erreicht; kein Nachweis übernommen."
+                "Check changed or OCR timed out; no evidence accepted."
                     .into();
             return;
         }
         let result = match p.receiver.try_recv() {
             Ok(r) => r,
             Err(mpsc::TryRecvError::Empty) => return,
-            Err(_) => Err("OCR-Worker beendet".into()),
+            Err(_) => Err("OCR worker stopped".into()),
         };
         let p = self.workflow_ocr.pending.take().unwrap();
         let result=result.and_then(|screen|{
-            if self.checkpoint_session(&p.request.1)!=Some((p.session,p.connected)){return Err("Zielsitzung oder Profil geändert".into())}
-            let frame=self.latest_frames.get(&p.session).ok_or("Sitzungsbild fehlt")?;
+            if self.checkpoint_session(&p.request.1)!=Some((p.session,p.connected)){return Err("Target session or profile changed".into())}
+            let frame=self.latest_frames.get(&p.session).ok_or("Session image missing")?;
             verify_current_screen(&screen,frame,p.activated,Utc::now(),&p.request.2)?;
-            Ok(format!("Lokaler OCR-Nachweis: eindeutiger erwarteter Text im aktuellen Bild; Sitzung {}; Verbindungsbeginn {}; Bild {:016x}; Bildzeit {}. Sichtbarer Zustand, kein fachlicher Kausalitätsnachweis.",p.session,p.connected,screen.frame_hash,screen.captured_at))
+            Ok(format!("Local OCR evidence: unique expected text in the current image; session {}; connection started {}; frame {:016x}; image time {}. Visible state, not evidence of business causation.",p.session,p.connected,screen.frame_hash,screen.captured_at))
         });
         self.workflow_ocr.notice = match result {
             Ok(evidence) => {
                 if self.workflow_submit_ocr_evidence(&p.request.0, evidence) {
-                    "Sichtbarer Zustand nachgewiesen; Auftrag fortgesetzt.".into()
+                    "Visible state verified; job resumed.".into()
                 } else {
-                    "Prüfschritt nicht mehr aktiv; Nachweis verworfen.".into()
+                    "Check is no longer active; evidence discarded.".into()
                 }
             }
             Err(e) => e,
@@ -120,23 +120,23 @@ impl AivanaApp {
             return;
         };
         ui.separator();
-        ui.strong("Alternativ: sichtbaren Zustand lokal nachweisen");
-        ui.label("Für OCR muss das Ziel dem Host oder der Profil-ID der ausgewählten verbundenen RDP-Sitzung entsprechen. Die Erwartung ist ein exakt sichtbares, eindeutig vorkommendes Wort.");
+        ui.strong("Alternatively: verify visible state locally");
+        ui.label("For OCR, the target must match the host or profile ID of the selected connected RDP session. The expected text must be an exact, visible word that occurs only once.");
         if ui
             .add_enabled(
                 self.workflow_ocr.pending.is_none(),
-                egui::Button::new("Aktuelles Zielbild mit OCR prüfen und bei Treffer fortsetzen"),
+                egui::Button::new("Check current target image with OCR and continue if matched"),
             )
             .clicked()
         {
             let result = (|| -> Result<Pending, String> {
                 let (session, connected) = self
                     .checkpoint_session(&request.1)
-                    .ok_or("Passende verbundene RDP-Sitzung auswählen")?;
+                    .ok_or("Select a matching connected RDP session")?;
                 let frame = self
                     .latest_frames
                     .get(&session)
-                    .ok_or("Bild fehlt")?
+                    .ok_or("Image missing")?
                     .clone();
                 let activated = self
                     .workflow_ocr
@@ -144,24 +144,24 @@ impl AivanaApp {
                     .as_ref()
                     .filter(|(token, _)| *token == request.0)
                     .map(|(_, at)| *at)
-                    .ok_or("Prüfschritt wird initialisiert; erneut versuchen")?;
+                    .ok_or("Check is initializing; try again")?;
                 if frame.captured_at < activated {
                     return Err(
-                        "Zuerst ein neues Sitzungsbild nach Beginn dieses Prüfschritts empfangen"
+                        "Receive a new session image after this check started first"
                             .into(),
                     );
                 }
                 if frame.pixels_rgba.len() > 32 * 1024 * 1024 {
-                    return Err("Bild überschreitet OCR-Grenze".into());
+                    return Err("Image exceeds OCR limit".into());
                 }
                 if !crate::vision::safe_anchor_text(&request.2) {
-                    return Err("Erwartung ist kein zulässiger Textanker".into());
+                    return Err("Expected text is not a valid text anchor".into());
                 }
                 let (tx, receiver) = mpsc::channel();
                 std::thread::spawn(move || {
                     let _ = tx.send(
                         crate::vision::recognize(&frame)
-                            .map_err(|_| "Lokale OCR fehlgeschlagen".into()),
+                            .map_err(|_| "Local OCR failed".into()),
                     );
                 });
                 Ok(Pending {
@@ -176,7 +176,7 @@ impl AivanaApp {
             match result {
                 Ok(p) => {
                     self.workflow_ocr.pending = Some(p);
-                    self.workflow_ocr.notice = "Bild wird lokal geprüft …".into()
+                    self.workflow_ocr.notice = "Checking image locally …".into()
                 }
                 Err(e) => self.workflow_ocr.notice = e,
             }

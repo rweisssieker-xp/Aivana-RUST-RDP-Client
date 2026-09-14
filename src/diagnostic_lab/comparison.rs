@@ -12,7 +12,7 @@ impl Outcome {
     pub fn label(self) -> String {
         match self {
             Self::ModelMatch(probe) => format!("Modell passt: {}", probe.cause()),
-            Self::ModelGap => "Modelllücke / Widerspruch".into(),
+            Self::ModelGap => "Model gap / contradiction".into(),
             Self::InsufficientEvidence => "Datenlage unzureichend".into(),
         }
     }
@@ -95,7 +95,7 @@ pub fn run(now: DateTime<Utc>) -> Result<Report> {
                 value: case
                     .observations
                     .last()
-                    .context("Simulation ohne Ergebnis")?
+                    .context("Simulation returned no result")?
                     .value,
                 distinguished_pairs: assessment.pairs,
             });
@@ -103,7 +103,7 @@ pub fn run(now: DateTime<Utc>) -> Result<Report> {
         let assessment = case.assess(now);
         ensure!(
             assessment.next.is_none(),
-            "Szenario überschreitet das Prüflimit"
+            "Scenario exceeds the check limit"
         );
         let actual = outcome(&assessment);
         rows.push(Row {

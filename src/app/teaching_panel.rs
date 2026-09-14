@@ -24,7 +24,7 @@ pub(super) fn send_teaching_manual_input(
     action: InputAction,
 ) -> anyhow::Result<()> {
     if teaching.run.is_some() {
-        teaching.cancel_run("Manuelle Eingabe hat Gesamtablauf angehalten");
+        teaching.cancel_run("Manual input paused the entire workflow");
         engine.release_inputs(session);
     }
     engine.send_manual_input(session, action.clone())?;
@@ -80,7 +80,7 @@ impl TeachingState {
                 self.target_results.remove(0);
             }
             self.target_results
-                .push(format!("Ziel {:?}: {reason}", self.target));
+                .push(format!("Target {:?}: {reason}", self.target));
         }
         self.parameters.clear();
         self.whole_reviewed = false;
@@ -180,7 +180,9 @@ impl TeachingState {
                     false
                 };
                 if !queued {
-                    self.teacher.notice="OCR ausgelastet oder exaktes Bild fehlt: Klick benötigt manuelle Verankerung".into();
+                    self.teacher.notice =
+                        "OCR is busy or exact image is missing: click requires a manual anchor"
+                            .into();
                 }
             }
         }
@@ -235,7 +237,7 @@ impl TeachingState {
                                         ));
                                     }
                                     self.teacher.notice =
-                                        format!("Schritt {} benötigt Anker: {e}", result.index + 1)
+                                        format!("Step {} requires an anchor: {e}", result.index + 1)
                                 }
                             }
                         }
@@ -259,7 +261,7 @@ impl TeachingState {
         self.teacher.observe_at(id, action, size, at);
     }
     fn reset_replay(&mut self) {
-        self.cancel_run("Gesamtablauf zurückgesetzt; Freigabe verworfen");
+        self.cancel_run("Entire workflow reset; approval discarded");
         self.cursor = 0;
         self.target = None;
         self.approved = false;
@@ -294,7 +296,7 @@ impl AivanaApp {
                 && self.teaching.run.is_none()
                 && !self.teaching.awaiting_evidence
                 && self.teaching.anchor_rx.is_none(),
-            "Demonstration oder Wiedergabe bereits aktiv"
+            "Demonstration or replay is already active"
         );
         let candidates: Vec<Uuid> = self
             .sessions
@@ -312,7 +314,7 @@ impl AivanaApp {
             .collect();
         let [id] = candidates.as_slice() else {
             anyhow::bail!(
-                "Workflow benötigt genau eine verbundene direkte RDP-Sitzung für dieses Ziel"
+                "Workflow requires exactly one connected direct RDP session for this target"
             );
         };
         let id = *id;
@@ -321,12 +323,12 @@ impl AivanaApp {
                 self.session_sources
                     .get(&id)
                     .is_some_and(|source| source.same_endpoint(&binding)),
-                "Workflow-Zielidentität wurde seit Freigabe verändert"
+                "Workflow target identity changed since approval"
             );
         }
         anyhow::ensure!(
             self.latest_frames.contains_key(&id),
-            "Aktuelles RDP-Zielbild fehlt"
+            "Current RDP target image is missing"
         );
         let identity = self.teaching_profile_identity(id)?;
         let approval = crate::transferable::RunApproval::new(
@@ -352,7 +354,7 @@ impl AivanaApp {
     pub(super) fn workflow_procedure_status(&self, token: Uuid) -> Option<Result<(), String>> {
         match &self.teaching.workflow_run {
             Some((id, result)) if *id == token => result.clone(),
-            _ => Some(Err("RDP-Ablaufzuordnung fehlt oder wurde ersetzt".into())),
+            _ => Some(Err("RDP workflow mapping is missing or was replaced".into())),
         }
     }
     pub(super) fn cancel_workflow_procedure(&mut self, token: Uuid) {
@@ -366,7 +368,7 @@ impl AivanaApp {
                 self.engine.release_inputs(id);
             }
             self.teaching
-                .cancel_run("Workflow hat den RDP-Ablauf angehalten");
+                .cancel_run("Workflow paused the RDP procedure");
         }
     }
     pub(super) fn poll_teaching(&mut self) {
@@ -390,7 +392,7 @@ impl AivanaApp {
                 self.teaching.teacher.stop();
                 self.engine.release_inputs(id);
                 self.teaching.teacher.notice =
-                    "Aufnahme gestoppt: Verbindung oder Bildgröße geändert".into();
+                    "Recording stopped: connection or image dimensions changed".into();
             }
         }
         if let Some(id) = self.teaching.target {
@@ -403,8 +405,7 @@ impl AivanaApp {
             if !valid {
                 self.engine.release_inputs(id);
                 self.teaching.reset_replay();
-                self.teaching.teacher.notice =
-                    "Wiedergabe zurückgesetzt: Ziel oder Verbindung geändert".into();
+                self.teaching.teacher.notice = "Replay reset: target or connection changed".into();
             }
         }
         self.poll_teaching_assertions();
@@ -415,20 +416,18 @@ impl AivanaApp {
             .sessions
             .iter()
             .find(|s| s.id == id && s.status == SessionStatus::Connected)
-            .ok_or_else(|| anyhow::anyhow!("Zielsitzung nicht verbunden"))?;
+            .ok_or_else(|| anyhow::anyhow!("Target session is not connected"))?;
         let profile = self
             .profiles
             .iter()
             .find(|p| p.id == session.profile_id)
-            .ok_or_else(|| anyhow::anyhow!("Zielprofil fehlt"))?;
+            .ok_or_else(|| anyhow::anyhow!("Target profile is missing"))?;
         if !self
             .session_sources
             .get(&id)
             .is_some_and(|source| source.matches(profile))
         {
-            anyhow::bail!(
-                "Zielprofil stimmt nicht mehr mit der tatsächlich verbundenen Sitzung überein"
-            );
+            anyhow::bail!("Target profile no longer matches the actual connected session");
         }
         Ok(serde_json::to_vec(&(profile, session.connected_at))?)
     }
@@ -450,13 +449,13 @@ impl AivanaApp {
             });
         if !valid {
             self.teaching
-                .cancel_run("Freigabe abgelaufen oder Ziel/Profil/Ablauf/Parameter geändert");
+                .cancel_run("Approval expired or target/profile/workflow/parameters changed");
             self.engine.release_inputs(id);
             return;
         }
         if self.teaching.final_verified.is_some() {
             self.teaching
-                .cancel_run("Abgeschlossen: konfigurierte sichtbare Endbedingung nachgewiesen");
+                .cancel_run("Abgeschlossen: konfigurierte sichtbare Final condition nachgewiesen");
             self.engine.release_inputs(id);
             return;
         }
@@ -466,7 +465,7 @@ impl AivanaApp {
             return;
         }
         let Some(frame) = self.latest_frames.get(&id) else {
-            self.teaching.cancel_run("Zielbild fehlt");
+            self.teaching.cancel_run("Target image is missing");
             return;
         };
         let stamp = (id, frame.frame_hash, frame.captured_at);
@@ -482,7 +481,7 @@ impl AivanaApp {
                 .get_or_insert_with(std::time::Instant::now);
             if since.elapsed() > std::time::Duration::from_secs(20) {
                 self.teaching
-                    .cancel_run("Frische OCR vor Eingabe nicht verfügbar; Gesamtablauf angehalten");
+                    .cancel_run("Fresh OCR is unavailable before input; entire workflow paused");
                 return;
             }
             if !self.vision.is_busy() && self.teaching.dispatch_scan != Some(stamp) {
@@ -513,7 +512,7 @@ impl AivanaApp {
                 .iter()
                 .any(|a| crate::policy::PolicyEngine.decision_for(a) == PolicyDecision::Deny)
             {
-                anyhow::bail!("Richtlinie sperrt Schritt");
+                anyhow::bail!("Policy blocks step");
             }
             // Resolve and send in this same UI turn; no cached source coordinates or frame approval.
             if self
@@ -522,7 +521,7 @@ impl AivanaApp {
                 .map(|f| (f.session_id, f.frame_hash, f.captured_at))
                 != Some(stamp)
             {
-                anyhow::bail!("Zielbild während Auflösung geändert");
+                anyhow::bail!("Target image changed during resolution");
             }
             for action in actions {
                 self.engine.send_input(id, action)?;
@@ -539,10 +538,9 @@ impl AivanaApp {
                 self.teaching.dispatch_scan = None;
                 self.teaching.dispatch_wait = None;
             }
-            Err(e) => self.teaching.cancel_run(&format!(
-                "Schritt {} angehalten: {e}",
-                self.teaching.cursor + 1
-            )),
+            Err(e) => self
+                .teaching
+                .cancel_run(&format!("Step {} paused: {e}", self.teaching.cursor + 1)),
         }
     }
     fn poll_teaching_assertions(&mut self) {
@@ -581,12 +579,12 @@ impl AivanaApp {
             Ok(bounds) => {
                 let stamp = (id, frame.frame_hash, frame.captured_at);
                 let scope = if final_check {
-                    "Endbedingung".to_owned()
+                    "Final condition".to_owned()
                 } else {
-                    format!("Schritt {}", self.teaching.cursor + 1)
+                    format!("Step {}", self.teaching.cursor + 1)
                 };
                 let entry = format!(
-                    "{scope}: erwartetes Wort '{}' sichtbar bei {:?} · Bild {:016x} · {} (OCR; kein Backend-Nachweis)",
+                    "{scope}: expected word '{}' visible at {:?} · Image {:016x} · {} (OCR; no backend evidence)",
                     expected.label,
                     bounds.center(),
                     frame.frame_hash,
@@ -600,8 +598,7 @@ impl AivanaApp {
                     self.teaching.cursor += 1;
                     self.teaching.awaiting_evidence = false;
                 }
-                self.status =
-                    "Erwarteter sichtbarer Zustand im aktuellen Zielbild nachgewiesen".into();
+                self.status = "Expected visible state evidenced in the current target image".into();
                 return;
             }
             Err(e) => {
@@ -621,7 +618,7 @@ impl AivanaApp {
                     )
                 {
                     self.teaching.cancel_run(&format!(
-                        "Erwarteter sichtbarer Zustand fehlt oder ist mehrdeutig: {e}"
+                        "Expected visible state is missing or ambiguous: {e}"
                     ));
                     self.engine.release_inputs(id);
                     return;
@@ -635,10 +632,10 @@ impl AivanaApp {
         if started.elapsed() > std::time::Duration::from_secs(30)
             || self.teaching.evidence_attempts >= 8
         {
-            self.teaching.evidence_notice="Ergebnisprüfung angehalten (30 Sekunden / 8 Bilder). Zustand prüfen und nur die OCR-Prüfung erneut starten.".into();
+            self.teaching.evidence_notice="Result check paused (30 seconds / 8 images). Review the state and restart only the OCR check.".into();
             if self.teaching.run.is_some() {
                 self.teaching
-                    .cancel_run("Ergebnisprüfung abgelaufen; Gesamtablauf angehalten");
+                    .cancel_run("Result check expired; entire workflow paused");
                 self.engine.release_inputs(id);
             }
             return;
@@ -659,8 +656,8 @@ impl AivanaApp {
         }
     }
     pub(super) fn teaching_view(&mut self, ui: &mut Ui) {
-        ui.heading("Vormachen → wiederverwendbarer Ablauf");
-        ui.label("Bis zu 200 Schritte aus manuellen Eingaben einer Sitzung. Texte, normale Tasten und Tastenkombinationen werden nur als Platzhalter gespeichert. Zwischenablage, Mausbewegungen und Ziehen werden ausgelassen.");
+        ui.heading("Demonstrate → reusable workflow");
+        ui.label("Up to 200 steps from manual input in one session. Text, regular keys, and key combinations are saved only as placeholders. Clipboard, mouse motion, and dragging are omitted.");
         let session = self.selected_session().cloned();
         let size = session
             .as_ref()
@@ -671,16 +668,16 @@ impl AivanaApp {
             .is_some_and(|s| s.status == SessionStatus::Connected)
             && size.is_some();
         if let Some(s) = &session {
-            ui.label(format!("Ausgewähltes Ziel: {}", s.title));
+            ui.label(format!("Selected target: {}", s.title));
         } else {
-            ui.label("Bitte zuerst eine Sitzung auswählen.");
+            ui.label("Select a session first.");
         }
         let recording = self.teaching.teacher.session.is_some();
         ui.horizontal_wrapped(|ui| {
             if ui
                 .add_enabled(
                     connected && !recording && self.teaching.anchor_rx.is_none(),
-                    egui::Button::new("Neue Demonstration starten"),
+                    egui::Button::new("Start new demonstration"),
                 )
                 .clicked()
             {
@@ -692,11 +689,10 @@ impl AivanaApp {
                 self.teaching.source = session.as_ref().map(|s| s.id);
                 self.teaching.start_anchors();
                 self.status =
-                    "Demonstration aktiv: manuelle Eingaben im Remote-Desktop werden erfasst"
-                        .into();
+                    "Demonstration active: manual remote desktop input is being captured".into();
             }
             if ui
-                .add_enabled(recording, egui::Button::new("Demonstration stoppen"))
+                .add_enabled(recording, egui::Button::new("Stop demonstration"))
                 .clicked()
             {
                 if let Some(id) = self.teaching.teacher.session {
@@ -707,7 +703,7 @@ impl AivanaApp {
             if ui
                 .add_enabled(
                     !recording && self.teaching.anchor_rx.is_none(),
-                    egui::Button::new("Gespeicherten Ablauf laden"),
+                    egui::Button::new("Load saved workflow"),
                 )
                 .clicked()
             {
@@ -716,23 +712,22 @@ impl AivanaApp {
                         self.teaching.reset_replay();
                         self.teaching.source = None;
                         self.teaching.teacher.procedure = p;
-                        self.status =
-                            "Verschlüsselten Ablauf geladen; vor jedem Schritt prüfen".into();
+                        self.status = "Encrypted workflow loaded; review before each step".into();
                     }
-                    Err(e) => self.status = format!("Ablauf laden: {e:#}"),
+                    Err(e) => self.status = format!("Load workflow: {e:#}"),
                 }
             }
         });
         if recording {
             ui.colored_label(
                 tw::RED_600,
-                "● Demonstration aktiv – nur die beim Start gewählte Sitzung wird erfasst",
+                "● Demonstration active – only the session selected at startup is captured",
             );
         }
         ui.label(&self.teaching.teacher.notice);
         if self.teaching.anchor_rx.is_some() {
             ui.label(
-                "Lokale OCR der Demonstration läuft; maximal ein Worker und zwei wartende Bilder.",
+                "Local demonstration OCR is running; at most one worker and two queued images.",
             );
         }
         let editable = !recording
@@ -746,16 +741,16 @@ impl AivanaApp {
                 .add(
                     egui::TextEdit::singleline(&mut p.title)
                         .char_limit(256)
-                        .hint_text("Titel"),
+                        .hint_text("Title"),
                 )
                 .changed();
             ui.label(format!(
-                "Aufgezeichnetes Bild: {} × {} · {} Schritte",
+                "Recorded image: {} × {} · {} steps",
                 p.dimensions.0,
                 p.dimensions.1,
                 p.steps.len()
             ));
-            ui.label("Erfolgskriterium (im Remote-Bild manuell zu prüfen):");
+            ui.label("Success criterion (verify manually in the remote image):");
             changed |= ui
                 .add(
                     egui::TextEdit::multiline(&mut p.success)
@@ -763,7 +758,7 @@ impl AivanaApp {
                         .desired_rows(2),
                 )
                 .changed();
-            ui.label("Wiederherstellung bei Abweichung (keine Zugangsdaten eintragen):");
+            ui.label("Recovery on deviation (do not enter credentials):");
             changed |= ui
                 .add(
                     egui::TextEdit::multiline(&mut p.recovery)
@@ -771,14 +766,14 @@ impl AivanaApp {
                         .desired_rows(2),
                 )
                 .changed();
-            ui.label("OCR-Nachbedingungen prüfen ein sichtbares Wort samt optionalem Kontext. Sie beweisen keine Backend-Transaktion; wählen Sie einen aussagekräftigen Status.");
+            ui.label("OCR postconditions check a visible word with optional context. They do not prove a backend transaction; choose a meaningful status.");
             let mut final_enabled=p.expected_final.is_some();
-            if ui.checkbox(&mut final_enabled,"Sichtbare Endbedingung automatisch prüfen").changed() {
+            if ui.checkbox(&mut final_enabled,"Automatically verify visible final condition").changed() {
                 p.expected_final=final_enabled.then(||crate::vision::Anchor{label:String::new(),context:String::new()});changed=true;
             }
             if let Some(anchor)=&mut p.expected_final {
-                changed |= ui.add(egui::TextEdit::singleline(&mut anchor.label).char_limit(256).hint_text("Erwartetes Endstatus-Wort")).changed();
-                changed |= ui.add(egui::TextEdit::singleline(&mut anchor.context).char_limit(256).hint_text("Kontext der Endbedingung")).changed();
+                changed |= ui.add(egui::TextEdit::singleline(&mut anchor.label).char_limit(256).hint_text("Expected final status word")).changed();
+                changed |= ui.add(egui::TextEdit::singleline(&mut anchor.context).char_limit(256).hint_text("Final condition context")).changed();
             }
             let mut remove = None;
             let mut up = None;
@@ -792,7 +787,7 @@ impl AivanaApp {
                                 ui.label(format!("{}. {}", i + 1, step_label(step)));
                                 match step {
                                     Step::TextRequired => {
-                                        if ui.small_button("Parameter benennen").clicked() {
+                                        if ui.small_button("Name parameter").clicked() {
                                             *step = Step::Parameter {
                                                 name: format!("eingabe_{}", i + 1),
                                             };
@@ -812,7 +807,7 @@ impl AivanaApp {
                                     }
                                     _ => {}
                                 }
-                                if ui.small_button("Entfernen").clicked() {
+                                if ui.small_button("Remove").clicked() {
                                     remove = Some(i);
                                 }
                                 if i > 0 && ui.small_button("↑").clicked() {
@@ -820,15 +815,15 @@ impl AivanaApp {
                                 }
                             });
                             let mut enabled=p.expected_after.contains_key(&i);
-                            if ui.checkbox(&mut enabled,"Sichtbaren Zustand nach diesem Schritt automatisch prüfen").changed() {
+                            if ui.checkbox(&mut enabled,"Automatically verify visible state after this step").changed() {
                                 if enabled {p.expected_after.insert(i,crate::vision::Anchor{label:String::new(),context:String::new()});}
                                 else {p.expected_after.remove(&i);}
                                 changed=true;
                             }
                             if let Some(anchor)=p.expected_after.get_mut(&i) {
                                 ui.horizontal(|ui| {
-                                    changed |=ui.add(egui::TextEdit::singleline(&mut anchor.label).char_limit(256).hint_text("Erwartetes Statuswort")).changed();
-                                    changed |=ui.add(egui::TextEdit::singleline(&mut anchor.context).char_limit(256).hint_text("Kontext (optional)")).changed();
+                                    changed |=ui.add(egui::TextEdit::singleline(&mut anchor.label).char_limit(256).hint_text("Expected status word")).changed();
+                                    changed |=ui.add(egui::TextEdit::singleline(&mut anchor.context).char_limit(256).hint_text("Context (optional)")).changed();
                                 });
                             }
                         });
@@ -860,8 +855,8 @@ impl AivanaApp {
                 let image = egui::ColorImage::from_rgb([24,24], &icon.rgb);
                 let texture = ui.ctx().load_texture(format!("icon-proposal-{index}"), image, egui::TextureOptions::NEAREST);
                 ui.image((texture.id(), egui::vec2(72.0,72.0)));
-                ui.label(format!("Schritt {}: lokales 24×24-Pixeltemplate. Nur ein textloses, nicht vertrauliches Icon übernehmen. OCR kann Text übersehen. Gleiche Größe/Farben erforderlich; Treffer <97,5 % oder mehrdeutig werden abgelehnt.", index + 1));
-                if ui.add_enabled(editable, egui::Button::new("Dieses textlose Icon geprüft übernehmen")).clicked() {
+                ui.label(format!("Step {}: local 24×24 pixel template. Adopt only a text-free, nonconfidential icon. OCR may miss text. Matching size/colors required; ambiguous matches or scores below 97.5% are rejected.", index + 1));
+                if ui.add_enabled(editable, egui::Button::new("Adopt this reviewed text-free icon")).clicked() {
                     if let Some(step) = self.teaching.teacher.procedure.steps.get_mut(index) {
                         if let Step::Click { x: sx, y: sy, button, double } = step {
                             if *sx == x && *sy == y { *step = Step::IconClick { anchor: icon.clone(), button: *button, double: *double }; }
@@ -884,25 +879,27 @@ impl AivanaApp {
             self.teaching.reset_replay();
             self.teaching.queue.clear();
             self.teaching.teacher.procedure = procedure;
-            self.status = "Compiler-Entwurf übernommen; bisherige Freigaben verworfen. Speichern oder Workflow vorbereiten.".into();
+            self.status =
+                "Compiler draft adopted; previous approvals discarded. Save or prepare workflow."
+                    .into();
         }
         if ui
             .add_enabled(
                 editable,
-                egui::Button::new("Geprüften Ablauf verschlüsselt speichern"),
+                egui::Button::new("Save reviewed workflow with encryption"),
             )
             .clicked()
         {
             self.status = match teaching::save_named(&self.teaching.teacher.procedure) {
-                Ok(()) => "Benannter Ablauf per Windows DPAPI gespeichert".into(),
-                Err(e) => format!("Ablauf speichern: {e:#}"),
+                Ok(()) => "Named workflow saved with Windows DPAPI".into(),
+                Err(e) => format!("Save workflow: {e:#}"),
             };
         }
-        ui.small("Bis zu 32 benannte Abläufe; gleicher Name ersetzt die vorige Fassung. Parameterwerte werden nie gespeichert.");
+        ui.small("Up to 32 named workflows; the same name replaces the previous version. Parameter values are never saved.");
         if ui
             .add_enabled(
                 editable && connected,
-                egui::Button::new("Als Workflow vorbereiten"),
+                egui::Button::new("Prepare as workflow"),
             )
             .clicked()
         {
@@ -914,16 +911,16 @@ impl AivanaApp {
             if let Some((host, procedure)) = prepared {
                 match teaching::validate_workflow_procedure(&procedure) {
                     Ok(()) => self.prepare_teaching_workflow(host, procedure),
-                    Err(e) => self.status = format!("Workflow vorbereiten: {e}"),
+                    Err(e) => self.status = format!("Prepare workflow: {e}"),
                 }
             } else {
-                self.status = "Workflow benötigt ein direktes RDP-Ziel ohne Gateway.".into();
+                self.status = "Workflow requires a direct RDP target without a gateway.".into();
             }
         }
         if ui
             .add_enabled(
                 editable,
-                egui::Button::new("Ablaufbibliothek öffnen / aktualisieren"),
+                egui::Button::new("Open / refresh workflow library"),
             )
             .clicked()
         {
@@ -938,7 +935,7 @@ impl AivanaApp {
                 .add_enabled(
                     editable,
                     egui::Button::new(format!(
-                        "Laden: {} · {} Schritte",
+                        "Load: {} · {} steps",
                         procedure.title,
                         procedure.steps.len()
                     )),
@@ -954,7 +951,7 @@ impl AivanaApp {
             self.teaching.teacher.procedure = self.teaching.library[index].clone();
         }
         ui.separator();
-        ui.label("Übertragung: Quellablauf oben prüfen, gewünschte Zielsitzung im Sitzungsbereich wählen und ausdrücklich übernehmen.");
+        ui.label("Transfer: review the source workflow above, select the desired target session in the session area, and explicitly adopt it.");
         if let Some(source) = self.teaching.source {
             ui.small(format!(
                 "Demonstrationsquelle: {}",
@@ -962,15 +959,13 @@ impl AivanaApp {
                     .iter()
                     .find(|s| s.id == source)
                     .map(|s| s.title.as_str())
-                    .unwrap_or("frühere Sitzung")
+                    .unwrap_or("previous session")
             ));
         }
         if ui
             .add_enabled(
                 connected && editable,
-                egui::Button::new(
-                    "Ausgewählte Sitzung als Wiedergabeziel übernehmen / bei Schritt 1 starten",
-                ),
+                egui::Button::new("Adopt selected session as replay target / start at step 1"),
             )
             .clicked()
         {
@@ -980,32 +975,32 @@ impl AivanaApp {
         let target_ready = self.teaching.target.is_some()
             && self.teaching.target == session.as_ref().map(|s| s.id);
         ui.label(if target_ready {
-            "Ziel übernommen; jeder Schritt wird am aktuellen Zielbild geprüft."
+            "Target adopted; every step is verified against the current target image."
         } else {
-            "Noch kein Wiedergabeziel übernommen."
+            "No replay target adopted yet."
         });
-        ui.collapsing("Gesamtablauf freigeben · Warteschlange verbundener Ziele",|ui| {
-            ui.label("Eine Freigabe gilt fünf Minuten für genau dieses Ziel, diese Profilfassung, diesen vollständigen Ablauf und die hier eingegebenen Parameter. Jeder Schritt erhält aktuelle OCR und eine sichtbare Nachbedingung. Abweichungen stoppen weitere Eingaben.");
+        ui.collapsing("Approve entire workflow · Connected target queue",|ui| {
+            ui.label("Approval is valid for five minutes for this exact target, profile version, full workflow, and entered parameters. Each step requires current OCR and a visible postcondition. Deviations stop further input.");
             let names:std::collections::BTreeSet<String>=self.teaching.teacher.procedure.steps.iter().filter_map(|s|if let Step::Parameter{name}=s {Some(name.clone())} else {None}).collect();
             ui.add_enabled_ui(editable,|ui| {
                 for name in names {
-                    ui.label(format!("Parameter {{{name}}} für dieses Ziel (nur Arbeitsspeicher):"));
+                    ui.label(format!("Parameter {{{name}}} for this target (memory only):"));
                     let value=self.teaching.parameters.entry(name).or_default();
                     if ui.add(egui::TextEdit::singleline(value).password(true).char_limit(4096)).changed() {self.teaching.whole_reviewed=false;}
                 }
             });
             ScrollArea::vertical().id_salt("whole-procedure-review").max_height(200.0).show(ui,|ui| {
                 for (index,step) in self.teaching.teacher.procedure.steps.iter().enumerate() {
-                    let condition=self.teaching.teacher.procedure.expected_after.get(&index).map(|a|format!("{} / {}",a.label,a.context)).unwrap_or_else(||"FEHLT".into());
+                    let condition=self.teaching.teacher.procedure.expected_after.get(&index).map(|a|format!("{} / {}",a.label,a.context)).unwrap_or_else(||"MISSING".into());
                     ui.label(format!("{}. {} → erwartet: {condition}",index+1,step_label(step)));
                 }
-                ui.label(format!("Endbedingung: {}",self.teaching.teacher.procedure.expected_final.as_ref().map(|a|format!("{} / {}",a.label,a.context)).unwrap_or_else(||"FEHLT".into())));
+                ui.label(format!("Final condition: {}",self.teaching.teacher.procedure.expected_final.as_ref().map(|a|format!("{} / {}",a.label,a.context)).unwrap_or_else(||"MISSING".into())));
             });
             let eligibility=crate::transferable::validate_run(&self.teaching.teacher.procedure,&self.teaching.parameters);
-            if let Err(e)=&eligibility {ui.label(format!("Gesamtfreigabe gesperrt: {e}"));}
-            ui.add_enabled(editable && target_ready && eligibility.is_ok(),egui::Checkbox::new(&mut self.teaching.whole_reviewed,"Vollständige Schrittfolge, alle Parameterwerte, erwartete Zustände und dieses Ziel geprüft"));
+            if let Err(e)=&eligibility {ui.label(format!("Workflow approval gesperrt: {e}"));}
+            ui.add_enabled(editable && target_ready && eligibility.is_ok(),egui::Checkbox::new(&mut self.teaching.whole_reviewed,"Reviewed the full step sequence, all parameter values, expected states, and this target"));
             if ui.add_enabled(editable && target_ready && connected && eligibility.is_ok() && self.teaching.whole_reviewed,
-                egui::Button::new("Ablauf für dieses Ziel freigeben")).clicked() {
+                egui::Button::new("Approve workflow for this target")).clicked() {
                 let id=session.as_ref().unwrap().id;
                 let approval=self.teaching_profile_identity(id).and_then(|identity|crate::transferable::RunApproval::new(id,&self.teaching.teacher.procedure,&self.teaching.parameters,&identity,std::time::Instant::now()));
                 match approval {
@@ -1013,19 +1008,19 @@ impl AivanaApp {
                         self.engine.release_inputs(id);self.teaching.cursor=0;self.teaching.approved=false;self.teaching.approved_frame=None;
                         self.teaching.text.clear();self.teaching.awaiting_evidence=false;self.teaching.evidence_frame=None;self.teaching.final_verified=None;
                         self.teaching.reset_evidence();self.teaching.history.clear();self.teaching.run=Some(approval);
-                        self.status="Vollständiger Ablauf für genau dieses Ziel freigegeben; aktuelle OCR vor jedem Schritt".into();
+                        self.status="Entire workflow approved for this exact target; current OCR before every step".into();
                     }
                     Err(e)=>self.status=e.to_string(),
                 }
             }
             if self.teaching.run.is_some() {
-                ui.colored_label(tw::RED_600,"Gesamtablauf aktiv – Abbrechen stoppt weitere Eingaben sofort");
-                if ui.button("Gesamtablauf jetzt anhalten").clicked() {
+                ui.colored_label(tw::RED_600,"Entire workflow active – cancel stops further input immediately");
+                if ui.button("Entire workflow jetzt anhalten").clicked() {
                     if let Some(id)=self.teaching.target {self.engine.release_inputs(id);}
-                    self.teaching.cancel_run("Durch Benutzer angehalten");
+                    self.teaching.cancel_run("Paused by user");
                 }
             }
-            ui.separator();ui.label("Weitere bereits verbundene Ziele auswählen (maximal 16). Jedes nächste Ziel benötigt neue Parameter und eine eigene Gesamtfreigabe.");
+            ui.separator();ui.label("Select additional connected targets (at most 16). Each next target needs new parameters and its own approval for the entire workflow.");
             ui.add_enabled_ui(self.teaching.run.is_none(),|ui| {
                 for destination in self.sessions.iter().filter(|s|s.status==SessionStatus::Connected) {
                     let mut queued=self.teaching.queue.contains(&destination.id);
@@ -1035,13 +1030,13 @@ impl AivanaApp {
                     }
                 }
             });
-            if ui.add_enabled(self.teaching.run.is_none() && !recording && !self.teaching.queue.is_empty(),egui::Button::new("Nächstes verbundenes Ziel aus Warteschlange übernehmen")).clicked() {
+            if ui.add_enabled(self.teaching.run.is_none() && !recording && !self.teaching.queue.is_empty(),egui::Button::new("Adopt next connected target from queue")).clicked() {
                 let id=self.teaching.queue.remove(0);
                 if self.sessions.iter().any(|s|s.id==id && s.status==SessionStatus::Connected) {
                     if let Some(old)=self.teaching.target {self.engine.release_inputs(old);}
                     self.teaching.reset_replay();self.selected_session=Some(id);self.teaching.target=Some(id);
-                    self.status="Nächstes Ziel übernommen; Parameter und Ablauf für dieses Ziel prüfen und freigeben".into();
-                } else {self.status="Warteschlangenziel nicht mehr verbunden; keine Verbindung aufgebaut".into();}
+                    self.status="Next target adopted; review and approve its parameters and workflow".into();
+                } else {self.status="Queued target is no longer connected; no connection was opened".into();}
             }
             for result in self.teaching.target_results.iter().rev().take(16) {ui.small(result);}
         });
@@ -1054,16 +1049,13 @@ impl AivanaApp {
                 .get(&self.teaching.cursor)
                 .cloned();
             if let Some(anchor) = &assertion {
-                ui.label(format!("Warte auf sichtbaren Zustand: '{}' · Kontext '{}'. Frische OCR prüft automatisch; es wird keine weitere Eingabe gesendet.",anchor.label,anchor.context));
+                ui.label(format!("Waiting for visible state: '{}' · Context '{}'. Fresh OCR verifies automatically; no additional input is sent.",anchor.label,anchor.context));
                 ui.label(&self.teaching.evidence_notice);
-                if ui
-                    .button("Nur OCR-Ergebnisprüfung erneut starten")
-                    .clicked()
-                {
+                if ui.button("Restart only OCR result check").clicked() {
                     self.teaching.reset_evidence();
                 }
             } else {
-                ui.label("Schritt gesendet. Keine OCR-Nachbedingung hinterlegt. Das neue Bild allein beweist keinen Erfolg; Wirkung gegen das Erfolgskriterium prüfen.");
+                ui.label("Step sent. No OCR postcondition configured. A new image alone does not prove success; verify the effect against the success criterion.");
             }
             let fresh_evidence = session
                 .as_ref()
@@ -1077,13 +1069,13 @@ impl AivanaApp {
                 .add_enabled(
                     fresh_evidence && assertion.is_none(),
                     egui::Button::new(
-                        "Wirkung im neuen Remote-Bild manuell bestätigt → nächster Schritt",
+                        "Effect manually confirmed in the new remote image → next step",
                     ),
                 )
                 .clicked()
             {
                 self.teaching.history.push(format!(
-                    "Schritt {}: Wirkung manuell bestätigt",
+                    "Step {}: effect manually confirmed",
                     self.teaching.cursor + 1
                 ));
                 self.teaching.cursor += 1;
@@ -1099,7 +1091,7 @@ impl AivanaApp {
             .cloned()
         {
             ui.label(format!(
-                "Nächster Schritt {}: {}",
+                "Next step {}: {}",
                 self.teaching.cursor + 1,
                 step_label(&step)
             ));
@@ -1108,21 +1100,21 @@ impl AivanaApp {
                 Step::Click { .. } | Step::SemanticClick { .. } | Step::TransferClick { .. }
             ) {
                 ui.horizontal_wrapped(|ui| {
-                    if ui.button("Bild für OCR-Anker neu lesen").clicked() {
+                    if ui.button("Read image again for OCR anchor").clicked() {
                         self.request_vision();
                         self.teaching.cancel_approval();
                     }
                     ui.add(
                         egui::TextEdit::singleline(&mut self.vision.label)
                             .char_limit(256)
-                            .hint_text("Zielwort"),
+                            .hint_text("Target word"),
                     );
                     ui.add(
                         egui::TextEdit::singleline(&mut self.vision.context)
                             .char_limit(256)
-                            .hint_text("Kontextwort (optional)"),
+                            .hint_text("Context word (optional)"),
                     );
-                    if ui.button("Diesen Klick an Zielwort binden").clicked() {
+                    if ui.button("Bind this click to the target word").clicked() {
                         let anchor = crate::vision::Anchor {
                             label: self.vision.label.clone(),
                             context: self.vision.context.clone(),
@@ -1137,7 +1129,7 @@ impl AivanaApp {
                                     .and_then(|r| self.latest_frames.get(&r.id))
                                     .is_some_and(|f| s.matches(f))
                             })
-                            .ok_or_else(|| anyhow::anyhow!("Frische OCR fehlt"))
+                            .ok_or_else(|| anyhow::anyhow!("Fresh OCR is missing"))
                             .and_then(|s| s.resolve(&anchor));
                         match resolved {
                             Ok(_) => {
@@ -1152,8 +1144,7 @@ impl AivanaApp {
                                             double: *double,
                                         };
                                     self.teaching.cancel_approval();
-                                    self.status =
-                                        "Semantisches Ziel gebunden; erneut prüfen".into();
+                                    self.status = "Semantic target bound; review again".into();
                                 }
                             }
                             Err(e) => self.status = e.to_string(),
@@ -1162,7 +1153,7 @@ impl AivanaApp {
                 });
             }
             if matches!(step, Step::TextRequired | Step::Parameter { .. }) {
-                ui.label("Text für diesen einzelnen Schritt neu eingeben; nur im Arbeitsspeicher:");
+                ui.label("Reenter text for this single step; kept in memory only:");
                 if ui
                     .add(
                         egui::TextEdit::singleline(&mut self.teaching.text)
@@ -1175,7 +1166,7 @@ impl AivanaApp {
                 }
             }
             let preview=session.as_ref().and_then(|s|self.latest_frames.get(&s.id)).map(|frame| {
-                if matches!(step,Step::Click{..}|Step::Scroll{..}) {return Err(anyhow::anyhow!("Koordinatenschritt benötigt semantischen Anker; bei Scrollen Ziel manuell bedienen und Schritt entfernen"));}
+                if matches!(step,Step::Click{..}|Step::Scroll{..}) {return Err(anyhow::anyhow!("Coordinate step requires a semantic anchor; for scrolling, operate the target manually and remove the step"));}
                 self.teaching.teacher.procedure.actions_on_frame(&step,frame,self.vision.screen.as_ref(),&self.teaching.text)
             });
             match &preview {
@@ -1184,10 +1175,10 @@ impl AivanaApp {
                         InputAction::Click { x, y, .. } | InputAction::DoubleClick { x, y, .. },
                     ) = actions.first()
                     {
-                        ui.label(format!("Vorschau: Ziel im aktuellen Bild bei {x}, {y}"));
+                        ui.label(format!("Preview: target in current image at {x}, {y}"));
                     } else {
                         ui.label(
-                            "Vorschau: Navigation oder Parameter an die ausgewählte Zielsitzung.",
+                            "Preview: navigation or parameter to the selected target session.",
                         );
                     }
                 }
@@ -1195,15 +1186,18 @@ impl AivanaApp {
                     ui.colored_label(tw::RED_600, format!("Blockiert: {e}"));
                 }
                 None => {
-                    ui.label("Zielbild fehlt.");
+                    ui.label("Target image is missing.");
                 }
             }
             let preview_ready = preview.as_ref().is_some_and(|r| r.is_ok());
             if ui
-                .add_enabled(target_ready && preview_ready && editable,egui::Checkbox::new(
-                    &mut self.teaching.approved,
-                    "Ziel, sichtbares Element und Wirkung geprüft; diesen einen Schritt freigeben",
-                ))
+                .add_enabled(
+                    target_ready && preview_ready && editable,
+                    egui::Checkbox::new(
+                        &mut self.teaching.approved,
+                        "Reviewed target, visible element, and effect; approve this one step",
+                    ),
+                )
                 .changed()
             {
                 self.teaching.approved_frame = session
@@ -1219,7 +1213,7 @@ impl AivanaApp {
                 && (!matches!(step, Step::TextRequired | Step::Parameter { .. })
                     || !self.teaching.text.is_empty());
             if ui
-                .add_enabled(enabled, egui::Button::new("Genau diesen Schritt ausführen"))
+                .add_enabled(enabled, egui::Button::new("Execute this exact step"))
                 .clicked()
             {
                 let id = session.as_ref().unwrap().id;
@@ -1228,18 +1222,16 @@ impl AivanaApp {
                     let frame = self
                         .latest_frames
                         .get(&id)
-                        .ok_or_else(|| anyhow::anyhow!("Bild fehlt"))?;
+                        .ok_or_else(|| anyhow::anyhow!("Image is missing"))?;
                     if self.teaching.approved_frame
                         != Some((id, frame.frame_hash, frame.captured_at))
                     {
-                        anyhow::bail!("Bild seit Freigabe geändert: neu prüfen und freigeben");
+                        anyhow::bail!("Image changed since approval: review and approve again");
                     }
                     if self.teaching.target != Some(id)
                         || matches!(step, Step::Click { .. } | Step::Scroll { .. })
                     {
-                        anyhow::bail!(
-                            "Ziel nicht übernommen oder Koordinatenschritt nicht verankert"
-                        );
+                        anyhow::bail!("Target not adopted or coordinate step has no anchor");
                     }
                     self.teaching.evidence_frame = Some((id, frame.frame_hash, frame.captured_at));
                     let actions = self.teaching.teacher.procedure.actions_on_frame(
@@ -1253,7 +1245,7 @@ impl AivanaApp {
                         .iter()
                         .any(|a| policy.decision_for(a) == PolicyDecision::Deny)
                     {
-                        anyhow::bail!("Schritt durch Sicherheitsrichtlinie gesperrt");
+                        anyhow::bail!("Step blocked by security policy");
                     }
                     for action in actions {
                         self.engine.send_input(id, action)?;
@@ -1272,38 +1264,38 @@ impl AivanaApp {
                         self.teaching.reset_evidence();
                         self.teaching.evidence_started = Some(std::time::Instant::now());
                         self.teaching.final_verified = None;
-                        self.status = "Ein Schritt gesendet; Wirkung manuell prüfen".into();
+                        self.status = "One step sent; verify its effect manually".into();
                     }
                     Err(e) => {
                         if self.teaching.history.len() >= 200 {
                             self.teaching.history.remove(0);
                         }
                         self.teaching.history.push(format!(
-                            "Schritt {}: Versand abgebrochen; Wirkung unklar",
+                            "Step {}: Sending aborted; effect is unknown",
                             self.teaching.cursor + 1
                         ));
-                        self.status = format!("Schritt gestoppt: {e:#}");
+                        self.status = format!("Step stopped: {e:#}");
                     }
                 }
             }
         } else if !self.teaching.teacher.procedure.steps.is_empty() {
             if self.teaching.teacher.procedure.expected_final.is_some() {
                 if let Some((_, hash, at)) = self.teaching.final_verified {
-                    ui.label(format!("Konfigurierte sichtbare Endbedingung per OCR nachgewiesen · Bild {hash:016x} · {at}. Kein Nachweis einer Backend-Transaktion."));
+                    ui.label(format!("Configured visible final condition verified by OCR · Image {hash:016x} · {at}. No evidence of a backend transaction."));
                 } else {
-                    ui.label("Schritte geprüft; sichtbare Endbedingung noch nicht nachgewiesen.");
+                    ui.label("Steps verified; visible final condition not yet evidenced.");
                     ui.label(&self.teaching.evidence_notice);
-                    if ui.button("Nur OCR-Endprüfung erneut starten").clicked() {
+                    if ui.button("Restart only final OCR check").clicked() {
                         self.teaching.reset_evidence();
                     }
                 }
             } else {
                 ui.label(
-                    "Alle Schritte einzeln geprüft. Keine automatische Endbedingung konfiguriert.",
+                    "All steps verified individually. No automatic final condition configured.",
                 );
             }
         }
-        if ui.button("Wiedergabe abbrechen / zurücksetzen").clicked() {
+        if ui.button("Cancel / reset replay").clicked() {
             if let Some(id) = self.teaching.target {
                 self.engine.release_inputs(id);
             }
@@ -1320,20 +1312,20 @@ fn step_label(step: &Step) -> String {
             "Textloses Icon · Pixeltemplate 24×24 · Mindestkonfidenz 97,5 %".into()
         }
         Step::TransferClick { target, .. } => format!(
-            "Übertragbares OCR-Ziel: {} · relativer Kontext: {}",
+            "Transferable OCR target: {} · Relative context: {}",
             target.anchor.label, target.anchor.context
         ),
-        Step::Parameter { name } => format!("Parameter {{{name}}} · Wert je Ziel neu eingeben"),
+        Step::Parameter { name } => format!("Parameter {{{name}}} · Reenter value for each target"),
         Step::Click { button, double, .. } => format!(
-            "{} {button:?} · benötigt semantischen Anker vor Übertragung",
+            "{} {button:?} · requires a semantic anchor before transfer",
             if *double { "Doppelklick" } else { "Klick" }
         ),
         Step::Scroll { delta, .. } => format!("Scrollen {delta}"),
-        Step::Navigation { code } => format!("Navigationstaste {code:#x} (Drücken + Loslassen)"),
+        Step::Navigation { code } => format!("Navigation key {code:#x} (press + release)"),
         Step::SemanticClick { anchor, .. } => {
-            format!("OCR-Ziel: {} · Kontext: {}", anchor.label, anchor.context)
+            format!("OCR target: {} · Context: {}", anchor.label, anchor.context)
         }
-        Step::TextRequired => "Eingabe-Platzhalter – Inhalt wurde nicht aufgezeichnet".into(),
+        Step::TextRequired => "Input placeholder – content was not recorded".into(),
     }
 }
 
@@ -1450,7 +1442,7 @@ impl CompilerState {
         self.sync(source, model);
         let mut adopted = None;
         egui::CollapsingHeader::new("Expertenverfahren mit KI kompilieren").show(ui,|ui| {
-            ui.label("Die Demonstration fachlich erklären: Welche Eingaben variieren, welcher sichtbare Zustand bestätigt jeden Schritt? Keine Geheimnisse eingeben.");
+            ui.label("Explain the demonstration: which inputs vary, and which visible state confirms each step? Do not enter secrets.");
             ui.add(egui::TextEdit::multiline(&mut self.explanation).desired_rows(3).desired_width(720.0).char_limit(4096));
             self.sync(source,model);
             if self.context.is_none() {
@@ -1460,20 +1452,20 @@ impl CompilerState {
                 }
             }
             let context=self.context.clone().unwrap();
-            ui.label(format!("Modell: {model}. Exakter Versandinhalt (nur diese Metadaten und Erklärung):"));
+            ui.label(format!("Model: {model}. Exact content to send (only this metadata and explanation):"));
             egui::ScrollArea::vertical().id_salt("compiler_visible_input").max_height(180.0).show(ui,|ui| {ui.monospace(serde_json::to_string_pretty(&context).unwrap_or_default());});
-            ui.small("Keine Bilder, Parameterwerte, Profile oder Sitzungsdaten. Der Vorschlag ergänzt ausschließlich benannte Eingabeplätze und bekannte sichtbare Prüfanker; vorhandene Aktionen bleiben erhalten.");
-            ui.checkbox(&mut self.consent,"Diesen sichtbaren Inhalt für diesen Vorschlag an OpenAI senden");
-            if ui.add_enabled(self.consent && self.pending.is_none(),egui::Button::new("Verfahrensvorschlag erstellen")).clicked() {
+            ui.small("No images, parameter values, profiles, or session data. The proposal adds only named input slots and known visible assertion anchors; existing actions are retained.");
+            ui.checkbox(&mut self.consent,"Send this visible content to OpenAI for this proposal");
+            if ui.add_enabled(self.consent && self.pending.is_none(),egui::Button::new("Create procedure proposal")).clicked() {
                 let (tx,rx)=std::sync::mpsc::channel(); self.pending=Some(rx); self.proposal=None; self.reviewed=false; self.consent=false;
-                self.notice="KI erstellt einen ungeprüften Vorschlag …".into();
+                self.notice="AI is creating an unreviewed proposal …".into();
                 let model=model.to_owned(); let context=context.clone();
                 std::thread::spawn(move || {let _=tx.send(crate::procedure_compiler::cloud_suggest(&context,&model).map_err(|e|e.to_string()));});
             }
             if let Some(rx)=&self.pending {
                 match rx.try_recv() {
-                    Ok(result)=>{self.pending=None;match result {Ok(p)=>{self.proposal=Some(p);self.notice="Vorschlag fachlich prüfen; keine Ausführung erfolgt.".into();},Err(e)=>self.notice=e}},
-                    Err(std::sync::mpsc::TryRecvError::Disconnected)=>{self.pending=None;self.notice="KI-Compiler unterbrochen".into();},
+                    Ok(result)=>{self.pending=None;match result {Ok(p)=>{self.proposal=Some(p);self.notice="Review the proposal; nothing was executed.".into();},Err(e)=>self.notice=e}},
+                    Err(std::sync::mpsc::TryRecvError::Disconnected)=>{self.pending=None;self.notice="AI compiler interrupted".into();},
                     Err(std::sync::mpsc::TryRecvError::Empty)=>{ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));}
                 }
             }
@@ -1481,24 +1473,24 @@ impl CompilerState {
             if let Some(proposal)=&mut self.proposal {
                 let mut changed=false;
                 for parameter in &mut proposal.parameters {
-                    ui.horizontal(|ui| {ui.label(format!("Schritt {}: Eingabeplatz → Parameter",parameter.step.saturating_add(1))); changed |= ui.text_edit_singleline(&mut parameter.name).changed();});
+                    ui.horizontal(|ui| {ui.label(format!("Step {}: Eingabeplatz → Parameter",parameter.step.saturating_add(1))); changed |= ui.text_edit_singleline(&mut parameter.name).changed();});
                     ui.small(&parameter.reason);
                 }
                 for assertion in &proposal.assertions {
-                    let phase=assertion.after.map(|i|format!("nach Schritt {}",i.saturating_add(1))).unwrap_or_else(||"am Ende".into());
+                    let phase=assertion.after.map(|i|format!("after step {}",i.saturating_add(1))).unwrap_or_else(||"at the end".into());
                     let anchor=context.anchors.get(assertion.anchor).map(|a|format!("{} / {}",a.label,a.context)).unwrap_or_else(||"UNBEKANNTER ANKER".into());
-                    ui.label(format!("Prüfen {phase}: {anchor} — {}",assertion.reason));
+                    ui.label(format!("Verify {phase}: {anchor} — {}",assertion.reason));
                 }
-                for assumption in &proposal.assumptions { ui.label(format!("Annahme: {assumption}")); }
+                for assumption in &proposal.assumptions { ui.label(format!("Assumption: {assumption}")); }
                 for missing in &proposal.missing { ui.colored_label(Color32::YELLOW,format!("Fehlt: {missing}")); }
                 if changed {self.reviewed=false;}
                 let preview=proposal.adopt(&context,source,true);
                 if let Err(error)=&preview {ui.colored_label(Color32::YELLOW,error.to_string());}
-                ui.add_enabled(preview.is_ok(),egui::Checkbox::new(&mut self.reviewed,"Alle Änderungen, Prüfbedingungen und Annahmen fachlich geprüft"));
-                if ui.add_enabled(self.reviewed && preview.is_ok(),egui::Button::new("Geprüften Entwurf in Lernablauf übernehmen")).clicked() {
+                ui.add_enabled(preview.is_ok(),egui::Checkbox::new(&mut self.reviewed,"Reviewed all changes, assertions, and assumptions"));
+                if ui.add_enabled(self.reviewed && preview.is_ok(),egui::Button::new("Adopt reviewed draft into the learned workflow")).clicked() {
                     adopted=proposal.adopt(&context,source,self.reviewed).ok();
                 }
-                ui.small("Danach unten verschlüsselt speichern oder als Workflow vorbereiten. Ausführung benötigt neue Ziel- und Ablaufprüfung.");
+                ui.small("Then save with encryption below or prepare as a workflow. Execution requires a new target and workflow review.");
             }
         });
         if adopted.is_some() {
