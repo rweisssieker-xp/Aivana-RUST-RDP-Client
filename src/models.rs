@@ -175,24 +175,7 @@ pub enum CertificateTrustStatus {
     Changed,
 }
 
-#[derive(Clone, Debug)]
-pub struct FrameUpdate {
-    pub session_id: Uuid,
-    pub width: u16,
-    pub height: u16,
-    pub pixels_rgba: Vec<u8>,
-    pub dirty_regions: Vec<DirtyRegion>,
-    pub frame_hash: u64,
-    pub captured_at: DateTime<Utc>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct DirtyRegion {
-    pub left: u16,
-    pub top: u16,
-    pub right: u16,
-    pub bottom: u16,
-}
+pub use crate::frame_pipeline::{DirtyRegion, FrameUpdate};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub enum InputAction {

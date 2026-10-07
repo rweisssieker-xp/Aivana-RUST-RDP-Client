@@ -301,7 +301,7 @@ fn create_client_confirm_active(
             ..Default::default()
         }),
         CapabilitySet::Bitmap(Bitmap {
-            pref_bits_per_pix: 32,
+            pref_bits_per_pix: config.bitmap.as_ref().map_or(32, |bitmap| bitmap.color_depth as u16),
             desktop_width: desktop_size.width,
             desktop_height: desktop_size.height,
             // This is required to be true in order for the Microsoft::Windows::RDS::DisplayControl DVC to work.

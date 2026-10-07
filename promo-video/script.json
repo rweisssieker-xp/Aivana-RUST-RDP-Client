@@ -1,0 +1,56 @@
+{
+  "de": [
+    [
+      "Wenn Systeme ausfallen,",
+      "zählt jeder Schritt.",
+      "Wenn Systeme ausfallen, zählt jeder Schritt. Entdecken Sie Relayne."
+    ],
+    [
+      "Remote-Zugriff.",
+      "Ein gemeinsamer Arbeitsplatz.",
+      "Verbinden Sie Remote-Zugriff über RDP und SSH mit gemeinsamem Betriebswissen."
+    ],
+    [
+      "Reparaturen erproben.",
+      "Zuerst im Klon.",
+      "Erproben Sie unterstützte Reparaturabläufe zuerst im Klon und prüfen Sie das Ergebnis."
+    ],
+    [
+      "Ergebnisse prüfen.",
+      "Produktion bewusst freigeben.",
+      "Nutzen Sie Prüfnachweise, um den nächsten Schritt in der Produktion bewusst freizugeben."
+    ],
+    [
+      "Relayne",
+      "Für IT-Teams. Bereit für Ihren Pilotfall.",
+      "Relayne. Remote-Zugriff und geprüfte Wiederherstellungsabläufe. Starten Sie mit einem Pilotfall."
+    ]
+  ],
+  "en": [
+    [
+      "When systems fail,",
+      "every step matters.",
+      "When systems fail, every step matters. Discover Relayne."
+    ],
+    [
+      "Remote access.",
+      "One shared workspace.",
+      "Connect remote access through RDP and SSH with shared operational knowledge."
+    ],
+    [
+      "Rehearse repairs.",
+      "Start with a clone.",
+      "Rehearse supported recovery workflows in a clone first, and verify the results."
+    ],
+    [
+      "Verify the outcome.",
+      "Approve the production step.",
+      "Use recorded test evidence to make an informed decision before approving the production step."
+    ],
+    [
+      "Relayne",
+      "For IT teams. Start with your pilot case.",
+      "Relayne. Remote access and verified recovery workflows. Start with your pilot case."
+    ]
+  ]
+}

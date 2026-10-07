@@ -18,6 +18,8 @@ __pycache__/
 # Local live verification secrets
 rdp-live.env
 *.local.env
+investigator.local.json
+investigator.local.sqlite*
 
 # Local OS files
 Thumbs.db

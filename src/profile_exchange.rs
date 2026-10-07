@@ -8,6 +8,112 @@ use serde_json::{Value, json};
 use std::{collections::HashMap, path::Path};
 use uuid::Uuid;
 
+#[cfg(test)]
+mod mstsc_settings_tests {
+    use super::*;
+
+    #[test]
+    fn mstsc_settings_survive_rdp_roundtrip() {
+        let fields = [
+            "audiomode:i:1",
+            "session bpp:i:16",
+            "keyboardhook:i:1",
+            "redirectprinters:i:1",
+            "redirectsmartcards:i:1",
+            "redirectcomports:i:1",
+            "devicestoredirect:s:*",
+            "drivestoredirect:s:C:;D:;",
+            "autoreconnection enabled:i:0",
+            "disable wallpaper:i:1",
+            "allow font smoothing:i:0",
+            "allow desktop composition:i:1",
+            "disable full window drag:i:0",
+            "disable menu anims:i:0",
+            "disable themes:i:1",
+            "bitmapcachepersistenable:i:0",
+            "authentication level:i:2",
+            "enablecredsspsupport:i:0",
+            "gatewayhostname:s:gateway.example",
+            "gatewayusagemethod:i:2",
+            "promptcredentialonce:i:0",
+            "connection type:i:6",
+            "bandwidthautodetect:i:0",
+            "networkautodetect:i:0",
+            "screen mode id:i:2",
+            "displayconnectionbar:i:0",
+            "use multimon:i:1",
+        ];
+        let document = format!(
+            "full address:s:server.example\r\n{}\r\n",
+            fields.join("\r\n")
+        );
+        let profiles = import_bytes("rdp", document.as_bytes()).unwrap();
+        let output = String::from_utf8(export_bytes("rdp", &profiles).unwrap()).unwrap();
+        for field in fields {
+            if !field.starts_with("gatewayhostname:") {
+                assert!(
+                    output.lines().any(|line| line == field),
+                    "Lost setting: {field}\n{output}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_mstsc_enums_are_rejected() {
+        for field in [
+            "session bpp:i:17",
+            "keyboardhook:i:3",
+            "authentication level:i:9",
+            "screen mode id:i:0",
+            "redirectprinters:i:2",
+            "gatewayusagemethod:i:9",
+        ] {
+            let doc = format!("full address:s:server.example\n{field}\n");
+            assert!(
+                import_bytes("rdp", doc.as_bytes()).is_err(),
+                "Accepted {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_gateway_and_disabled_gateway_roundtrip_without_a_host() {
+        for mode in [0, 3, 4] {
+            let doc = format!("full address:s:server.example\ngatewayusagemethod:i:{mode}\n");
+            let profiles = import_bytes("rdp", doc.as_bytes()).unwrap();
+            let output = String::from_utf8(export_bytes("rdp", &profiles).unwrap()).unwrap();
+            assert!(
+                output
+                    .lines()
+                    .any(|s| s == format!("gatewayusagemethod:i:{mode}"))
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_typed_fields_and_json_settings_are_rejected() {
+        for field in [
+            "redirectprinters:s:1",
+            "desktopwidth:i:0",
+            "desktopheight:i:9000",
+        ] {
+            let doc = format!("full address:s:server.example\n{field}\n");
+            assert!(import_bytes("rdp", doc.as_bytes()).is_err());
+        }
+        let json = br#"[{"host":"server.example","options":{"mstsc":{"values":{"authentication level":7}}}}]"#;
+        assert!(import_bytes("json", json).is_err());
+    }
+
+    #[test]
+    fn exporting_a_default_rust_profile_does_not_select_windows_on_import() {
+        let profile = ConnectionProfile::sample("server", "server.example", "test", false);
+        let bytes = export_bytes("rdp", &[profile]).unwrap();
+        let profiles = import_bytes("rdp", &bytes).unwrap();
+        assert!(!profiles[0].options.mstsc.requires_windows());
+    }
+}
+
 pub fn import_profiles(path: &Path) -> Result<Vec<ConnectionProfile>> {
     let bytes = std::fs::read(path).context("Could not read profile file")?;
     import_bytes(extension(path)?, &bytes)
@@ -76,6 +182,7 @@ fn sanitize(profile: &mut ConnectionProfile) {
     profile.updated_at = profile.created_at;
 }
 fn validate_profile(profile: &ConnectionProfile) -> Result<()> {
+    profile.options.mstsc.validate()?;
     validate_host(&profile.host)?;
     if profile.port == 0 {
         bail!("Port must be between 1 and 65535");
@@ -83,7 +190,12 @@ fn validate_profile(profile: &ConnectionProfile) -> Result<()> {
     if profile.name.trim().is_empty() {
         bail!("Profile name is missing");
     }
-    if profile.options.gateway.enabled {
+    if !(200..=8192).contains(&profile.options.width)
+        || !(200..=8192).contains(&profile.options.height)
+    {
+        bail!("Desktop dimensions must be between 200 and 8192 pixels");
+    }
+    if profile.options.gateway.enabled && profile.options.mstsc.get("gatewayusagemethod") != 3 {
         validate_host(&profile.options.gateway.host)?;
         if profile.options.gateway.port == 0 {
             bail!("Gateway port cannot be 0");
@@ -222,6 +334,29 @@ fn parse_rdp(text: &str) -> Result<ConnectionProfile> {
         if !["s", "i", "b"].contains(&kind) {
             bail!("Invalid .rdp field type");
         }
+        let integer = crate::mstsc_settings::SETTINGS.iter().any(|s| s.key == key)
+            || [
+                "server port",
+                "desktopwidth",
+                "desktopheight",
+                "redirectclipboard",
+                "audiocapturemode",
+                "dynamic resolution",
+                "autoreconnection enabled",
+            ]
+            .contains(&key.as_str());
+        let string = [
+            "full address",
+            "username",
+            "domain",
+            "gatewayhostname",
+            "drivestoredirect",
+            "devicestoredirect",
+        ]
+        .contains(&key.as_str());
+        if (integer && kind != "i") || (string && kind != "s") {
+            bail!("Invalid .rdp type for {key}");
+        }
         settings.insert(key, value.to_owned());
     }
     let address = settings
@@ -258,6 +393,29 @@ fn parse_rdp(text: &str) -> Result<ConnectionProfile> {
             _ => bail!("Invalid audio mode"),
         };
     }
+    for spec in crate::mstsc_settings::SETTINGS {
+        if let Some(value) = settings.get(spec.key) {
+            p.options.mstsc.set(
+                spec.key,
+                value
+                    .parse()
+                    .with_context(|| format!("Invalid {}", spec.key))?,
+            )?;
+        }
+    }
+    if let Some(value) = settings.get("drivestoredirect") {
+        p.options.mstsc.drives = value.clone();
+    }
+    if let Some(value) = settings.get("devicestoredirect") {
+        p.options.mstsc.devices = value.clone();
+    }
+    if let Some(value) = settings.get("autoreconnection enabled") {
+        p.options.auto_reconnect = parse_flag(value)?;
+    }
+    if let Some(value) = settings.get("promptcredentialonce") {
+        p.options.gateway.use_profile_credentials = parse_flag(value)?;
+    }
+    p.options.mstsc.validate()?;
     if let Some(value) = settings.get("dynamic resolution") {
         p.options.dynamic_resolution = parse_flag(value)?;
     }
@@ -305,7 +463,13 @@ fn export_rdp(p: &ConnectionProfile) -> Result<String> {
         p.options.width,
         p.options.height,
         p.options.clipboard as u8,
-        if p.options.audio_playback { 0 } else { 2 },
+        if p.options.audio_playback {
+            0
+        } else if p.options.mstsc.get("audiomode") == 1 {
+            1
+        } else {
+            2
+        },
         p.options.microphone as u8,
         p.options.dynamic_resolution as u8
     );
@@ -317,11 +481,28 @@ fn export_rdp(p: &ConnectionProfile) -> Result<String> {
         } else {
             gw.host.clone()
         };
+        out.push_str(&format!("gatewayhostname:s:{host}:{}\r\n", gw.port));
+    }
+    for spec in crate::mstsc_settings::SETTINGS {
+        if ["audiomode", "gatewayusagemethod", "promptcredentialonce"].contains(&spec.key) {
+            continue;
+        }
         out.push_str(&format!(
-            "gatewayhostname:s:{host}:{}\r\ngatewayusagemethod:i:{}\r\n",
-            gw.port, gw.enabled as u8
+            "{}:i:{}\r\n",
+            spec.key,
+            p.options.mstsc.get(spec.key)
         ));
     }
+    let gateway_mode = if gw.enabled {
+        p.options.mstsc.get("gatewayusagemethod")
+    } else if p.options.mstsc.get("gatewayusagemethod") == 4 {
+        4
+    } else {
+        0
+    };
+    out.push_str(&format!("gatewayusagemethod:i:{gateway_mode}\r\n"));
+    out.push_str(&format!("autoreconnection enabled:i:{}\r\npromptcredentialonce:i:{}\r\ndrivestoredirect:s:{}\r\ndevicestoredirect:s:{}\r\n",
+        p.options.auto_reconnect as u8, gw.use_profile_credentials as u8, p.options.mstsc.drives, p.options.mstsc.devices));
     Ok(out)
 }
 fn parse_csv(text: &str) -> Result<Vec<ConnectionProfile>> {

@@ -79,6 +79,7 @@ pub trait RemoteDesktopEngine {
 
 #[derive(Default)]
 pub struct NativeRdpEngine {
+    frame_mailboxes: HashMap<Uuid, crate::frame_pipeline::FrameMailbox>,
     events: HashMap<Uuid, Receiver<EngineEvent>>,
     inputs: HashMap<Uuid, Sender<InputAction>>,
     profiles: HashMap<Uuid, ConnectionProfile>,
@@ -174,14 +175,23 @@ impl RetryState {
 
 impl RemoteDesktopEngine for NativeRdpEngine {
     fn connect(&mut self, profile: &ConnectionProfile) -> Result<RemoteSession> {
+        if profile.protocol == crate::models::Protocol::Rdp {
+            profile.options.mstsc.validate()?;
+            anyhow::ensure!(
+                !profile.options.mstsc.requires_windows(),
+                "This profile requires the Windows RDP control. Start it through Connections."
+            );
+        }
         let session_id = Uuid::new_v4();
         let profile_for_thread = profile.clone();
+        let frames = crate::frame_pipeline::FrameMailbox::default();
+        self.frame_mailboxes.insert(session_id, frames.clone());
         let (event_sender, event_receiver) = mpsc::channel();
         let (input_sender, input_receiver) = mpsc::channel();
 
         self.workers.insert(
             session_id,
-            spawn_runtime(session_id, profile_for_thread, event_sender, input_receiver),
+            spawn_runtime(session_id, profile_for_thread, event_sender, input_receiver, frames),
         );
         self.retries.insert(session_id, RetryState::default());
 
@@ -216,6 +226,8 @@ impl RemoteDesktopEngine for NativeRdpEngine {
         self.release_inputs(session.id);
         self.inputs.remove(&session.id);
         self.events.remove(&session.id);
+        self.frame_mailboxes.remove(&session.id);
+        self.latest_frames.remove(&session.id);
         self.retries.insert(
             session.id,
             RetryState {
@@ -249,6 +261,7 @@ impl RemoteDesktopEngine for NativeRdpEngine {
         self.requested_sizes.remove(&session_id);
         self.inputs.remove(&session_id);
         self.events.remove(&session_id);
+        self.frame_mailboxes.remove(&session_id);
         self.profiles.remove(&session_id);
         self.latest_frames.remove(&session_id);
         self.event_backlog.remove(&session_id);
@@ -295,6 +308,7 @@ impl RemoteDesktopEngine for NativeRdpEngine {
             self.events.remove(&session.id);
         }
 
+        let terminal = channel_closed || drained.iter().any(|event| matches!(event, EngineEvent::Error { .. } | EngineEvent::Disconnected { .. }));
         for event in drained {
             match event {
                 EngineEvent::Frame(frame) => {
@@ -310,6 +324,15 @@ impl RemoteDesktopEngine for NativeRdpEngine {
             }
         }
 
+        if let Some(frame) = self.frame_mailboxes.get(&session.id).and_then(|frames| frames.take()) {
+            if matches!(session.status, SessionStatus::Connecting | SessionStatus::Connected | SessionStatus::Reconnecting) && !terminal {
+                self.apply_frame(session, frame);
+            }
+        }
+        if terminal || matches!(session.status, SessionStatus::Failed | SessionStatus::Disconnected) {
+            self.latest_frames.remove(&session.id);
+            self.frame_mailboxes.remove(&session.id);
+        }
         self.advance_retry(session, Instant::now());
     }
 
@@ -339,15 +362,23 @@ fn spawn_runtime(
     profile: ConnectionProfile,
     event_sender: Sender<EngineEvent>,
     input_receiver: Receiver<InputAction>,
+    frames: crate::frame_pipeline::FrameMailbox,
 ) -> thread::JoinHandle<()> {
     crate::rdp_audio_input::allow_session(session_id);
     thread::spawn(move || {
-        run_session(IronRdpRuntime {
+        let is_vnc = profile.protocol == crate::models::Protocol::Vnc;
+        let runtime = IronRdpRuntime {
+            frames: Some(frames),
             profile,
             session_id,
             events: event_sender,
             input: input_receiver,
-        });
+        };
+        if is_vnc {
+            crate::vnc_client::run_session(runtime);
+        } else {
+            run_session(runtime);
+        }
     })
 }
 
@@ -461,6 +492,8 @@ impl NativeRdpEngine {
         self.release_inputs(session_id);
         self.inputs.remove(&session_id);
         self.events.remove(&session_id);
+        self.frame_mailboxes.remove(&session_id);
+        self.latest_frames.remove(&session_id);
     }
 
     fn schedule_retry(&mut self, session: &mut RemoteSession) {
@@ -526,7 +559,12 @@ impl NativeRdpEngine {
         let (input_sender, input_receiver) = mpsc::channel();
         self.workers.insert(
             session.id,
-            spawn_runtime(session.id, profile, event_sender, input_receiver),
+            spawn_runtime(session.id, profile, event_sender, input_receiver, {
+                let frames = crate::frame_pipeline::FrameMailbox::default();
+                self.frame_mailboxes.insert(session.id, frames.clone());
+                self.latest_frames.remove(&session.id);
+                frames
+            }),
         );
         self.events.insert(session.id, event_receiver);
         self.inputs.insert(session.id, input_sender);
@@ -537,9 +575,12 @@ impl NativeRdpEngine {
         session.status = SessionStatus::Reconnecting;
     }
 
-    fn apply_frame(&mut self, session: &mut RemoteSession, frame: FrameUpdate) {
+    fn apply_frame(&mut self, session: &mut RemoteSession, mut frame: FrameUpdate) {
         session.status = SessionStatus::Connected;
         session.frame_size = Some((frame.width, frame.height));
+        if let Some(old) = self.latest_frames.get(&session.id) {
+            crate::frame_pipeline::merge_damage(&mut frame, old);
+        }
         self.latest_frames.insert(session.id, frame);
     }
 
@@ -757,6 +798,59 @@ mod tests {
         assert!(engine.retry_status(session.id).is_none());
         assert!(engine.inputs.is_empty());
         assert!(engine.workers.is_empty());
+    }
+
+    fn test_frame(id: Uuid, left: u16) -> FrameUpdate {
+        FrameUpdate {
+            session_id: id, width: 4, height: 4, pixels_rgba: vec![255; 64],
+            dirty_regions: vec![crate::models::DirtyRegion {left, top: 0, right: left, bottom: 0}],
+            frame_hash: 0, captured_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn pending_frame_cannot_resurrect_terminal_session_or_retry() {
+        for class in [DiagnosticClass::Auth, DiagnosticClass::Tcp] {
+            let profile = ConnectionProfile::sample("test", "localhost", "test", false);
+            let mut session = session(&profile);
+            let mut engine = NativeRdpEngine::default();
+            engine.profiles.insert(session.id, profile);
+            engine.retries.insert(session.id, RetryState::default());
+            let slot = crate::frame_pipeline::FrameMailbox::default();
+            slot.publish(test_frame(session.id, 0));
+            engine.frame_mailboxes.insert(session.id, slot.clone());
+            let (tx, rx) = mpsc::channel();
+            engine.events.insert(session.id, rx);
+            tx.send(EngineEvent::Error {session_id: session.id, class, message: "test failure".into()}).unwrap();
+            engine.tick(&mut session);
+            assert_ne!(session.status, SessionStatus::Connected);
+            assert!(engine.poll_frame(session.id).is_none());
+            slot.publish(test_frame(session.id, 1));
+            engine.tick(&mut session);
+            assert_ne!(session.status, SessionStatus::Connected);
+            assert!(engine.poll_frame(session.id).is_none());
+        }
+    }
+
+    #[test]
+    fn unconsumed_frame_preserves_damage_and_disconnect_drops_mailbox() {
+        let profile = ConnectionProfile::sample("test", "localhost", "test", false);
+        let mut session = session(&profile);
+        let mut engine = NativeRdpEngine::default();
+        let id = session.id;
+        engine.apply_frame(&mut session, test_frame(id, 0));
+        engine.apply_frame(&mut session, test_frame(id, 3));
+        let latest = engine.poll_frame(id).unwrap();
+        assert_eq!(latest.dirty_regions[0].left, 0);
+        assert_eq!(latest.dirty_regions[0].right, 3);
+        engine.frame_mailboxes.insert(id, crate::frame_pipeline::FrameMailbox::default());
+        engine.disconnect(id).unwrap();
+        assert!(!engine.frame_mailboxes.contains_key(&id));
+        engine.frame_mailboxes.insert(id, crate::frame_pipeline::FrameMailbox::default());
+        engine.apply_frame(&mut session, test_frame(id, 0));
+        engine.cancel_reconnect(id);
+        assert!(!engine.frame_mailboxes.contains_key(&id));
+        assert!(engine.poll_frame(id).is_none());
     }
 
     #[test]

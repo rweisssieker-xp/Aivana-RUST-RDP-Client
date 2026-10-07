@@ -14,6 +14,7 @@ pub struct ProfileOptions {
     pub shared_folders: Vec<SharedFolder>,
     pub gateway: crate::rd_gateway::GatewayOptions,
     pub remote_app: crate::remoteapp::RemoteAppOptions,
+    pub mstsc: crate::mstsc_settings::MstscSettings,
 }
 impl Default for ProfileOptions {
     fn default() -> Self {
@@ -29,6 +30,7 @@ impl Default for ProfileOptions {
             shared_folders: Vec::new(),
             gateway: Default::default(),
             remote_app: Default::default(),
+            mstsc: Default::default(),
         }
     }
 }

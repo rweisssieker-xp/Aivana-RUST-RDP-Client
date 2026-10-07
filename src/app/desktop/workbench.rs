@@ -1,6 +1,63 @@
 //! Directory-first workspace and optional comparison view.
 use super::*;
 
+fn mstsc_profile_options(ui: &mut Ui, options: &mut crate::connection_options::ProfileOptions) {
+    ui.collapsing("Windows RDP settings", |ui| {
+        ui.checkbox(&mut options.mstsc.windows_compatibility, "Use embedded Windows RDP control");
+        for group in ["Display", "Local resources", "Experience", "Advanced"] {
+            ui.push_id(group, |ui| { ui.collapsing(group, |ui| {
+                for spec in crate::mstsc_settings::SETTINGS.iter().filter(|s| s.group == group) {
+                    if spec.key == "promptcredentialonce" { continue; } // Gateway section owns this field.
+                    let mut value = if spec.key == "audiomode" {
+                        if options.audio_playback { 0 } else if options.mstsc.get(spec.key) == 1 { 1 } else { 2 }
+                    } else { options.mstsc.get(spec.key) };
+                    let old = value;
+                    if spec.choices.len() == 2 && spec.choices[0].1 == "Off" {
+                        let mut enabled = value == 1;
+                        ui.checkbox(&mut enabled, spec.label);
+                        value = u32::from(enabled);
+                    } else {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(spec.label);
+                            egui::ComboBox::from_id_salt(spec.key)
+                                .selected_text(spec.choices.iter().find(|(v, _)| *v == value).map(|(_, label)| *label).unwrap_or("Invalid setting"))
+                                .show_ui(ui, |ui| { for (v, label) in spec.choices { ui.selectable_value(&mut value, *v, *label); } });
+                        });
+                    }
+                    if value != old {
+                        // Choices come from the same schema used by import validation.
+                        let _ = options.mstsc.set(spec.key, value);
+                        if spec.key == "audiomode" { options.audio_playback = value == 0; }
+                        if spec.key == "connection type" { let _ = options.mstsc.set("networkautodetect", u32::from(value == 7)); }
+                        if spec.key == "networkautodetect" { let _ = options.mstsc.set("connection type", if value == 1 { 7 } else { 6 }); }
+                        if spec.key == "gatewayusagemethod" { options.gateway.enabled = ![0, 4].contains(&value); }
+                    }
+                }
+                if group == "Local resources" {
+                    text_field(ui, "Windows drives (C:;D:;), * for all, or DynamicDrives", &mut options.mstsc.drives);
+                    ui.small("Drive redirection grants access to the selected drive, including writes.");
+                    egui::ComboBox::from_id_salt("windows_devices")
+                        .selected_text(match options.mstsc.devices.as_str() { "*" => "All supported Plug and Play devices", "DynamicDevices" => "Devices connected later", _ => "No Plug and Play devices" })
+                        .show_ui(ui, |ui| {
+                            for (value, label) in [("", "None"), ("*", "All supported devices"), ("DynamicDevices", "Devices connected later")] {
+                                ui.selectable_value(&mut options.mstsc.devices, value.into(), label);
+                            }
+                        });
+                    ui.small("Device availability depends on Windows, device drivers and server policy.");
+                }
+            }); });
+        }
+    });
+    if options.mstsc.requires_windows() {
+        ui.label("Connection mode: embedded Windows RDP · one Windows session at a time");
+        ui.small("Windows handles server authentication. Recording and automated session actions are available in Rust sessions.");
+        if !options.shared_folders.is_empty() || !options.monitors.is_empty() {
+            ui.colored_label(egui::Color32::YELLOW, "Remove custom folder shares / monitor layouts before connecting with Windows RDP. Use Windows drives / local monitors above.");
+        }
+        if options.gateway.paa { ui.colored_label(egui::Color32::YELLOW, "PAA gateway authentication requires the Rust connection mode."); }
+    } else { ui.label("Connection mode: Rust RDP"); }
+}
+
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub(super) struct WorkbenchState {
@@ -74,7 +131,7 @@ impl AivanaApp {
             }
         }
         let gateway = &mut profile.options.gateway;
-        if gateway.enabled && !gateway.paa && !gateway.use_profile_credentials {
+        if gateway.enabled && !gateway.paa && !gateway.use_profile_credentials && profile.options.mstsc.get("gatewayusagemethod") != 3 {
             let id = gateway.credential_id.ok_or_else(|| {
                 anyhow::anyhow!("Gateway credentials missing. Save them in the profile.")
             })?;
@@ -104,6 +161,7 @@ impl AivanaApp {
 
     pub(in crate::app) fn workbench_profile_options(&mut self, ui: &mut Ui) {
         let options = &mut self.draft.options;
+        mstsc_profile_options(ui, options);
         ui.collapsing("Display & reconnection", |ui| {
             ui.checkbox(&mut options.dynamic_resolution, "Automatically fit resolution to the session window");
             ui.horizontal_wrapped(|ui| {
@@ -138,10 +196,6 @@ impl AivanaApp {
             ui.checkbox(
                 &mut options.clipboard,
                 "Share clipboard between this computer and the session",
-            );
-            ui.checkbox(
-                &mut options.audio_playback,
-                "Play remote audio on this computer",
             );
             ui.checkbox(
                 &mut options.microphone,
@@ -182,9 +236,18 @@ impl AivanaApp {
         });
         ui.collapsing("RD Gateway", |ui| {
             let gateway = &mut options.gateway;
-            ui.checkbox(&mut gateway.enabled, "Connect through RD Gateway");
-            ui.add_enabled_ui(gateway.enabled, |ui| {
-                ui.checkbox(&mut gateway.ntlm, "NTLM (SSPI_NTLM); disabled: Basic over TLS");
+            if ui.checkbox(&mut gateway.enabled, "Connect through RD Gateway").changed()
+                && gateway.enabled && [0, 4].contains(&options.mstsc.get("gatewayusagemethod")) {
+                let _ = options.mstsc.set("gatewayusagemethod", 1);
+            }
+            let system_gateway = options.mstsc.get("gatewayusagemethod") == 3;
+            if system_gateway { ui.small("Using the default gateway settings saved in Windows."); }
+            ui.add_enabled_ui(gateway.enabled && !system_gateway, |ui| {
+                if options.mstsc.requires_windows() {
+                    ui.small("Windows negotiates the gateway authentication method.");
+                } else {
+                    ui.checkbox(&mut gateway.ntlm, "NTLM (SSPI_NTLM); disabled: Basic over TLS");
+                }
                 ui.checkbox(&mut gateway.paa, "PAA: enter provider cookie for each connection");
                 ui.small("PAA takes precedence over NTLM/Basic. Use only a PAA cookie issued by the gateway provider. General OAuth tokens and OTP codes are not supported. Gateway consent prompts are shown for confirmation; external MFA is awaited for up to 120 seconds.");
                 text_field(ui, "Gateway host", &mut gateway.host);

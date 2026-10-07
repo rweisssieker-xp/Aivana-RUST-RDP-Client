@@ -1,0 +1,148 @@
+name: Investigator Windows readiness
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/investigator-windows.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - 'src/investigator/**'
+      - 'src/bin/relayne_investigator.rs'
+      - 'src/bin/relayne_approval.rs'
+      - 'integrations/investigator/**'
+      - 'docs/investigator-*.md'
+      - 'docs/security-investigator*.md'
+  pull_request:
+    paths:
+      - '.github/workflows/investigator-windows.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - 'src/investigator/**'
+      - 'src/bin/relayne_investigator.rs'
+      - 'src/bin/relayne_approval.rs'
+      - 'integrations/investigator/**'
+      - 'docs/investigator-*.md'
+      - 'docs/security-investigator*.md'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: investigator-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  readiness:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build Investigator and offline approval binaries
+        run: cargo build --locked --bin relayne_investigator --bin relayne_approval
+
+      - name: Test Investigator and approval binaries
+        run: cargo test --locked --bin relayne_investigator --bin relayne_approval
+
+      - name: Run Clippy for Investigator and approval binaries
+        run: cargo clippy --locked --bin relayne_investigator --bin relayne_approval -- -D warnings
+
+      - name: Run synthetic offline backup and restore acceptance
+        shell: pwsh
+        run: |
+          $output = Join-Path $env:RUNNER_TEMP "investigator-acceptance-${{ github.run_id }}-${{ github.run_attempt }}"
+          ./integrations/investigator/pilot/run-offline-acceptance.ps1 `
+            -Executable ./target/debug/relayne_investigator.exe `
+            -OutputDirectory $output
+
+      - name: Build safe Investigator release package
+        shell: pwsh
+        run: |
+          cargo build --release --locked --bin relayne_investigator --bin relayne_approval
+          if ($LASTEXITCODE -ne 0) { throw "Release build failed ($LASTEXITCODE)" }
+
+          $package = Join-Path $env:RUNNER_TEMP "investigator-package-${{ github.run_id }}-${{ github.run_attempt }}"
+          $null = New-Item -ItemType Directory -Path (Join-Path $package 'config')
+          $null = New-Item -ItemType Directory -Path (Join-Path $package 'docs')
+          Copy-Item ./target/release/relayne_investigator.exe (Join-Path $package 'relayne_investigator.exe')
+          Copy-Item ./target/release/relayne_approval.exe (Join-Path $package 'relayne_approval.exe')
+
+          $configPath = Join-Path $package 'config/investigator.example.json'
+          & (Join-Path $package 'relayne_investigator.exe') init $configPath
+          if ($LASTEXITCODE -ne 0) { throw "Config initialization failed ($LASTEXITCODE)" }
+          $example = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+          if ($example.sources.enabled -or $example.collectors.enabled -or $example.response.enabled -or $example.integrations.enabled -or $example.operations.a1_enabled) {
+            throw 'Generated example config unexpectedly enables a provider, collector, response, integration, or A1 operation.'
+          }
+          foreach ($name in @('entra_token', 'defender_process', 'log_analytics_storage', 'log_analytics_network', 'adcs')) {
+            if ($example.collectors.$name.enabled) { throw "Generated example config unexpectedly enables collector $name." }
+          }
+          foreach ($instance in @($example.collectors.instances)) {
+            if ($instance.cloud.enabled -or $instance.analytics.enabled -or $instance.adcs.enabled) {
+              throw 'Generated example config unexpectedly enables a collector instance.'
+            }
+          }
+          & (Join-Path $package 'relayne_investigator.exe') contract | Set-Content -LiteralPath (Join-Path $package 'config/connector-contract.json') -Encoding utf8
+          if ($LASTEXITCODE -ne 0) { throw "Connector contract export failed ($LASTEXITCODE)" }
+
+          $documentNames = @(
+            'investigator-deployment.md',
+            'investigator-approvals.md',
+            'investigator-backup-restore.md',
+            'investigator-live-collectors.md',
+            'investigator-response.md',
+            'investigator-site-matrix.md',
+            'investigator-pilot.md',
+            'security-investigator-acceptance.md'
+          )
+          foreach ($name in $documentNames) {
+            Copy-Item (Join-Path 'docs' $name) (Join-Path (Join-Path $package 'docs') $name)
+          }
+
+          $packageFiles = @(
+            'relayne_investigator.exe',
+            'relayne_approval.exe',
+            'config/investigator.example.json',
+            'config/connector-contract.json'
+          ) + @($documentNames | ForEach-Object { "docs/$_" })
+          $hashLines = foreach ($relativePath in $packageFiles) {
+            $fullPath = Join-Path $package $relativePath
+            if (!(Test-Path -LiteralPath $fullPath -PathType Leaf)) { throw "Expected package file missing: $relativePath" }
+            $hash = (Get-FileHash -LiteralPath $fullPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $relativePath"
+          }
+          Set-Content -LiteralPath (Join-Path $package 'SHA256SUMS.txt') -Value $hashLines -Encoding ascii
+
+          $archive = Join-Path $env:RUNNER_TEMP "investigator-windows-package-${{ github.run_id }}-${{ github.run_attempt }}.zip"
+          Compress-Archive -Path (Join-Path $package '*') -DestinationPath $archive
+          Write-Output "Created allowlisted package: $archive"
+
+      - name: Upload synthetic acceptance diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: investigator-windows-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/investigator-acceptance-${{ github.run_id }}-${{ github.run_attempt }}/acceptance-receipt.json
+            ${{ runner.temp }}/investigator-acceptance-${{ github.run_id }}-${{ github.run_attempt }}/replay/report.json
+            ${{ runner.temp }}/investigator-acceptance-${{ github.run_id }}-${{ github.run_attempt }}/backup/manifest.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload allowlisted Windows release package
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: investigator-windows-package-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/investigator-windows-package-${{ github.run_id }}-${{ github.run_attempt }}.zip
+          if-no-files-found: error
+          retention-days: 14

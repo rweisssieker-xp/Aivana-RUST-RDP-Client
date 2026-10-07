@@ -1,10 +1,12 @@
 mod ai;
+mod vnc_client;
 mod app;
 mod autopilot;
 mod certificate;
 mod change_history;
 mod computer_use;
 mod connection_options;
+mod mstsc_settings;
 mod diagnostics;
 mod equivalence;
 mod execution;
@@ -25,8 +27,11 @@ mod legacy_rdp;
 mod memory;
 mod mission;
 mod models;
+mod frame_pipeline;
 #[cfg(windows)]
 mod native_remoteapp;
+#[cfg(windows)]
+mod native_rdp_resources;
 mod operations;
 mod package_trust;
 mod policy;
@@ -657,6 +662,8 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
+            .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../assets/relayne.png"))
+                .expect("embedded Relayne icon must be valid PNG"))
             .with_inner_size(if args.iter().any(|arg| arg == "--gui-capture") {
                 [1440.0, 1024.0]
             } else {

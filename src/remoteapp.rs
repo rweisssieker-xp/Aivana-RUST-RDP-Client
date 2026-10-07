@@ -46,6 +46,22 @@ pub fn rdp_document(profile: &ConnectionProfile, app: &RemoteAppOptions) -> anyh
     }
     Ok(text)
 }
+
+pub fn validate_options(app: &RemoteAppOptions) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !app.program.trim().is_empty(),
+        "RemoteApp program is missing"
+    );
+    for field in [
+        &app.program,
+        &app.name,
+        &app.arguments,
+        &app.working_directory,
+    ] {
+        value(field)?;
+    }
+    Ok(())
+}
 #[cfg(windows)]
 pub fn launch(profile: &ConnectionProfile, app: &RemoteAppOptions) -> anyhow::Result<()> {
     use std::{io::Write, os::windows::process::CommandExt};

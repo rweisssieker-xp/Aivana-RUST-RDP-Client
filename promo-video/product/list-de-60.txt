@@ -1,0 +1,5 @@
+file 'C:/tmp/Aivana-RUST-RDP-Client/promo-video/product/clip-de-60-0.mp4'
+file 'C:/tmp/Aivana-RUST-RDP-Client/promo-video/product/clip-de-60-1.mp4'
+file 'C:/tmp/Aivana-RUST-RDP-Client/promo-video/product/clip-de-60-2.mp4'
+file 'C:/tmp/Aivana-RUST-RDP-Client/promo-video/product/clip-de-60-3.mp4'
+file 'C:/tmp/Aivana-RUST-RDP-Client/promo-video/product/clip-de-60-4.mp4'

@@ -72,6 +72,7 @@ mod recovery_panel;
 mod session_windows;
 mod teaching_panel;
 mod team_panel;
+mod investigator_panel;
 mod terminal_panel;
 mod test_lab_panel;
 mod change_trial_panel;
@@ -111,6 +112,7 @@ enum View {
     Recordings,
     Teaching,
     Team,
+    Investigator,
     Terminal,
     Vision,
     Intelligence,
@@ -209,6 +211,7 @@ pub struct AivanaApp {
     recordings: recordings_panel::RecordingsState,
     teaching: teaching_panel::TeachingState,
     team: team_panel::TeamState,
+    investigator: investigator_panel::InvestigatorState,
     terminal: Option<crate::terminal::Terminal>,
     vision: vision_panel::VisionState,
     intelligence: intelligence_panel::IntelligenceState,
@@ -325,6 +328,7 @@ impl AivanaApp {
             recordings: recordings_panel::RecordingsState::default(),
             teaching: teaching_panel::TeachingState::default(),
             team: team_panel::TeamState::default(),
+            investigator: investigator_panel::InvestigatorState::default(),
             terminal: None,
             vision: vision_panel::VisionState::default(),
             intelligence: intelligence_panel::IntelligenceState::default(),
@@ -414,6 +418,10 @@ impl AivanaApp {
     }
 
     fn save_draft(&mut self) {
+        if let Err(err) = self.draft.options.mstsc.validate() {
+            self.status = format!("Invalid RDP settings: {err}");
+            return;
+        }
         if let Err(err) = crate::rd_gateway::validate_host(self.draft.host.trim()) {
             self.status = format!("Invalid host address: {err}");
             return;
@@ -429,10 +437,10 @@ impl AivanaApp {
             self.status = "The port must be between 1 and 65535.".to_owned();
             return;
         }
-        if let Err(err) = crate::rd_gateway::validate_gateway(
+        if let Err(err) = if self.draft.options.mstsc.get("gatewayusagemethod") == 3 { Ok(()) } else { crate::rd_gateway::validate_gateway(
             &self.draft.options.gateway,
             self.draft.port.parse().unwrap_or(3389),
-        ) {
+        ) } {
             self.status = format!("Invalid gateway settings: {err}");
             return;
         }
@@ -463,7 +471,7 @@ impl AivanaApp {
             .draft
             .port
             .parse::<u16>()
-            .unwrap_or_else(|_| Protocol::Rdp.default_port());
+            .unwrap_or_else(|_| self.draft.protocol.default_port());
         let tags = self
             .draft
             .tags
@@ -558,9 +566,16 @@ impl AivanaApp {
                 return;
             }
             if profile.protocol == Protocol::Vnc {
-                self.status="VNC profiles can be managed; a VNC connection backend is not implemented.".into();
+                self.connect_vnc(profile);
                 return;
             }
+        }
+        if let Some(profile) = self.selected_profile().cloned().filter(|p| p.options.mstsc.requires_windows()) {
+            match self.workbench_runtime_profile(&profile) {
+                Ok(profile) => self.protocols.launch = Some(profile),
+                Err(error) => self.status = format!("Windows RDP: {error:#}"),
+            }
+            return;
         }
         self.begin_certificate_probe(connection_probe::ProbeIntent::Connect);
     }
@@ -571,12 +586,18 @@ impl AivanaApp {
         probe: Result<String, String>,
         report: Option<crate::models::PreflightReport>,
     ) {
-        let mut legacy_standard_rdp = false;
         let fingerprint = match probe {
             Ok(fingerprint) => fingerprint,
             Err(err) if is_standard_rdp_security_error(&format!("{err:#}")) => {
-                legacy_standard_rdp = true;
-                "legacy-standard-rdp-no-tls-certificate".to_owned()
+                self.certificate_notice = format!(
+                    "{}:{} uses Standard RDP Security. Authentication and security negotiation are handled by the embedded Windows RDP control.",
+                    profile.host, profile.port,
+                );
+                self.status = match self.protocols.queue_standard_rdp(profile) {
+                    Ok(()) => "Starting Standard RDP Security connection through Windows RDP.".into(),
+                    Err(error) => error.to_string(),
+                };
+                return;
             }
             Err(err) => {
                 self.status = format!("RDP certificate probe failed: {err}");
@@ -593,12 +614,7 @@ impl AivanaApp {
                 return;
             }
         };
-        if legacy_standard_rdp {
-            self.certificate_notice = format!(
-                "{}:{} uses Standard RDP Security without a TLS certificate. Relayne is trying the native legacy backend.",
-                profile.host, profile.port
-            );
-        } else {
+        {
             let cert_status = self
                 .certificates
                 .classify(&profile.host, profile.port, &fingerprint);
@@ -1155,18 +1171,22 @@ impl eframe::App for AivanaApp {
                 }
             }
             if let Some(frame) = self.engine.poll_frame(session.id) {
-                let image = ColorImage::from_rgba_unmultiplied(
-                    [usize::from(frame.width), usize::from(frame.height)],
-                    &frame.pixels_rgba,
-                );
+                let previous_size = self.textures.get(&session.id).map(|texture| texture.size());
+                let Some(upload) = crate::frame_pipeline::prepare_upload(&frame, previous_size) else {
+                    continue;
+                };
                 match self.textures.entry(session.id) {
                     Entry::Occupied(mut texture) => {
-                        texture.get_mut().set(image, TextureOptions::NEAREST);
+                        if upload.full {
+                            texture.get_mut().set(upload.image, TextureOptions::NEAREST);
+                        } else {
+                            texture.get_mut().set_partial(upload.origin, upload.image, TextureOptions::NEAREST);
+                        }
                     }
                     Entry::Vacant(slot) => {
                         slot.insert(ctx.load_texture(
                             format!("rdp-frame-{}", session.id),
-                            image,
+                            upload.image,
                             TextureOptions::NEAREST,
                         ));
                     }
@@ -1369,7 +1389,8 @@ impl AivanaApp {
                 ui.label("Protocol");
                 let previous = draft.protocol.clone();
                 ui.selectable_value(&mut draft.protocol, Protocol::Rdp, "RDP");
-                ui.selectable_value(&mut draft.protocol, Protocol::Ssh, "SSH / SFTP");
+                    ui.selectable_value(&mut draft.protocol, Protocol::Ssh, "SSH / SFTP");
+                    ui.selectable_value(&mut draft.protocol, Protocol::Vnc, "VNC / Mac");
                 if previous != draft.protocol {
                     draft.port = draft.protocol.default_port().to_string();
                     if draft.protocol == Protocol::Ssh {
@@ -1392,8 +1413,11 @@ impl AivanaApp {
                 text_field(&mut columns[0], "Domain", &mut draft.domain);
                 text_field(&mut columns[1], "Group", &mut draft.group);
             });
-            if draft.protocol == Protocol::Rdp {
-                password_field(ui, "Password", &mut draft.password);
+                if draft.protocol == Protocol::Vnc {
+                    ui.label("Mac: enable Screen Sharing and a VNC password in Computer Settings. Use 1–8 ASCII characters. Use a trusted LAN or VPN; VNC does not encrypt the desktop. Windows key = Command, Alt = Option. No audio, file transfer or remote resolution changes.");
+                }
+                if draft.protocol != Protocol::Ssh {
+                    password_field(ui, "Password", &mut draft.password);
             }
             text_field(ui, "Tags", &mut draft.tags);
             ui.checkbox(&mut draft.favorite, "Favorite");
@@ -1411,7 +1435,10 @@ impl AivanaApp {
                     .button("Open RemoteApp with the embedded Windows control")
                     .clicked()
                 {
-                    self.protocols.launch = Some(profile);
+                    match self.workbench_runtime_profile(&profile) {
+                        Ok(profile) => self.protocols.launch = Some(profile),
+                        Err(error) => self.status = format!("RemoteApp credentials: {error:#}"),
+                    }
                 }
             }
         });

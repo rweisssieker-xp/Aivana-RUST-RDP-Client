@@ -1,5 +1,9 @@
 # Relayne
 
+Mac-Fernsteuerung: [VNC-Verbindungen einrichten und verwenden](docs/mac-vnc.md).
+
+Performance: [Bildverarbeitung, Messwerte und Grenzen](docs/performance.md). Für den Einsatz `cargo build --release --bin relayne` und anschließend `target/release/relayne.exe` verwenden.
+
 Native Windows-Arbeitsumgebung für RDP, SSH, geprüfte Remote-Aufträge und gemeinsames Betriebswissen. Neuer Produktname; bestehende Aivana-Profile und DPAPI-Zugänge bleiben unter ihrem bisherigen Speicherpfad nutzbar.
 
 Neu: Der [Recovery Agent](docs/relayne-recovery-agent.md) verbindet Störungsbeschreibung und geprüften KI-Dienstvorschlag mit Klon-Generalprobe, Produktionsfreigabe und fallbezogenem Ergebnisnachweis. Aufruf über **Recovery Agent**; die Übernahme eines Vorschlags startet keine Verbindung.
@@ -379,3 +383,7 @@ cargo run -- --rdp-smoke-test
 [English (US)](docs/distribution/en-US/guide.md) · [Deutsch](docs/distribution/de/guide.md) · [Français](docs/distribution/fr/guide.md) · [Italiano](docs/distribution/it/guide.md)
 
 Development only · Nur Entwicklung · Développement uniquement · Solo sviluppo.
+
+## Security Investigator
+
+[Security Investigator – Start, Rollen, Quellen und Betriebsgrenzen](docs/security-investigator.md): eigenständiger Untersuchungsdienst mit persistenter Queue, Web-Oberfläche und gemeinsamer MCP-Fall-API. In Relayne über **Security Investigator** erreichbar. Build: `cargo build --bin relayne_investigator`. Synthetischer Referenzfall ohne Netzwerk: `target/debug/relayne_investigator.exe replay target/investigator-reference`. Live-Quellen und A1 sind standardmäßig deaktiviert. [Technische Abnahme](docs/security-investigator-acceptance.md).

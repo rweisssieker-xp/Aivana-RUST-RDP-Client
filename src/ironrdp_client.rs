@@ -12,7 +12,7 @@ use ironrdp::pdu::gcc::KeyboardType;
 use ironrdp::pdu::rdp::capability_sets::MajorPlatformType;
 use ironrdp::session::image::DecodedImage;
 use ironrdp::session::{ActiveStage, ActiveStageOutput};
-use ironrdp_pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
+use ironrdp_pdu::rdp::client_info::TimezoneInfo;
 use serde::Serialize;
 use sspi::network_client::reqwest_network_client::ReqwestNetworkClient;
 use tokio_rustls::rustls;
@@ -97,6 +97,7 @@ impl Write for BaseTransport {
 
 enum RdpTransport {
     Tls(rustls::StreamOwned<rustls::ClientConnection, BaseTransport>),
+    #[cfg(test)]
     Plain(BaseTransport),
 }
 
@@ -104,6 +105,7 @@ impl Read for RdpTransport {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
             Self::Tls(stream) => stream.read(buf),
+            #[cfg(test)]
             Self::Plain(stream) => stream.read(buf),
         }
     }
@@ -113,6 +115,7 @@ impl Write for RdpTransport {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         match self {
             Self::Tls(stream) => stream.write(buf),
+            #[cfg(test)]
             Self::Plain(stream) => stream.write(buf),
         }
     }
@@ -120,6 +123,7 @@ impl Write for RdpTransport {
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
             Self::Tls(stream) => stream.flush(),
+            #[cfg(test)]
             Self::Plain(stream) => stream.flush(),
         }
     }
@@ -129,10 +133,10 @@ impl Write for RdpTransport {
 enum RdpSecurityMode {
     NlaCredSsp,
     TlsGraphicalLogin,
-    StandardRdp,
 }
 
 pub struct IronRdpRuntime {
+    pub frames: Option<crate::frame_pipeline::FrameMailbox>,
     pub profile: ConnectionProfile,
     pub session_id: uuid::Uuid,
     pub events: Sender<EngineEvent>,
@@ -456,6 +460,7 @@ pub fn rdp_smoke_test(profile: ConnectionProfile, timeout_secs: u64) -> Result<R
 
     std::thread::spawn(move || {
         run_session(IronRdpRuntime {
+            frames: None,
             profile,
             session_id,
             events,
@@ -624,8 +629,7 @@ fn run_session_inner(runtime: IronRdpRuntime) -> Result<()> {
         .as_ref()
         .is_some_and(|detection| detection.mode == LegacySecurityMode::StandardRdp)
     {
-        connect_standard_with_channels(&runtime.profile, Some(&mut channels))
-            .context("legacy Standard RDP Security connect")?
+        anyhow::bail!("Standard RDP Security requires the embedded Windows RDP control. The Rust engine does not support legacy session encryption; connect through the Windows app or enable TLS/NLA on the server.");
     } else {
         let config = build_config(&runtime.profile);
         connect(
@@ -653,6 +657,7 @@ fn run_session_inner(runtime: IronRdpRuntime) -> Result<()> {
         RdpTransport::Tls(stream) => stream
             .sock
             .set_read_timeout(Some(Duration::from_millis(20)))?,
+        #[cfg(test)]
         RdpTransport::Plain(stream) => stream.set_read_timeout(Some(Duration::from_millis(20)))?,
     }
     let mut image = DecodedImage::new(
@@ -748,6 +753,7 @@ fn run_session_inner(runtime: IronRdpRuntime) -> Result<()> {
                     &mut framed,
                     &image,
                     &runtime.events,
+                    runtime.frames.as_ref(),
                 )?;
                 stats.response_frames += output_stats.response_frames;
                 stats.graphics_updates += output_stats.graphics_updates;
@@ -800,7 +806,7 @@ fn block_unsupported_legacy_standard(profile: &ConnectionProfile) -> Result<()> 
     if let Ok(detection) = detect_server_security(profile) {
         if detection.mode == LegacySecurityMode::StandardRdp {
             anyhow::bail!(
-                "standard rdp security detected on {}:{}: {}. Native RC4 security exchange is not implemented yet.",
+                "standard rdp security detected on {}:{}: {}. Use the embedded Windows RDP control; the Rust engine does not support legacy session encryption.",
                 profile.host,
                 profile.port,
                 detection.detail
@@ -825,7 +831,6 @@ fn build_config_for_security(
     let (enable_tls, enable_credssp) = match security_mode {
         RdpSecurityMode::NlaCredSsp => (false, true),
         RdpSecurityMode::TlsGraphicalLogin => (true, false),
-        RdpSecurityMode::StandardRdp => (false, false),
     };
 
     connector::Config {
@@ -850,7 +855,11 @@ fn build_config_for_security(
             width: profile.options.width.clamp(200, 8192) & !1,
             height: profile.options.height.clamp(200, 8192),
         },
-        bitmap: None,
+        bitmap: Some(connector::BitmapConfig {
+            lossy_compression: false,
+            color_depth: profile.options.mstsc.get("session bpp"),
+            codecs: ironrdp_pdu::rdp::capability_sets::client_codecs_capabilities(&[]).expect("empty codec list is valid"),
+        }),
         client_build: 0,
         client_name: "aivana-rust-rdp-client".to_owned(),
         client_dir: "native-rust".to_owned(),
@@ -879,7 +888,7 @@ fn build_config_for_security(
         autologon: false,
         enable_audio_playback: profile.options.audio_playback,
         pointer_software_rendering: true,
-        performance_flags: PerformanceFlags::default(),
+        performance_flags: profile.options.mstsc.performance_flags(),
         desktop_scale_factor: 0,
         hardware_id: None,
         license_cache: None,
@@ -926,52 +935,6 @@ fn connect(
         &mut network_client,
         server_name.into(),
         server_public_key,
-        None,
-    )
-    .context("connection finalize")?;
-
-    Ok((connection_result, upgraded_framed))
-}
-
-fn connect_standard(profile: &ConnectionProfile) -> Result<(ConnectionResult, UpgradedFramed)> {
-    connect_standard_with_channels(profile, None)
-}
-
-fn connect_standard_with_channels(
-    profile: &ConnectionProfile,
-    channels: Option<&mut crate::rdp_channels::Channels>,
-) -> Result<(ConnectionResult, UpgradedFramed)> {
-    let mut tcp_stream = BaseTransport::connect(profile)?;
-    tcp_stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .context("set read timeout")?;
-
-    let client_addr = tcp_stream
-        .local_addr()
-        .context("get local socket address")?;
-    let mut framed = ironrdp_blocking::Framed::new(tcp_stream);
-    let mut connector = connector::ClientConnector::new(
-        build_config_for_security(profile, RdpSecurityMode::StandardRdp),
-        client_addr,
-    );
-
-    if let Some(channels) = channels {
-        channels.attach(&mut connector)?;
-    }
-    let should_upgrade =
-        ironrdp_blocking::connect_begin(&mut framed, &mut connector).context("connection begin")?;
-    let plain_stream = framed.into_inner_no_leftover();
-    let upgraded = ironrdp_blocking::mark_as_upgraded(should_upgrade, &mut connector);
-    let mut upgraded_framed = ironrdp_blocking::Framed::new(RdpTransport::Plain(plain_stream));
-    let mut network_client = ReqwestNetworkClient;
-
-    let connection_result = ironrdp_blocking::connect_finalize(
-        upgraded,
-        connector,
-        &mut upgraded_framed,
-        &mut network_client,
-        profile.host.clone().into(),
-        Vec::new(),
         None,
     )
     .context("connection finalize")?;
@@ -1026,8 +989,10 @@ fn process_outputs(
     framed: &mut UpgradedFramed,
     image: &DecodedImage,
     events: &Sender<EngineEvent>,
+    frames: Option<&crate::frame_pipeline::FrameMailbox>,
 ) -> Result<OutputStats> {
     let mut stats = OutputStats::default();
+    let mut dirty_regions = Vec::new();
     for output in outputs {
         match output {
             ActiveStageOutput::ResponseFrame(frame) => {
@@ -1036,22 +1001,12 @@ fn process_outputs(
             }
             ActiveStageOutput::GraphicsUpdate(region) => {
                 stats.graphics_updates += 1;
-                events
-                    .send(EngineEvent::Frame(FrameUpdate {
-                        session_id,
-                        width: image.width(),
-                        height: image.height(),
-                        pixels_rgba: image.data().to_vec(),
-                        dirty_regions: vec![DirtyRegion {
+                dirty_regions.push(DirtyRegion {
                             left: region.left,
                             top: region.top,
                             right: region.right,
                             bottom: region.bottom,
-                        }],
-                        frame_hash: frame_hash(image.data()),
-                        captured_at: chrono::Utc::now(),
-                    }))
-                    .ok();
+                });
             }
             ActiveStageOutput::Terminate(reason) => {
                 stats.terminations += 1;
@@ -1066,6 +1021,22 @@ fn process_outputs(
         }
     }
 
+    if !dirty_regions.is_empty() && stats.terminations == 0 {
+        let frame = FrameUpdate {
+            session_id,
+            width: image.width(),
+            height: image.height(),
+            pixels_rgba: image.data().to_vec(),
+            dirty_regions,
+            frame_hash: frame_hash(image.data()),
+            captured_at: chrono::Utc::now(),
+        };
+        if let Some(frames) = frames {
+            frames.publish(frame);
+        } else {
+            events.send(EngineEvent::Frame(frame)).ok();
+        }
+    }
     Ok(stats)
 }
 
@@ -1309,6 +1280,41 @@ mod tests {
     use crate::models::ConnectionProfile;
 
     #[test]
+    fn graphics_batch_emits_one_snapshot_with_all_damage() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (_peer, _) = listener.accept().unwrap();
+        let mut framed = ironrdp_blocking::Framed::new(RdpTransport::Plain(BaseTransport::Direct(socket)));
+        let image = DecodedImage::new(ironrdp_graphics::image_processing::PixelFormat::RgbA32, 4, 4);
+        let regions = [
+            ironrdp_pdu::geometry::InclusiveRectangle {left:0, top:0, right:0, bottom:0},
+            ironrdp_pdu::geometry::InclusiveRectangle {left:3, top:3, right:3, bottom:3},
+        ];
+        let (tx, rx) = std::sync::mpsc::channel();
+        let stats = process_outputs(uuid::Uuid::nil(), regions.into_iter().map(ActiveStageOutput::GraphicsUpdate).collect(), &mut framed, &image, &tx, None).unwrap();
+        assert_eq!(stats.graphics_updates, 2);
+        let EngineEvent::Frame(frame) = rx.try_recv().unwrap() else { panic!("expected frame") };
+        assert_eq!(frame.dirty_regions.len(), 2);
+        assert_eq!(frame.pixels_rgba, image.data());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn mstsc_display_preferences_reach_rust_connector() {
+        let mut profile = ConnectionProfile::sample("test", "localhost", "test", false);
+        profile.options.mstsc.set("session bpp", 16).unwrap();
+        profile.options.mstsc.set("disable wallpaper", 1).unwrap();
+        profile.options.mstsc.set("allow font smoothing", 0).unwrap();
+        let config = build_config(&profile);
+        assert_eq!(config.bitmap.as_ref().unwrap().color_depth, 16);
+        use ironrdp_pdu::rdp::client_info::PerformanceFlags as F;
+        assert!(config.performance_flags.contains(F::DISABLE_WALLPAPER));
+        assert!(!config.performance_flags.contains(F::ENABLE_FONT_SMOOTHING));
+        let original_codecs = ironrdp_pdu::rdp::capability_sets::client_codecs_capabilities(&[]).unwrap();
+        assert_eq!(config.bitmap.as_ref().unwrap().codecs, original_codecs);
+    }
+
+    #[test]
     #[ignore = "requires AIVANA_RDP_TEST_HOST and a reachable RDP endpoint"]
     fn manual_probe_server_fingerprint_or_security_mode() {
         let host = std::env::var("AIVANA_RDP_TEST_HOST").expect("AIVANA_RDP_TEST_HOST");
@@ -1342,6 +1348,44 @@ mod tests {
     }
 
     #[test]
+    fn standard_rdp_runtime_stops_before_custom_crypto_and_requests_windows_control() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop = done.clone();
+        let server = std::thread::spawn(move || {
+            let mut connections = 0;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        connections += 1;
+                        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                        let mut request = [0u8; 1024];
+                        let _ = stream.read(&mut request);
+                        stream.write_all(&[3,0,0,11,6,0xd0,0,0,0,0,0]).unwrap();
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(2)),
+                    Err(error) => panic!("{error}"),
+                }
+            }
+            connections
+        });
+        let mut profile = ConnectionProfile::sample("legacy fixture", "127.0.0.1", "test", false);
+        profile.port = address.port();
+        let (events, received) = std::sync::mpsc::channel();
+        let (_input, input) = std::sync::mpsc::channel();
+        run_session(IronRdpRuntime {profile, session_id: uuid::Uuid::new_v4(), events, input, frames: None});
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        let connections = server.join().unwrap();
+        let error = received.try_iter().find_map(|event| match event {
+            EngineEvent::Error {message, ..} => Some(message), _ => None,
+        }).expect("unsupported Rust security must fail clearly");
+        assert!(error.contains("embedded Windows RDP control"), "{error}");
+        assert_eq!(connections, 1, "only the unauthenticated negotiation probe is permitted");
+    }
+
+    #[test]
     fn runtime_failure_sends_error_event() {
         let (events, receiver) = std::sync::mpsc::channel();
         let (_input, input_receiver) = std::sync::mpsc::channel();
@@ -1351,6 +1395,7 @@ mod tests {
         let session_id = uuid::Uuid::new_v4();
 
         run_session(IronRdpRuntime {
+            frames: None,
             profile,
             session_id,
             events,
@@ -1561,35 +1606,6 @@ AIVANA_RDP_TEST_PORT=3390
     }
 
     #[test]
-    #[ignore = "requires AIVANA_RDP_TEST_HOST pointing at a Standard RDP Security endpoint"]
-    fn manual_standard_rdp_connect_reaches_connector() {
-        let host = std::env::var("AIVANA_RDP_TEST_HOST").expect("AIVANA_RDP_TEST_HOST");
-        let port = std::env::var("AIVANA_RDP_TEST_PORT")
-            .ok()
-            .and_then(|value| value.parse::<u16>().ok())
-            .unwrap_or(3389);
-        let mut profile = ConnectionProfile::sample("manual-standard-rdp", &host, "Manual", false);
-        profile.port = port;
-
-        let result = connect_standard(&profile);
-        match &result {
-            Ok((connection, _)) => println!(
-                "manual standard RDP connect reached desktop {}x{}",
-                connection.desktop_size.width, connection.desktop_size.height
-            ),
-            Err(err) => println!("manual standard RDP connect error: {err:#}"),
-        }
-        if let Err(err) = &result {
-            let message = format!("{err:#}").to_lowercase();
-            assert!(
-                !message.contains("standard rdp security is not supported")
-                    && !message.contains("server only supports standard rdp security"),
-                "legacy connector still blocks Standard RDP Security: {err:#}"
-            );
-        }
-    }
-
-    #[test]
     #[ignore = "requires AIVANA_RDP_TEST_HOST, AIVANA_RDP_TEST_USER and AIVANA_RDP_TEST_PASSWORD"]
     fn manual_rdp_session_receives_framebuffer() {
         let host = std::env::var("AIVANA_RDP_TEST_HOST").expect("AIVANA_RDP_TEST_HOST");
@@ -1612,6 +1628,7 @@ AIVANA_RDP_TEST_PORT=3390
 
         std::thread::spawn(move || {
             run_session(IronRdpRuntime {
+            frames: None,
                 profile,
                 session_id,
                 events,
@@ -1798,6 +1815,7 @@ fn local_keyboard_layout() -> u32 {
 fn set_session_timeout(framed: &mut UpgradedFramed, timeout: Duration) -> std::io::Result<()> {
     match framed.get_inner_mut().0 {
         RdpTransport::Tls(stream) => stream.sock.set_read_timeout(Some(timeout)),
+        #[cfg(test)]
         RdpTransport::Plain(stream) => stream.set_read_timeout(Some(timeout)),
     }
 }

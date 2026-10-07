@@ -806,7 +806,11 @@ fn create_gcc_blocks<'a>(
                 post_beta2_color_depth: Some(ColorDepth::Bpp8), // ignored because we set high_color_depth
                 client_product_id: Some(1),
                 serial_number: Some(0),
-                high_color_depth: Some(HighColorDepth::Bpp24),
+                high_color_depth: Some(match max_color_depth {
+                    15 => HighColorDepth::Rgb555Bpp16,
+                    16 => HighColorDepth::Rgb565Bpp16,
+                    _ => HighColorDepth::Bpp24,
+                }),
                 supported_color_depths: Some(supported_color_depths),
                 early_capability_flags: {
                     let mut early_capability_flags = ClientEarlyCapabilityFlags::VALID_CONNECTION_TYPE
