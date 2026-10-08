@@ -45,9 +45,14 @@ fn supported(scope: &BoundScope) -> Option<(CapabilityId, ProbeParams)> {
                 query_digest: crate::helper::sql::postgres::template_digest(),
             },
         )),
-        BoundScope::Database { port, .. } => Some((
-            CapabilityId::NetworkReachability,
-            ProbeParams::Network { port: *port },
+        BoundScope::Database {
+            engine: crate::helper::scope::DatabaseEngine::SqlServer,
+            ..
+        } => Some((
+            CapabilityId::SqlRead,
+            ProbeParams::SqlRead {
+                query_digest: crate::helper::sql::sql_server::template_digest(),
+            },
         )),
         BoundScope::AzureVm {
             credential: Some(_),
@@ -129,7 +134,10 @@ pub(super) fn show(
                 engine: crate::helper::scope::DatabaseEngine::Postgres,
                 ..
             } => "PostgreSQL read diagnostics",
-            BoundScope::Database { .. } => "Database TCP reachability",
+            BoundScope::Database {
+                engine: crate::helper::scope::DatabaseEngine::SqlServer,
+                ..
+            } => "SQL Server read diagnostics",
             BoundScope::Windows { .. } | BoundScope::Linux { .. } => "Host TCP reachability",
             BoundScope::AzureVm { .. } => "Azure VM resource health (live ARM read)",
             BoundScope::AwsEc2 { .. } => "AWS EC2 status (live scoped read)",

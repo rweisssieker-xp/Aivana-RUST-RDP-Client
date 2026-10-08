@@ -34,7 +34,9 @@ cap-std = "4"
 
 ironrdp-mstsgu = { version = "0.0.1", features = ["native-tls"] }
 tokio = { version = "1", features = ["rt-multi-thread", "io-util", "time", "net", "process"] }
-tokio-util = { version = "0.7", features = ["rt"] }
+tokio-util = { version = "0.7", features = ["rt", "compat"] }
+tiberius = { version = "0.12", default-features = false, features = ["native-tls", "tds73"] }
+futures-util = "0.3"
 csv = "1.4"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }

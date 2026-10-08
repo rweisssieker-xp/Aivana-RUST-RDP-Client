@@ -1,6 +1,7 @@
 //! Closed, native database readers. Engines share the normalized observation vocabulary.
 
 pub mod postgres;
+pub mod sql_server;
 pub mod types;
 
 use super::{
@@ -25,6 +26,10 @@ impl ProbeAdapter for SqlReadAdapter {
                 engine: DatabaseEngine::Postgres,
                 ..
             } => postgres::PostgresAdapter.collect(request, secrets, cancel),
+            BoundScope::Database {
+                engine: DatabaseEngine::SqlServer,
+                ..
+            } => sql_server::SqlServerAdapter.collect(request, secrets, cancel),
             _ => Box::pin(async { anyhow::bail!("SQL engine has no native reader") }),
         }
     }

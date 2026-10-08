@@ -162,6 +162,16 @@ impl CapabilityRegistry {
             ) if query_digest == &super::sql::postgres::template_digest()
                 && credential.purpose == super::scope::CredentialPurpose::Read => {}
             (
+                CapabilityId::SqlRead,
+                ProbeParams::SqlRead { query_digest },
+                BoundScope::Database {
+                    engine: super::scope::DatabaseEngine::SqlServer,
+                    credential: Some(credential),
+                    ..
+                },
+            ) if query_digest == &super::sql::sql_server::template_digest()
+                && credential.purpose == super::scope::CredentialPurpose::Read => {}
+            (
                 CapabilityId::SqlPlan,
                 ProbeParams::SqlPlan { query_digest },
                 BoundScope::Database { .. },

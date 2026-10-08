@@ -15,6 +15,55 @@ pub enum ReadState {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SqlObservation {
+    SqlServerIdentity {
+        database: String,
+        principal: String,
+        product_version: String,
+        server_ip: String,
+        server_port: u16,
+        tls_required: bool,
+        server_state_access: Option<bool>,
+        server_performance_access: Option<bool>,
+    },
+    SqlServerRequest {
+        session_id: i32,
+        state: Option<String>,
+        wait_type: Option<String>,
+        elapsed_ms: Option<i64>,
+    },
+    SqlServerWait {
+        session_id: i32,
+        wait_type: Option<String>,
+        wait_ms: Option<i64>,
+    },
+    SqlServerBlocking {
+        waiting_session_id: i32,
+        blocking_session_id: i32,
+    },
+    SqlServerStatistics {
+        rows: Option<i64>,
+        modification_counter: Option<i64>,
+        histogram_steps: Option<i64>,
+    },
+    SqlServerObject {
+        schema: String,
+        name: String,
+        object_id: u64,
+        column_count: u32,
+    },
+    SqlServerColumn {
+        object_id: u64,
+        column_id: u32,
+        name: String,
+        plain: bool,
+    },
+    SqlServerPermission {
+        database_connect: Option<bool>,
+        schema_select: Option<bool>,
+        object_select: Option<bool>,
+        object_alter: Option<bool>,
+        object_control: Option<bool>,
+    },
     Identity {
         database: String,
         principal: String,
@@ -60,6 +109,12 @@ pub enum SqlObservation {
 }
 
 impl SqlObservation {
+    pub fn tds_state(value: &str) -> bool {
+        matches!(
+            value,
+            "background" | "running" | "runnable" | "sleeping" | "suspended"
+        )
+    }
     pub fn pg_state(value: &str) -> bool {
         matches!(
             value,
@@ -97,6 +152,61 @@ impl SqlObservation {
             value.len() <= 256 && !value.chars().any(char::is_control)
         }
         match self {
+            Self::SqlServerIdentity {
+                database,
+                principal,
+                product_version,
+                server_ip,
+                server_port,
+                tls_required,
+                ..
+            } => {
+                field(database)
+                    && field(principal)
+                    && Self::version_token(product_version)
+                    && server_ip.parse::<std::net::IpAddr>().is_ok()
+                    && *server_port > 0
+                    && *tls_required
+            }
+            Self::SqlServerRequest {
+                state,
+                wait_type,
+                elapsed_ms,
+                ..
+            } => {
+                state.as_deref().is_none_or(Self::tds_state)
+                    && wait_type.as_deref().is_none_or(Self::token)
+                    && elapsed_ms.is_none_or(|v| v >= 0)
+            }
+            Self::SqlServerWait {
+                wait_type, wait_ms, ..
+            } => wait_type.as_deref().is_none_or(Self::token) && wait_ms.is_none_or(|v| v >= 0),
+            Self::SqlServerBlocking {
+                waiting_session_id,
+                blocking_session_id,
+            } => *waiting_session_id > 0 && *blocking_session_id > 0,
+            Self::SqlServerStatistics {
+                rows,
+                modification_counter,
+                histogram_steps,
+            } => {
+                rows.is_none_or(|v| v >= 0)
+                    && modification_counter.is_none_or(|v| v >= 0)
+                    && histogram_steps.is_none_or(|v| v >= 0)
+            }
+            Self::SqlServerObject {
+                schema,
+                name,
+                object_id,
+                column_count,
+            } => field(schema) && field(name) && *object_id > 0 && *column_count > 0,
+            Self::SqlServerColumn {
+                object_id,
+                column_id,
+                name,
+                ..
+            } => *object_id > 0 && *column_id > 0 && field(name),
+            Self::SqlServerPermission { .. } => true,
             Self::Identity {
                 database,
                 principal,
@@ -131,5 +241,11 @@ impl SqlObservation {
             Self::Index { name, method, .. } => field(name) && Self::token(method),
             Self::Statistics { .. } | Self::Permission { .. } => true,
         }
+    }
+
+    pub fn version_token(value: &str) -> bool {
+        !value.is_empty()
+            && value.len() <= 32
+            && value.bytes().all(|b| b.is_ascii_digit() || b == b'.')
     }
 }
