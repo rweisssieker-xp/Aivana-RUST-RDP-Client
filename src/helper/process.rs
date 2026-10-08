@@ -150,38 +150,6 @@ pub(crate) enum FixedToolOperation {
         mount: Option<String>,
         interface: Option<String>,
     },
-    DockerContainerInspect {
-        context: String,
-        container_id: String,
-    },
-    DockerContainerStats {
-        context: String,
-        container_id: String,
-    },
-    DockerDaemonInfo {
-        context: String,
-    },
-    DockerContextInfo {
-        context: String,
-    },
-    KubernetesContextInfo {
-        context: String,
-    },
-    KubernetesCurrentPrincipal {
-        context: String,
-    },
-    LocalCurrentPrincipal,
-    KubernetesWorkloadGet {
-        context: String,
-        namespace: String,
-        kind: String,
-        name: String,
-    },
-    KubernetesEvents {
-        context: String,
-        namespace: String,
-        uid: String,
-    },
     AzureVmShow {
         resource_id: String,
     },
@@ -362,15 +330,6 @@ impl FixedToolOperation {
         let program = match &self {
             Self::WindowsCollector { .. } => "powershell.exe",
             Self::LinuxCollector { .. } => "ssh.exe",
-            Self::DockerContainerInspect { .. }
-            | Self::DockerContainerStats { .. }
-            | Self::DockerDaemonInfo { .. } => "docker.exe",
-            Self::DockerContextInfo { .. } => "docker.exe",
-            Self::KubernetesWorkloadGet { .. }
-            | Self::KubernetesEvents { .. }
-            | Self::KubernetesContextInfo { .. } => "kubectl.exe",
-            Self::KubernetesCurrentPrincipal { .. } => "kubectl.exe",
-            Self::LocalCurrentPrincipal => "whoami.exe",
             Self::AzureVmShow { .. } | Self::AzureVmInstanceView { .. } => "az.exe",
             Self::AwsCallerIdentity { .. }
             | Self::AwsEc2Describe { .. }
@@ -510,99 +469,6 @@ impl FixedToolOperation {
                 #[cfg(windows)]
                 args
             }
-            Self::DockerContainerInspect {
-                context,
-                container_id,
-            } => vec![
-                "--context".into(),
-                value(&context)?,
-                "inspect".into(),
-                "--type".into(),
-                "container".into(),
-                "--format".into(),
-                "{{json .}}".into(),
-                value(&container_id)?,
-            ],
-            Self::DockerContainerStats {
-                context,
-                container_id,
-            } => vec![
-                "--context".into(),
-                value(&context)?,
-                "stats".into(),
-                "--no-stream".into(),
-                "--format".into(),
-                "{{json .}}".into(),
-                value(&container_id)?,
-            ],
-            Self::DockerDaemonInfo { context } => vec![
-                "--context".into(),
-                value(&context)?,
-                "info".into(),
-                "--format".into(),
-                "{{json .}}".into(),
-            ],
-            Self::DockerContextInfo { context } => vec![
-                "context".into(),
-                "inspect".into(),
-                value(&context)?,
-                "--format".into(),
-                "{{json .}}".into(),
-            ],
-            Self::KubernetesContextInfo { context } => vec![
-                "--context".into(),
-                value(&context)?,
-                "config".into(),
-                "view".into(),
-                "--minify".into(),
-                "-o".into(),
-                "json".into(),
-            ],
-            Self::KubernetesCurrentPrincipal { context } => vec![
-                "--context".into(),
-                value(&context)?,
-                "auth".into(),
-                "whoami".into(),
-                "-o".into(),
-                "json".into(),
-            ],
-            Self::LocalCurrentPrincipal => Vec::new(),
-            Self::KubernetesWorkloadGet {
-                context,
-                namespace,
-                kind,
-                name,
-            } => vec![
-                "--context".into(),
-                value(&context)?,
-                "--namespace".into(),
-                value(&namespace)?,
-                "get".into(),
-                value(&kind)?,
-                value(&name)?,
-                "-o".into(),
-                "json".into(),
-            ],
-            Self::KubernetesEvents {
-                context,
-                namespace,
-                uid,
-            } => vec![
-                "--context".into(),
-                value(&context)?,
-                "--namespace".into(),
-                value(&namespace)?,
-                "get".into(),
-                "events".into(),
-                "--field-selector".into(),
-                OsString::from(format!(
-                    "involvedObject.uid={}",
-                    value(&uid)?.to_string_lossy()
-                )),
-                "-o".into(),
-                "json".into(),
-                "--chunk-size=50".into(),
-            ],
             Self::AzureVmShow { resource_id } => vec![
                 "vm".into(),
                 "show".into(),
