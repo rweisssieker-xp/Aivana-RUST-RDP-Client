@@ -1,0 +1,947 @@
+//! Trusted recipes and inert proposal review. No dispatch or approval API is reachable here.
+use super::{
+    case::HelperCase,
+    evidence::{Eligibility, EvidenceEnvelope},
+    scope::{BoundScope, CredentialPurpose, DatabaseEngine},
+};
+use crate::helper_action::{
+    self, Digest, RestorationSpec, SqlAction, SqlEngine, VerificationSpec, VerifiedSqlMetadata,
+};
+use anyhow::{Result, ensure};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use chrono::{DateTime, Duration, Utc};
+use ring::signature;
+use serde::{Deserialize, Serialize};
+use sha2::Digest as _;
+use uuid::Uuid;
+
+const RECIPE_DOMAIN: &[u8] = b"relayne-helper-recipe-v1";
+const REVIEW_DOMAIN: &[u8] = b"relayne-helper-proposal-review-v1";
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CatalogAction {
+    /// Reference only; the existing signed-package/v1 service path retains execution authority.
+    ExistingServiceRecipe {
+        catalog_entry_id: Uuid,
+        signed_package_sha256: Digest,
+    },
+    Sql {
+        action: SqlAction,
+        metadata: VerifiedSqlMetadata,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Prerequisite {
+    FreshLiveMetadata,
+    CurrentChangeCredential,
+    TableAlterPrivilege,
+    IndexOwnershipMarkerPrivilege,
+    ReviewedFunctionalCheck,
+    ReviewedPerformanceCheck,
+    IsolatedRehearsal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecipeBody {
+    pub version: u16,
+    pub action_version: u16,
+    pub id: Uuid,
+    pub revision: u64,
+    pub problem_family: String,
+    pub action: CatalogAction,
+    pub prerequisites: Vec<Prerequisite>,
+    pub verification: VerificationSpec,
+    pub restoration: RestorationSpec,
+    pub issued_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogEntry {
+    pub body: RecipeBody,
+    /// Explicitly enrolled Ed25519 publisher key and signature over the entire typed body.
+    pub publisher_key: String,
+    pub signature: String,
+    pub provenance: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CatalogTrust {
+    pub enrolled_keys: Vec<String>,
+}
+
+impl CatalogTrust {
+    pub fn enroll(&mut self, public_key: &str) -> Result<String> {
+        let bytes = STANDARD.decode(public_key.trim())?;
+        ensure!(bytes.len() == 32, "Recipe publisher key must be Ed25519");
+        let canonical = STANDARD.encode(&bytes);
+        ensure!(
+            !self.enrolled_keys.contains(&canonical),
+            "Publisher already enrolled"
+        );
+        ensure!(
+            self.enrolled_keys.len() < 128,
+            "Recipe publisher capacity reached"
+        );
+        self.enrolled_keys.push(canonical);
+        self.validate()?;
+        Ok(format!("{:x}", sha2::Sha256::digest(&bytes)))
+    }
+    pub fn load_protected(path: &std::path::Path) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let file = std::fs::File::open(path)?;
+        ensure!(
+            file.metadata()?.len() <= 32 * 1024,
+            "Recipe trust store too large"
+        );
+        let bytes = std::fs::read(path)?;
+        ensure!(bytes.len() <= 32 * 1024, "Recipe trust store too large");
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Saved {
+            schema: u16,
+            enrolled_keys: Vec<String>,
+        }
+        let saved: Saved = serde_json::from_slice(&crate::security::unprotect_secret(&bytes)?)?;
+        ensure!(saved.schema == 1, "Unsupported recipe trust schema");
+        let trust = Self {
+            enrolled_keys: saved.enrolled_keys,
+        };
+        trust.validate()?;
+        Ok(trust)
+    }
+    pub fn save_protected(&self, path: &std::path::Path) -> Result<()> {
+        self.validate()?;
+        #[derive(Serialize)]
+        struct Saved<'a> {
+            schema: u16,
+            enrolled_keys: &'a [String],
+        }
+        let clear = serde_json::to_vec(&Saved {
+            schema: 1,
+            enrolled_keys: &self.enrolled_keys,
+        })?;
+        ensure!(clear.len() <= 32 * 1024, "Recipe trust store too large");
+        crate::security::atomic_write(path, &crate::security::protect_secret(&clear)?)
+    }
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.enrolled_keys.len() <= 128,
+            "Too many trusted recipe publishers"
+        );
+        let mut unique = std::collections::BTreeSet::new();
+        for key in &self.enrolled_keys {
+            ensure!(
+                STANDARD.decode(key)?.len() == 32 && unique.insert(key),
+                "Invalid or duplicate recipe publisher key"
+            );
+        }
+        Ok(())
+    }
+}
+
+impl CatalogEntry {
+    pub fn validate(&self) -> Result<()> {
+        let b = &self.body;
+        ensure!(
+            b.version == 1
+                && b.action_version == helper_action::SQL_ACTION_VERSION
+                && !b.id.is_nil()
+                && b.revision > 0,
+            "Unknown or invalid recipe version"
+        );
+        ensure!(
+            !b.problem_family.trim().is_empty()
+                && b.problem_family.len() <= 128
+                && !b.problem_family.chars().any(char::is_control),
+            "Invalid problem family"
+        );
+        ensure!(
+            !self.provenance.trim().is_empty()
+                && self.provenance.len() <= 256
+                && !self.provenance.chars().any(char::is_control),
+            "Missing recipe provenance"
+        );
+        ensure!(
+            b.issued_at < b.expires_at && b.expires_at - b.issued_at <= Duration::days(365),
+            "Invalid recipe validity window"
+        );
+        ensure!(
+            !b.prerequisites.is_empty() && b.prerequisites.len() <= 12,
+            "Missing/oversized prerequisites"
+        );
+        ensure!(
+            b.prerequisites
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                == b.prerequisites.len(),
+            "Duplicate prerequisites"
+        );
+        b.verification.validate()?;
+        match &b.action {
+            CatalogAction::Sql { action, metadata } => {
+                action.validate(metadata)?;
+                b.restoration.validate_for(action)?;
+                for required in [
+                    Prerequisite::FreshLiveMetadata,
+                    Prerequisite::CurrentChangeCredential,
+                    Prerequisite::TableAlterPrivilege,
+                    Prerequisite::ReviewedFunctionalCheck,
+                    Prerequisite::ReviewedPerformanceCheck,
+                    Prerequisite::IsolatedRehearsal,
+                ] {
+                    ensure!(
+                        b.prerequisites.contains(&required),
+                        "Missing SQL prerequisite"
+                    );
+                }
+                if !action.is_statistics() {
+                    ensure!(
+                        b.prerequisites
+                            .contains(&Prerequisite::IndexOwnershipMarkerPrivilege),
+                        "Missing index-marker privilege prerequisite"
+                    );
+                }
+            }
+            CatalogAction::ExistingServiceRecipe {
+                catalog_entry_id,
+                signed_package_sha256,
+            } => {
+                ensure!(
+                    !catalog_entry_id.is_nil()
+                        && helper_action::valid_digest(signed_package_sha256),
+                    "Invalid existing service reference"
+                );
+                // Service restoration and execution continue through its original contract.
+            }
+        }
+        ensure!(
+            STANDARD.decode(&self.publisher_key)?.len() == 32
+                && STANDARD.decode(&self.signature)?.len() == 64,
+            "Invalid recipe signature encoding"
+        );
+        Ok(())
+    }
+    pub fn verify(&self, trust: &CatalogTrust) -> Result<()> {
+        self.validate()?;
+        trust.validate()?;
+        ensure!(
+            trust.enrolled_keys.contains(&self.publisher_key),
+            "Publisher is not trusted"
+        );
+        let signature = STANDARD.decode(&self.signature)?;
+        let key = STANDARD.decode(&self.publisher_key)?;
+        let bytes = recipe_bytes(&self.body, &self.provenance)?;
+        signature::UnparsedPublicKey::new(&signature::ED25519, key)
+            .verify(&bytes, &signature)
+            .map_err(|_| anyhow::anyhow!("Invalid recipe signature"))
+    }
+    pub fn identity(&self) -> Result<Digest> {
+        self.validate()?;
+        helper_action::digest(b"relayne-helper-recipe-identity-v1", self)
+    }
+}
+
+fn recipe_bytes(body: &RecipeBody, provenance: &str) -> Result<Vec<u8>> {
+    let mut bytes = RECIPE_DOMAIN.to_vec();
+    bytes.push(0);
+    bytes.extend(serde_json::to_vec(&(body, provenance))?);
+    Ok(bytes)
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Catalog {
+    pub entries: Vec<CatalogEntry>,
+    pub trust: CatalogTrust,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Applicability {
+    /// Context matches, but launch privileges and rehearsal remain unproved.
+    Candidate(Vec<Prerequisite>),
+    Gaps(Vec<String>),
+}
+
+impl Catalog {
+    pub fn import_signed(&mut self, entry: CatalogEntry) -> Result<()> {
+        entry.verify(&self.trust)?;
+        if let Some(existing) = self.entries.iter_mut().find(|e| e.body.id == entry.body.id) {
+            ensure!(
+                entry.body.revision > existing.body.revision,
+                "Recipe revision must increase"
+            );
+            *existing = entry;
+        } else {
+            ensure!(self.entries.len() < 64, "Catalog capacity reached");
+            self.entries.push(entry);
+        }
+        self.validate()
+    }
+    pub fn load_protected(path: &std::path::Path, trust: CatalogTrust) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Self {
+                entries: Vec::new(),
+                trust,
+            });
+        }
+        let file = std::fs::File::open(path)?;
+        ensure!(
+            file.metadata()?.len() <= 512 * 1024,
+            "Catalog exceeds protected load limit"
+        );
+        let bytes = std::fs::read(path)?;
+        ensure!(
+            bytes.len() <= 512 * 1024,
+            "Catalog exceeds protected load limit"
+        );
+        let clear = crate::security::unprotect_secret(&bytes)?;
+        ensure!(clear.len() <= 512 * 1024, "Catalog exceeds cleartext limit");
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Saved {
+            schema: u16,
+            entries: Vec<CatalogEntry>,
+        }
+        let saved: Saved = serde_json::from_slice(&clear)?;
+        ensure!(saved.schema == 1, "Unsupported catalog schema");
+        let catalog = Self {
+            entries: saved.entries,
+            trust,
+        };
+        catalog.validate()?;
+        Ok(catalog)
+    }
+    pub fn save_protected(&self, path: &std::path::Path) -> Result<()> {
+        self.validate()?;
+        #[derive(Serialize)]
+        struct Saved<'a> {
+            schema: u16,
+            entries: &'a [CatalogEntry],
+        }
+        let clear = serde_json::to_vec(&Saved {
+            schema: 1,
+            entries: &self.entries,
+        })?;
+        ensure!(
+            clear.len() <= 512 * 1024,
+            "Catalog exceeds protected save limit"
+        );
+        crate::security::atomic_write(path, &crate::security::protect_secret(&clear)?)
+    }
+    pub fn entry(&self, id: Uuid) -> Option<&CatalogEntry> {
+        self.entries.iter().find(|e| e.body.id == id)
+    }
+    pub fn validate(&self) -> Result<()> {
+        ensure!(self.entries.len() <= 64, "Catalog capacity exceeded");
+        self.trust.validate()?;
+        let mut ids = std::collections::BTreeSet::new();
+        for entry in &self.entries {
+            entry.verify(&self.trust)?;
+            ensure!(ids.insert(entry.body.id), "Duplicate recipe ID");
+        }
+        Ok(())
+    }
+    pub fn applicability(
+        &self,
+        case: &HelperCase,
+        entry: &CatalogEntry,
+        evidence: &[EvidenceEnvelope],
+        now: DateTime<Utc>,
+    ) -> Applicability {
+        let mut gaps = Vec::new();
+        if entry.verify(&self.trust).is_err()
+            || !self
+                .entries
+                .iter()
+                .any(|e| e.identity().ok() == entry.identity().ok())
+        {
+            gaps.push("Recipe trust or exact catalog identity changed".into());
+        }
+        if now < entry.body.issued_at || now >= entry.body.expires_at {
+            gaps.push("Recipe expired or not yet valid".into());
+        }
+        if !case.plan().is_some_and(|plan| {
+            plan.case_id == case.id()
+                && plan.case_revision == case.revision()
+                && plan.evidence_revision == case.evidence_revision()
+        }) {
+            gaps.push("Current case plan is missing or stale".into());
+        }
+        if matches!(
+            &entry.body.action,
+            CatalogAction::ExistingServiceRecipe { .. }
+        ) {
+            gaps.push("Use the existing signed service package and v1 contract review".into());
+        }
+        if let CatalogAction::Sql { action, metadata } = &entry.body.action {
+            let object = action.object();
+            let matching_scope = case.scopes().iter().find(|scope| {
+                if let BoundScope::Database {
+                    engine,
+                    database,
+                    schema,
+                    object: table,
+                    credential,
+                    ..
+                } = scope
+                {
+                    let expected_engine = match object.engine {
+                        helper_action::SqlEngine::Postgres => DatabaseEngine::Postgres,
+                        helper_action::SqlEngine::SqlServer => DatabaseEngine::SqlServer,
+                    };
+                    *engine == expected_engine
+                        && database == &object.database
+                        && schema.as_deref() == Some(object.schema.as_str())
+                        && table.as_deref() == Some(object.table.as_str())
+                        && credential
+                            .as_ref()
+                            .is_some_and(|c| c.purpose == CredentialPurpose::ControlledChange)
+                        && scope.digest().ok().as_deref() == Some(object.scope_sha256.as_str())
+                } else {
+                    false
+                }
+            });
+            if matching_scope.is_none() {
+                gaps.push("Current change scope, object or credential differs".into());
+            }
+            let resource = matching_scope.and_then(|s| s.resource_digest().ok());
+            let read_scopes = case
+                .scopes()
+                .iter()
+                .filter(|s| {
+                    s.credential()
+                        .is_some_and(|c| c.purpose == CredentialPurpose::Read)
+                        && s.resource_digest().ok() == resource
+                        && resource.is_some()
+                })
+                .filter_map(|s| s.digest().ok())
+                .collect::<Vec<_>>();
+            let read_evidence = case.evidence().iter().any(|e| {
+                evidence.iter().any(|supplied| {
+                    supplied.id == e.id && supplied.content_sha256 == e.content_sha256
+                }) && e.binding.case_id == case.id()
+                    && e.binding.case_revision == case.revision()
+                    && e.content_sha256 == metadata.source_evidence_sha256
+                    && read_scopes.contains(&e.binding.scope_sha256)
+                    && e.eligibility(now, Duration::minutes(5)) == Eligibility::Eligible
+                    && e.capability_id == super::manifest::CapabilityId::SqlRead
+                    && exact_metadata_in_evidence(e, metadata)
+            });
+            if !read_evidence {
+                gaps.push("Fresh live verified object metadata is missing".into());
+            }
+            if case.intake().success_criteria.iter().all(|c| !c.complete()) {
+                gaps.push("Reviewed success criterion is missing".into());
+            }
+        }
+        if gaps.is_empty() {
+            let mut unverified = vec![
+                Prerequisite::TableAlterPrivilege,
+                Prerequisite::IsolatedRehearsal,
+            ];
+            if matches!(&entry.body.action, CatalogAction::Sql { action, .. } if !action.is_statistics())
+            {
+                unverified.push(Prerequisite::IndexOwnershipMarkerPrivilege);
+            }
+            Applicability::Candidate(unverified)
+        } else {
+            Applicability::Gaps(gaps)
+        }
+    }
+    pub fn propose(
+        &self,
+        case: &HelperCase,
+        entry: &CatalogEntry,
+        params: ProposalParams,
+    ) -> Result<HelperProposal> {
+        let now = Utc::now();
+        let Applicability::Candidate(unverified_prerequisites) =
+            self.applicability(case, entry, case.evidence(), now)
+        else {
+            anyhow::bail!("Recipe identity, scope, or live metadata have gaps");
+        };
+        ensure!(
+            !params.plan_sha256.is_empty()
+                && helper_action::valid_digest(&params.plan_sha256)
+                && params.evidence_ids.len() > 0
+                && params.evidence_ids.len() <= 16,
+            "Missing reviewed plan/evidence"
+        );
+        ensure!(
+            case.plan().is_some_and(|plan| plan.case_id == case.id()
+                && plan.case_revision == case.revision()
+                && plan.evidence_revision == case.evidence_revision()
+                && helper_action::digest(b"relayne-helper-reviewed-plan-v1", plan)
+                    .ok()
+                    .as_deref()
+                    == Some(params.plan_sha256.as_str())),
+            "Current exact case plan is missing or changed"
+        );
+        ensure!(
+            params
+                .evidence_ids
+                .iter()
+                .all(|id| case.evidence().iter().any(|e| e.id == *id)),
+            "Proposal references missing evidence"
+        );
+        if let CatalogAction::Sql { metadata, .. } = &entry.body.action {
+            ensure!(
+                params
+                    .evidence_ids
+                    .iter()
+                    .any(|id| case.evidence().iter().any(
+                        |e| e.id == *id && e.content_sha256 == metadata.source_evidence_sha256
+                    )),
+                "Proposal omits live SQL metadata evidence"
+            );
+        }
+        let action = entry.body.action.clone();
+        let limits_acknowledged = params.statistics_limit_acknowledged;
+        ensure!(
+            !matches!(&action, CatalogAction::Sql { action, .. } if action.is_statistics())
+                || limits_acknowledged,
+            "Acknowledge that prior statistics cannot be restored exactly"
+        );
+        Ok(HelperProposal {
+            case_id: case.id(),
+            case_revision: case.revision(),
+            recipe_id: entry.body.id,
+            recipe_revision: entry.body.revision,
+            action_version: entry.body.action_version,
+            recipe_identity: entry.identity()?,
+            action,
+            verification: entry.body.verification.clone(),
+            restoration: entry.body.restoration.clone(),
+            prerequisites: entry.body.prerequisites.clone(),
+            unverified_prerequisites,
+            plan_sha256: params.plan_sha256,
+            criteria_sha256: helper_action::digest(
+                b"relayne-helper-reviewed-criteria-v1",
+                &case.intake().success_criteria,
+            )?,
+            evidence_ids: params.evidence_ids,
+            statistics_limit_acknowledged: limits_acknowledged,
+        })
+    }
+}
+
+/// Bridge to the bounded native SQL projections. Unknown/old observation variants
+/// cannot attest object identity; this remains closed until those adapters land.
+fn exact_metadata_in_evidence(e: &EvidenceEnvelope, metadata: &VerifiedSqlMetadata) -> bool {
+    let Ok(values) = e
+        .sql_observations
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<std::result::Result<Vec<_>, _>>()
+    else {
+        return false;
+    };
+    exact_metadata_values(values, metadata)
+}
+
+fn exact_metadata_values(values: Vec<serde_json::Value>, metadata: &VerifiedSqlMetadata) -> bool {
+    #[derive(Deserialize)]
+    #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+    enum Attested {
+        PostgresObject {
+            schema: String,
+            name: String,
+            object_id: u64,
+            column_count: u32,
+        },
+        PostgresColumn {
+            object_id: u64,
+            column_id: u32,
+            name: String,
+            plain: bool,
+        },
+        SqlServerObject {
+            schema: String,
+            name: String,
+            object_id: u64,
+            column_count: u32,
+        },
+        SqlServerColumn {
+            object_id: u64,
+            column_id: u32,
+            name: String,
+            plain: bool,
+        },
+    }
+    let mut found_object = false;
+    let mut found_columns = std::collections::BTreeSet::new();
+    for value in values {
+        let Ok(attested) = serde_json::from_value::<Attested>(value) else {
+            continue;
+        };
+        match attested {
+            Attested::PostgresObject {
+                schema,
+                name,
+                object_id,
+                column_count,
+            } if metadata.object.engine == SqlEngine::Postgres => {
+                if schema == metadata.object.schema
+                    && name == metadata.object.table
+                    && object_id == metadata.object.object_id
+                    && column_count as usize == metadata.columns.len()
+                {
+                    found_object = true;
+                }
+            }
+            Attested::SqlServerObject {
+                schema,
+                name,
+                object_id,
+                column_count,
+            } if metadata.object.engine == SqlEngine::SqlServer => {
+                if schema == metadata.object.schema
+                    && name == metadata.object.table
+                    && object_id == metadata.object.object_id
+                    && column_count as usize == metadata.columns.len()
+                {
+                    found_object = true;
+                }
+            }
+            Attested::PostgresColumn {
+                object_id,
+                column_id,
+                name,
+                plain,
+            } if metadata.object.engine == SqlEngine::Postgres => {
+                if object_id == metadata.object.object_id
+                    && metadata
+                        .columns
+                        .iter()
+                        .any(|c| c.column_id == column_id && c.name == name && c.plain == plain)
+                {
+                    found_columns.insert(column_id);
+                }
+            }
+            Attested::SqlServerColumn {
+                object_id,
+                column_id,
+                name,
+                plain,
+            } if metadata.object.engine == SqlEngine::SqlServer => {
+                if object_id == metadata.object.object_id
+                    && metadata
+                        .columns
+                        .iter()
+                        .any(|c| c.column_id == column_id && c.name == name && c.plain == plain)
+                {
+                    found_columns.insert(column_id);
+                }
+            }
+            _ => {}
+        }
+    }
+    found_object && found_columns.len() == metadata.columns.len()
+}
+
+#[derive(Clone, Debug)]
+pub struct ProposalParams {
+    pub plan_sha256: Digest,
+    pub evidence_ids: Vec<Uuid>,
+    pub statistics_limit_acknowledged: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HelperProposal {
+    pub case_id: Uuid,
+    pub case_revision: u64,
+    pub recipe_id: Uuid,
+    pub recipe_revision: u64,
+    pub action_version: u16,
+    pub recipe_identity: Digest,
+    pub action: CatalogAction,
+    pub verification: VerificationSpec,
+    pub restoration: RestorationSpec,
+    pub prerequisites: Vec<Prerequisite>,
+    /// Must be discharged by later independent authority/executor proof.
+    pub unverified_prerequisites: Vec<Prerequisite>,
+    pub plan_sha256: Digest,
+    pub criteria_sha256: Digest,
+    pub evidence_ids: Vec<Uuid>,
+    pub statistics_limit_acknowledged: bool,
+}
+
+impl HelperProposal {
+    pub fn review_digest(&self) -> Result<Digest> {
+        ensure!(
+            !self.case_id.is_nil()
+                && self.case_revision > 0
+                && !self.recipe_id.is_nil()
+                && self.recipe_revision > 0
+                && self.action_version == helper_action::SQL_ACTION_VERSION
+                && helper_action::valid_digest(&self.recipe_identity)
+                && helper_action::valid_digest(&self.plan_sha256)
+                && helper_action::valid_digest(&self.criteria_sha256)
+                && !self.evidence_ids.is_empty(),
+            "Invalid proposal binding"
+        );
+        self.verification.validate()?;
+        ensure!(
+            !self.unverified_prerequisites.is_empty(),
+            "Inert proposal must declare unresolved launch prerequisites"
+        );
+        if let CatalogAction::Sql { action, metadata } = &self.action {
+            action.validate(metadata)?;
+            self.restoration.validate_for(action)?;
+            ensure!(
+                !action.is_statistics() || self.statistics_limit_acknowledged,
+                "Statistics restoration limit not acknowledged"
+            );
+        }
+        helper_action::digest(REVIEW_DOMAIN, self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::helper_action::{
+        RequiredCheck, SqlEngine, StatisticsLimitation, VerifiedSqlColumn, VerifiedSqlObject,
+    };
+    use ring::{
+        rand::SystemRandom,
+        signature::{Ed25519KeyPair, KeyPair},
+    };
+
+    fn d() -> String {
+        "a".repeat(64)
+    }
+    fn entry() -> (CatalogEntry, CatalogTrust) {
+        let rng = SystemRandom::new();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let key = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+        let object = VerifiedSqlObject {
+            engine: SqlEngine::Postgres,
+            database: "db".into(),
+            schema: "public".into(),
+            table: "orders".into(),
+            object_id: 42,
+            scope_sha256: d(),
+        };
+        let metadata = VerifiedSqlMetadata {
+            object: object.clone(),
+            columns: vec![VerifiedSqlColumn {
+                name: "status".into(),
+                column_id: 1,
+                plain: true,
+            }],
+            existing_indexes: vec![],
+            base_table: true,
+            source_evidence_sha256: d(),
+        };
+        let body = RecipeBody {
+            version: 1,
+            action_version: 1,
+            id: Uuid::new_v4(),
+            revision: 1,
+            problem_family: "Slow orders lookup".into(),
+            action: CatalogAction::Sql {
+                action: SqlAction::PostgresAnalyze { object },
+                metadata,
+            },
+            prerequisites: vec![
+                Prerequisite::FreshLiveMetadata,
+                Prerequisite::CurrentChangeCredential,
+                Prerequisite::TableAlterPrivilege,
+                Prerequisite::ReviewedFunctionalCheck,
+                Prerequisite::ReviewedPerformanceCheck,
+                Prerequisite::IsolatedRehearsal,
+            ],
+            verification: VerificationSpec {
+                checks: vec![
+                    RequiredCheck::HttpFunctional {
+                        scope_sha256: d(),
+                        expected_status: 200,
+                        body_sha256: None,
+                    },
+                    RequiredCheck::Performance {
+                        workload_sha256: d(),
+                        maximum_median_ms: 100,
+                        maximum_p95_ms: 200,
+                        minimum_warmups: 3,
+                        minimum_samples: 15,
+                    },
+                ],
+            },
+            restoration: RestorationSpec::ManualOrUnavailable {
+                limitation: StatisticsLimitation::PriorStatisticsCannotBeRestoredExactly,
+            },
+            issued_at: Utc::now() - Duration::minutes(1),
+            expires_at: Utc::now() + Duration::days(1),
+        };
+        let provenance = "Reviewed local recipe".to_string();
+        let entry = CatalogEntry {
+            publisher_key: STANDARD.encode(key.public_key().as_ref()),
+            signature: STANDARD.encode(
+                key.sign(&recipe_bytes(&body, &provenance).unwrap())
+                    .as_ref(),
+            ),
+            body,
+            provenance,
+        };
+        let trust = CatalogTrust {
+            enrolled_keys: vec![entry.publisher_key.clone()],
+        };
+        (entry, trust)
+    }
+
+    #[test]
+    fn signed_recipe_rejects_tampering_revocation_and_unknown_versions() {
+        let (entry, trust) = entry();
+        entry.verify(&trust).unwrap();
+        let mut tampered = entry.clone();
+        tampered.body.problem_family.push('!');
+        assert!(tampered.verify(&trust).is_err());
+        let mut provenance = entry.clone();
+        provenance.provenance.push('!');
+        assert!(provenance.verify(&trust).is_err());
+        assert!(entry.verify(&CatalogTrust::default()).is_err());
+        let mut unknown = entry;
+        unknown.body.version = 2;
+        assert!(unknown.validate().is_err());
+    }
+    #[test]
+    fn import_never_enrolls_recipe_supplied_publisher() {
+        let (entry, trust) = entry();
+        let mut catalog = Catalog::default();
+        assert!(catalog.import_signed(entry.clone()).is_err());
+        assert!(catalog.entries.is_empty());
+        assert_eq!(
+            catalog.trust.enroll(&entry.publisher_key).unwrap().len(),
+            64
+        );
+        catalog.import_signed(entry.clone()).unwrap();
+        assert!(catalog.import_signed(entry).is_err());
+        assert_eq!(catalog.entries.len(), 1);
+        assert_eq!(catalog.trust.enrolled_keys, trust.enrolled_keys);
+    }
+    #[test]
+    fn protected_catalog_rejects_tampered_storage_and_revoked_key() {
+        let (entry, trust) = entry();
+        let path = std::env::temp_dir().join(format!("relayne-recipes-{}.dpapi", Uuid::new_v4()));
+        let catalog = Catalog {
+            entries: vec![entry],
+            trust,
+        };
+        catalog.save_protected(&path).unwrap();
+        Catalog::load_protected(&path, catalog.trust.clone()).unwrap();
+        assert!(Catalog::load_protected(&path, CatalogTrust::default()).is_err());
+        std::fs::write(&path, b"corrupt").unwrap();
+        assert!(Catalog::load_protected(&path, catalog.trust.clone()).is_err());
+        let _ = std::fs::remove_file(path);
+    }
+    #[test]
+    fn statistics_acknowledgement_and_checks_are_bound_to_review_digest() {
+        let (entry, _) = entry();
+        let mut p = HelperProposal {
+            case_id: Uuid::new_v4(),
+            case_revision: 3,
+            recipe_id: entry.body.id,
+            recipe_revision: 1,
+            action_version: 1,
+            recipe_identity: entry.identity().unwrap(),
+            action: entry.body.action.clone(),
+            verification: entry.body.verification.clone(),
+            restoration: entry.body.restoration.clone(),
+            prerequisites: entry.body.prerequisites.clone(),
+            unverified_prerequisites: vec![
+                Prerequisite::TableAlterPrivilege,
+                Prerequisite::IsolatedRehearsal,
+            ],
+            plan_sha256: d(),
+            criteria_sha256: d(),
+            evidence_ids: vec![Uuid::new_v4()],
+            statistics_limit_acknowledged: false,
+        };
+        assert!(p.review_digest().is_err());
+        p.statistics_limit_acknowledged = true;
+        let original = p.review_digest().unwrap();
+        p.verification.checks.pop();
+        assert!(p.review_digest().is_err());
+        p.verification = entry.body.verification;
+        p.evidence_ids.push(Uuid::new_v4());
+        assert_ne!(p.review_digest().unwrap(), original);
+    }
+    #[test]
+    fn native_object_and_column_ids_are_required_for_applicability() {
+        let (entry, _) = entry();
+        let CatalogAction::Sql { metadata, .. } = &entry.body.action else {
+            unreachable!()
+        };
+        let object = serde_json::json!({"kind":"postgres_object","schema":"public",
+            "name":"orders","object_id":42,"column_count":1});
+        let column = serde_json::json!({"kind":"postgres_column","object_id":42,
+            "column_id":1,"name":"status","plain":true});
+        assert!(exact_metadata_values(
+            vec![object.clone(), column.clone()],
+            metadata
+        ));
+        assert!(!exact_metadata_values(
+            vec![serde_json::json!({"kind":"object",
+            "schema":"public","name":"orders","columns":1})],
+            metadata
+        ));
+        assert!(!exact_metadata_values(vec![object.clone()], metadata));
+        assert!(!exact_metadata_values(
+            vec![
+                object.clone(),
+                serde_json::json!({"kind":"postgres_column",
+            "object_id":43,"column_id":1,"name":"status","plain":true})
+            ],
+            metadata
+        ));
+        assert!(!exact_metadata_values(
+            vec![
+                object,
+                serde_json::json!({"kind":"postgres_column",
+            "object_id":42,"column_id":1,"name":"status","plain":false})
+            ],
+            metadata
+        ));
+    }
+    #[test]
+    fn signed_catalog_never_proposes_from_unbound_case_or_revoked_trust() {
+        let (entry, trust) = entry();
+        let case = HelperCase::new(Default::default()).unwrap();
+        let mut catalog = Catalog {
+            entries: vec![entry.clone()],
+            trust,
+        };
+        assert!(matches!(
+            catalog.applicability(&case, &entry, case.evidence(), Utc::now()),
+            Applicability::Gaps(_)
+        ));
+        assert!(
+            catalog
+                .propose(
+                    &case,
+                    &entry,
+                    ProposalParams {
+                        plan_sha256: d(),
+                        evidence_ids: vec![Uuid::new_v4()],
+                        statistics_limit_acknowledged: true
+                    }
+                )
+                .is_err()
+        );
+        catalog.trust = CatalogTrust::default();
+        assert!(
+            matches!(catalog.applicability(&case, &entry, case.evidence(), Utc::now()),
+            Applicability::Gaps(gaps) if gaps.iter().any(|g| g.contains("trust")))
+        );
+    }
+}

@@ -3,6 +3,8 @@
 mod team_client;
 #[path = "../repair_approval.rs"]
 mod repair_approval;
+#[path = "../helper_action.rs"]
+mod helper_action;
 #[path = "../team_server.rs"]
 mod team_server;
 #[path = "../ticket_escalation.rs"]

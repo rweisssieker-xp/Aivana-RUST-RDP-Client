@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+mod change_ui;
 mod connectors_ui;
 mod evidence_ui;
 mod intake_ui;
@@ -32,6 +33,13 @@ pub(super) struct HelperState {
     confirmation_actor: String,
     confirmation_rationale: String,
     confirmation_kind: Option<crate::helper::planner::HypothesisKind>,
+    reviewed_proposal: Option<crate::helper::catalog::HelperProposal>,
+    statistics_limit_acknowledged: bool,
+    statistics_ack_case: Option<(Uuid, u64)>,
+    recipe_key_input: String,
+    recipe_entry_input: String,
+    recipe_key_reviewed: bool,
+    recipe_entry_reviewed: bool,
     notice: String,
 }
 
@@ -54,6 +62,13 @@ impl HelperState {
                 confirmation_actor: String::new(),
                 confirmation_rationale: String::new(),
                 confirmation_kind: None,
+                reviewed_proposal: None,
+                statistics_limit_acknowledged: false,
+                statistics_ack_case: None,
+                recipe_key_input: String::new(),
+                recipe_entry_input: String::new(),
+                recipe_key_reviewed: false,
+                recipe_entry_reviewed: false,
                 notice: format!("Helper storage unavailable: {e}"),
             },
         }
@@ -90,6 +105,13 @@ impl HelperState {
                     confirmation_actor: String::new(),
                     confirmation_rationale: String::new(),
                     confirmation_kind: None,
+                    reviewed_proposal: None,
+                    statistics_limit_acknowledged: false,
+                    statistics_ack_case: None,
+                    recipe_key_input: String::new(),
+                    recipe_entry_input: String::new(),
+                    recipe_key_reviewed: false,
+                    recipe_entry_reviewed: false,
                     notice: if recovery.is_ok() {
                         "Case workspace loaded".into()
                     } else {
@@ -113,6 +135,13 @@ impl HelperState {
                 confirmation_actor: String::new(),
                 confirmation_rationale: String::new(),
                 confirmation_kind: None,
+                reviewed_proposal: None,
+                statistics_limit_acknowledged: false,
+                statistics_ack_case: None,
+                recipe_key_input: String::new(),
+                recipe_entry_input: String::new(),
+                recipe_key_reviewed: false,
+                recipe_entry_reviewed: false,
                 notice: format!(
                     "Helper store could not be loaded: {e}. Repair or restore the file before editing."
                 ),
@@ -125,6 +154,9 @@ impl HelperState {
     }
     fn select(&mut self, id: Uuid) {
         self.scope_editor.clear_cloud_draft();
+        self.reviewed_proposal = None;
+        self.statistics_limit_acknowledged = false;
+        self.statistics_ack_case = None;
         if let Some(cancel) = self.advisory_cancel.take() {
             cancel.cancel();
         }
@@ -152,6 +184,9 @@ impl HelperState {
         }
     }
     fn revise(&mut self, edit: CaseEdit) {
+        self.reviewed_proposal = None;
+        self.statistics_limit_acknowledged = false;
+        self.statistics_ack_case = None;
         if let Some(cancel) = self.advisory_cancel.take() {
             cancel.cancel();
         }
@@ -208,6 +243,13 @@ impl HelperState {
             confirmation_actor: String::new(),
             confirmation_rationale: String::new(),
             confirmation_kind: None,
+            reviewed_proposal: None,
+            statistics_limit_acknowledged: false,
+            statistics_ack_case: None,
+            recipe_key_input: String::new(),
+            recipe_entry_input: String::new(),
+            recipe_key_reviewed: false,
+            recipe_entry_reviewed: false,
             notice,
         }
     }
@@ -321,6 +363,7 @@ impl AivanaApp {
                 evidence_ui::show(ui, &case, store);
             }
             planning_ui::show(&mut self.helper, ui, &case);
+            change_ui::show(&mut self.helper, ui, &case);
         } else if self.helper.store.is_some() {
             ui.label("Create or select a case to begin.");
         }

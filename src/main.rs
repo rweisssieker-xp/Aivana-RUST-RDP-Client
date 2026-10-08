@@ -13,6 +13,7 @@ mod execution;
 mod repair_approval;
 mod health_suggestions;
 mod helper;
+mod helper_action;
 mod application_checks;
 mod incident;
 mod integrations;

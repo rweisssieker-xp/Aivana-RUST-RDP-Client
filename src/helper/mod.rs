@@ -1,5 +1,6 @@
 pub mod advisory;
 pub mod capability;
+pub mod catalog;
 pub mod case;
 pub mod cloud;
 // Scoped credential APIs are consumed by the next adapter waves.
