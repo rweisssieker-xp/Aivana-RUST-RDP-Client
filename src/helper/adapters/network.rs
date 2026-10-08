@@ -115,6 +115,7 @@ impl ProbeAdapter for NetworkAdapter {
                     detail: None,
                 }],
                 metrics: vec![],
+                sql_observations: vec![],
                 evidence_refs: vec![],
                 source_id: format!("relayne-local:{:?}:{}:{port}", request.capability_id, host)
                     .into_bytes(),
