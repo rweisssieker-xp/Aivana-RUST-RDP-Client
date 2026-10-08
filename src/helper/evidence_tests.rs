@@ -60,8 +60,27 @@ fn envelope(binding: EvidenceBinding) -> EvidenceEnvelope {
             subject_sha256: "b".repeat(64),
         }],
         metrics: vec![],
+        sql_observations: vec![],
         evidence_refs: vec![],
     }
+}
+
+#[test]
+fn legacy_evidence_without_sql_projection_round_trips() {
+    let (_, case_id, scope_sha256) = fixture();
+    let original = envelope(EvidenceBinding {
+        case_id,
+        case_revision: 3,
+        request_id: Uuid::new_v4(),
+        scope_sha256,
+        credential_scope_sha256: "a".repeat(64),
+        run_id: None,
+    });
+    let value = serde_json::to_value(&original).unwrap();
+    assert!(value.get("sql_observations").is_none());
+    let loaded: EvidenceEnvelope = serde_json::from_value(value.clone()).unwrap();
+    assert!(loaded.sql_observations.is_empty());
+    assert_eq!(serde_json::to_value(loaded).unwrap(), value);
 }
 
 #[test]

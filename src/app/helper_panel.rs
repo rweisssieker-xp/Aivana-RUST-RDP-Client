@@ -13,6 +13,7 @@ mod evidence_ui;
 mod intake_ui;
 mod planning_ui;
 mod scope_ui;
+mod sql_ui;
 
 pub(super) struct HelperState {
     store: Option<HelperStore>,
@@ -303,6 +304,7 @@ impl AivanaApp {
                 &self.insights.store,
             );
             connectors_ui::show(&mut self.helper, ui, &case, &self.profiles);
+            sql_ui::show(ui, &case);
             if let Some(store) = self.helper.store.as_ref() {
                 evidence_ui::show(ui, &case, store);
             }

@@ -261,6 +261,8 @@ pub struct EvidenceEnvelope {
     pub content_sha256: String,
     pub records: Vec<NormalizedRecord>,
     pub metrics: Vec<NormalizedMetric>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sql_observations: Vec<super::sql::types::SqlObservation>,
     pub evidence_refs: Vec<Uuid>,
 }
 
@@ -345,6 +347,18 @@ impl EvidenceEnvelope {
         ensure!(
             self.records.iter().all(|r| is_digest(&r.subject_sha256)),
             "Invalid record subject"
+        );
+        ensure!(
+            self.sql_observations.len() <= super::sql::types::MAX_SQL_OBSERVATIONS
+                && self
+                    .sql_observations
+                    .iter()
+                    .all(super::sql::types::SqlObservation::bounded),
+            "Invalid SQL observation projection"
+        );
+        ensure!(
+            self.sql_observations.is_empty() || self.capability_id == CapabilityId::SqlRead,
+            "SQL observations require SQL read capability"
         );
         for metric in &self.metrics {
             metric.validate()?;

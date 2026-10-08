@@ -30,6 +30,15 @@ fn supported(scope: &BoundScope) -> Option<(CapabilityId, ProbeParams)> {
             CapabilityId::NetworkReachability,
             ProbeParams::Network { port: target.port },
         )),
+        BoundScope::Database {
+            engine: crate::helper::scope::DatabaseEngine::Postgres,
+            ..
+        } => Some((
+            CapabilityId::SqlRead,
+            ProbeParams::SqlRead {
+                query_digest: crate::helper::sql::postgres::template_digest(),
+            },
+        )),
         BoundScope::Database { port, .. } => Some((
             CapabilityId::NetworkReachability,
             ProbeParams::Network { port: *port },
@@ -62,6 +71,10 @@ pub(super) fn show(
         let profile_current = current_profile_matches(scope, profiles);
         let name = match scope {
             BoundScope::Http { .. } => "HTTP health",
+            BoundScope::Database {
+                engine: crate::helper::scope::DatabaseEngine::Postgres,
+                ..
+            } => "PostgreSQL read diagnostics",
             BoundScope::Database { .. } => "Database TCP reachability",
             BoundScope::Windows { .. } | BoundScope::Linux { .. } => "Host TCP reachability",
             _ => "No executable adapter in this wave",

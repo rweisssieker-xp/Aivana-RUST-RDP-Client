@@ -220,6 +220,7 @@ impl ProbeAdapter for SlowProbe {
                 },
                 records: vec![record; if self.large { 101 } else { 1 }],
                 metrics: Vec::new(),
+                sql_observations: Vec::new(),
                 evidence_refs: Vec::new(),
                 source_id: b"fixture".to_vec(),
                 source_observed_at: Utc::now(),
@@ -287,6 +288,71 @@ fn request(case: &HelperCase, scope: &BoundScope, http: bool) -> ProbeRequest {
         requested_at: Utc::now(),
         deadline_secs: None,
     }
+}
+
+#[test]
+fn sql_projection_is_persisted_and_unbounded_metadata_rejected() {
+    let (case, scope) = setup(5432, false);
+    let mut request = request(&case, &scope, false);
+    request.capability_id = CapabilityId::SqlRead;
+    request.params = ProbeParams::SqlRead {
+        query_digest: "a".repeat(64),
+    };
+    let observation = crate::helper::sql::types::SqlObservation::Statistics {
+        live_rows: Some(12000),
+        dead_rows: Some(5),
+        analyze_count: Some(1),
+    };
+    let output = ProbeOutput {
+        status: EvidenceStatus::Complete,
+        coverage: Coverage {
+            observed: 1,
+            expected: 1,
+            truncated: false,
+        },
+        records: vec![NormalizedRecord {
+            kind: RecordKind::SqlRead,
+            observation: Observation::Healthy,
+            subject_sha256: "b".repeat(64),
+        }],
+        metrics: vec![],
+        sql_observations: vec![observation.clone()],
+        evidence_refs: vec![],
+        source_id: b"postgres-fixture".to_vec(),
+        source_observed_at: Utc::now(),
+        parser_version: 1,
+    };
+    let envelope = normalize(&request, output).unwrap();
+    assert_eq!(envelope.sql_observations, vec![observation]);
+    assert!(
+        serde_json::to_string(&envelope)
+            .unwrap()
+            .contains("live_rows")
+    );
+    let invalid = ProbeOutput {
+        sql_observations: vec![crate::helper::sql::types::SqlObservation::Index {
+            name: "x".repeat(257),
+            method: "btree".into(),
+            valid: true,
+            scans: None,
+        }],
+        ..ProbeOutput {
+            status: EvidenceStatus::Complete,
+            coverage: Coverage {
+                observed: 1,
+                expected: 1,
+                truncated: false,
+            },
+            records: vec![],
+            metrics: vec![],
+            sql_observations: vec![],
+            evidence_refs: vec![],
+            source_id: b"postgres-fixture".to_vec(),
+            source_observed_at: Utc::now(),
+            parser_version: 1,
+        }
+    };
+    assert!(normalize(&request, invalid).is_err());
 }
 fn poll_one(worker: &mut HelperWorker) -> WorkerEvent {
     for _ in 0..300 {

@@ -64,6 +64,7 @@ fn fixture() -> (HelperStore, Uuid) {
         content_sha256: "a".repeat(64),
         records: vec![],
         metrics: vec![],
+        sql_observations: vec![],
         evidence_refs: vec![],
     };
     attach_evidence(&mut store, id, envelope).unwrap();

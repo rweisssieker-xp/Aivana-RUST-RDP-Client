@@ -94,6 +94,7 @@ pub(crate) fn observed_case() -> (HelperStore, HelperCase, EvidenceEnvelope) {
         })
         .collect(),
         metrics: vec![],
+        sql_observations: vec![],
         evidence_refs: vec![],
     };
     store.attach_evidence(id, envelope.clone()).unwrap();

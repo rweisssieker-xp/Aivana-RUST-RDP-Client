@@ -247,32 +247,49 @@ impl HelperWorker {
             let expires_at = request.requested_at
                 + chrono::Duration::seconds(request.deadline_secs.unwrap_or(DEFAULT_DEADLINE_SECS) as i64);
             let remaining_ms = expires_at.signed_duration_since(Utc::now()).num_milliseconds();
-            let outcome = if remaining_ms <= 0 { WorkerOutcome::TimedOut } else { tokio::select! {
+            let run = async {
+            authority.validate_current(&request)
+                .map_err(|_| WorkerFailure::AuthorityChanged)?;
+            if let Some(scope) = request.scope.credential() {
+                let _secret = secrets.resolve(scope, scope.purpose)
+                    .map_err(|_| WorkerFailure::AdapterUnavailable)?;
+            }
+            authority.validate_current(&request)
+                .map_err(|_| WorkerFailure::AuthorityChanged)?;
+            adapter.collect(&request, secrets.as_ref(), job_token.clone()).await
+                .map_err(|_| WorkerFailure::AdapterUnavailable)
+        };
+        tokio::pin!(run);
+        let outcome = if remaining_ms <= 0 {
+            WorkerOutcome::TimedOut
+        } else {
+            let deadline = tokio::time::sleep(Duration::from_millis(remaining_ms as u64));
+            tokio::pin!(deadline);
+            tokio::select! {
                 biased;
-                _ = job_token.cancelled() => WorkerOutcome::Canceled,
-                result = tokio::time::timeout(Duration::from_millis(remaining_ms as u64), async {
-                    authority.validate_current(&request)
-                        .map_err(|_| WorkerFailure::AuthorityChanged)?;
-                    if let Some(scope) = request.scope.credential() {
-                        let _secret = secrets.resolve(scope, scope.purpose)
-                            .map_err(|_| WorkerFailure::AdapterUnavailable)?;
+                _ = job_token.cancelled() => {
+                    if request.capability_id == CapabilityId::SqlRead {
+                        let _ = tokio::time::timeout(Duration::from_millis(1300), &mut run).await;
                     }
-                    authority.validate_current(&request)
-                        .map_err(|_| WorkerFailure::AuthorityChanged)?;
-                    adapter.collect(&request, secrets.as_ref(), job_token.clone()).await
-                        .map_err(|_| WorkerFailure::AdapterUnavailable)
-                }) => {
-                    match result {
-                        Err(_) => WorkerOutcome::TimedOut,
-                        Ok(Err(failure)) => WorkerOutcome::Failed(failure),
-                        Ok(Ok(output)) => normalize(&request, output)
-                            .map(Box::new)
-                            .map(WorkerOutcome::Complete)
-                            .unwrap_or(WorkerOutcome::Failed(WorkerFailure::InvalidOutput)),
-                    }
+                    WorkerOutcome::Canceled
                 }
-            }};
-            let _ = tx.send(WorkerEvent {
+                _ = &mut deadline => {
+                    job_token.cancel();
+                    if request.capability_id == CapabilityId::SqlRead {
+                        let _ = tokio::time::timeout(Duration::from_millis(1300), &mut run).await;
+                    }
+                    WorkerOutcome::TimedOut
+                }
+                result = &mut run => match result {
+                    Err(failure) => WorkerOutcome::Failed(failure),
+                    Ok(output) => normalize(&request, output)
+                        .map(Box::new)
+                        .map(WorkerOutcome::Complete)
+                        .unwrap_or(WorkerOutcome::Failed(WorkerFailure::InvalidOutput)),
+                },
+            }
+        };
+        let _ = tx.send(WorkerEvent {
                 request_id: id,
                 outcome,
             });
@@ -324,7 +341,24 @@ fn normalize(request: &ProbeRequest, output: ProbeOutput) -> Result<EvidenceEnve
             && output.evidence_refs.len() <= evidence::MAX_EVIDENCE_REFS,
         "Probe output capacity reached"
     );
-    let content = serde_json::to_vec(&(&output.records, &output.metrics, &output.evidence_refs))?;
+    ensure!(
+        output.sql_observations.len() <= super::sql::types::MAX_SQL_OBSERVATIONS
+            && output
+                .sql_observations
+                .iter()
+                .all(super::sql::types::SqlObservation::bounded),
+        "SQL observation capacity reached"
+    );
+    let content = if output.sql_observations.is_empty() {
+        serde_json::to_vec(&(&output.records, &output.metrics, &output.evidence_refs))?
+    } else {
+        serde_json::to_vec(&(
+            &output.records,
+            &output.metrics,
+            &output.evidence_refs,
+            &output.sql_observations,
+        ))?
+    };
     ensure!(
         content.len() <= evidence::MAX_ENVELOPE_BYTES,
         "Probe output capacity reached"
@@ -349,6 +383,7 @@ fn normalize(request: &ProbeRequest, output: ProbeOutput) -> Result<EvidenceEnve
         content_sha256: format!("{:x}", hash.finalize()),
         records: output.records,
         metrics: output.metrics,
+        sql_observations: output.sql_observations,
         evidence_refs: output.evidence_refs,
     };
     envelope.validate_shape()?;
@@ -364,6 +399,9 @@ pub fn built_in_registry() -> Result<CapabilityRegistry> {
                 registry.register(descriptor, Arc::new(TcpProbe))?
             }
             CapabilityId::HttpHealth => registry.register(descriptor, Arc::new(HttpProbe))?,
+            CapabilityId::SqlRead => {
+                registry.register(descriptor, Arc::new(super::sql::SqlReadAdapter))?
+            }
             _ => {}
         }
     }
@@ -427,6 +465,7 @@ impl ProbeAdapter for TcpProbe {
                     },
                     missing_reason: (!connected).then_some(evidence::MissingReason::Unavailable),
                 }],
+                sql_observations: Vec::new(),
                 evidence_refs: Vec::new(),
                 source_id: format!("tcp:{host}:{port}").into_bytes(),
                 source_observed_at: end,
@@ -507,6 +546,7 @@ impl ProbeAdapter for HttpProbe {
                     subject_sha256: request.scope.resource_digest()?,
                 }],
                 metrics: Vec::new(),
+                sql_observations: Vec::new(),
                 evidence_refs: Vec::new(),
                 source_id: url.into_bytes(),
                 source_observed_at: end,

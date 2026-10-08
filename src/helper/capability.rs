@@ -29,6 +29,7 @@ pub struct ProbeOutput {
     pub coverage: Coverage,
     pub records: Vec<NormalizedRecord>,
     pub metrics: Vec<NormalizedMetric>,
+    pub sql_observations: Vec<super::sql::types::SqlObservation>,
     pub evidence_refs: Vec<uuid::Uuid>,
     /// Raw source identity is hashed before the envelope is persisted.
     pub source_id: Vec<u8>,
@@ -153,9 +154,14 @@ impl CapabilityRegistry {
             (
                 CapabilityId::SqlRead,
                 ProbeParams::SqlRead { query_digest },
-                BoundScope::Database { .. },
-            )
-            | (
+                BoundScope::Database {
+                    engine: super::scope::DatabaseEngine::Postgres,
+                    credential: Some(credential),
+                    ..
+                },
+            ) if query_digest == &super::sql::postgres::template_digest()
+                && credential.purpose == super::scope::CredentialPurpose::Read => {}
+            (
                 CapabilityId::SqlPlan,
                 ProbeParams::SqlPlan { query_digest },
                 BoundScope::Database { .. },

@@ -13,5 +13,6 @@ pub mod planner;
 #[allow(dead_code)]
 pub(crate) mod process;
 pub mod scope;
+pub mod sql;
 pub mod store;
 pub mod worker;
