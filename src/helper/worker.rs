@@ -14,8 +14,8 @@ use anyhow::{Result, ensure};
 use chrono::Utc;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{HashMap, VecDeque},
-    sync::{Arc, mpsc},
+    collections::{HashMap, HashSet, VecDeque},
+    sync::{Arc, RwLock, mpsc},
     time::Duration,
 };
 use tokio_util::sync::CancellationToken;
@@ -30,6 +30,104 @@ pub const MAX_DEADLINE_SECS: u64 = 30;
 pub enum WorkerFailure {
     AdapterUnavailable,
     InvalidOutput,
+    AuthorityChanged,
+}
+
+/// The saved case and profile snapshot is published by the app before polling.
+pub trait CurrentProbeAuthority: Send + Sync {
+    fn validate_current(&self, request: &ProbeRequest) -> Result<()>;
+}
+
+#[derive(Default)]
+pub struct SnapshotProbeAuthority {
+    current: RwLock<(
+        HashMap<Uuid, CaseAuthority>,
+        Vec<crate::models::ConnectionProfile>,
+    )>,
+}
+
+struct CaseAuthority {
+    revision: u64,
+    profile_ids: HashSet<Uuid>,
+    scope_digests: HashSet<(super::scope::Digest, super::scope::Digest)>,
+}
+
+impl SnapshotProbeAuthority {
+    pub fn publish(
+        &self,
+        cases: &[super::case::HelperCase],
+        profiles: &[crate::models::ConnectionProfile],
+    ) {
+        let mut current = self
+            .current
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner());
+        *current = (
+            cases
+                .iter()
+                .map(|case| {
+                    (
+                        case.id(),
+                        CaseAuthority {
+                            revision: case.revision(),
+                            profile_ids: case.profile_ids().iter().copied().collect(),
+                            scope_digests: case
+                                .scopes()
+                                .iter()
+                                .filter_map(|scope| {
+                                    Some((
+                                        scope.digest().ok()?,
+                                        scope.credential_scope_digest().ok()?,
+                                    ))
+                                })
+                                .collect(),
+                        },
+                    )
+                })
+                .collect(),
+            profiles.to_vec(),
+        );
+    }
+}
+
+impl CurrentProbeAuthority for SnapshotProbeAuthority {
+    fn validate_current(&self, request: &ProbeRequest) -> Result<()> {
+        let current = self
+            .current
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let case = current
+            .0
+            .get(&request.binding.case_id)
+            .ok_or_else(|| anyhow::anyhow!("Case withdrawn"))?;
+        ensure!(
+            case.revision == request.binding.case_revision,
+            "Case changed"
+        );
+        ensure!(
+            case.scope_digests.contains(&(
+                request.binding.scope_sha256.clone(),
+                request.binding.credential_scope_sha256.clone(),
+            )),
+            "Scope withdrawn"
+        );
+        ensure!(
+            request.scope.digest()? == request.binding.scope_sha256
+                && request.scope.credential_scope_digest()?
+                    == request.binding.credential_scope_sha256,
+            "Scope changed"
+        );
+        let target = request
+            .scope
+            .target()
+            .ok_or_else(|| anyhow::anyhow!("No profile target"))?;
+        ensure!(
+            case.profile_ids.contains(&target.profile_id)
+                && current.1.iter().any(|profile| target.matches(profile)),
+            "Profile changed"
+        );
+        Ok(())
+    }
 }
 pub enum WorkerOutcome {
     Complete(Box<EvidenceEnvelope>),
@@ -46,6 +144,7 @@ pub struct HelperWorker {
     runtime: tokio::runtime::Runtime,
     registry: Arc<CapabilityRegistry>,
     secrets: Arc<dyn SecretResolver>,
+    authority: Arc<dyn CurrentProbeAuthority>,
     active: HashMap<Uuid, CancellationToken>,
     queued: VecDeque<ProbeRequest>,
     tx: mpsc::Sender<WorkerEvent>,
@@ -56,6 +155,7 @@ impl HelperWorker {
     pub fn new(
         registry: Arc<CapabilityRegistry>,
         secrets: Arc<dyn SecretResolver>,
+        authority: Arc<dyn CurrentProbeAuthority>,
     ) -> Result<Self> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(MAX_ACTIVE)
@@ -66,6 +166,7 @@ impl HelperWorker {
             runtime,
             registry,
             secrets,
+            authority,
             active: HashMap::new(),
             queued: VecDeque::new(),
             tx,
@@ -84,6 +185,7 @@ impl HelperWorker {
     }
 
     pub fn submit(&mut self, request: ProbeRequest) -> Result<Uuid> {
+        self.authority.validate_current(&request)?;
         let id = request.binding.request_id;
         ensure!(
             !id.is_nil()
@@ -124,12 +226,20 @@ impl HelperWorker {
 
     fn launch(&mut self, request: ProbeRequest) {
         let id = request.binding.request_id;
+        if self.authority.validate_current(&request).is_err() {
+            let _ = self.tx.send(WorkerEvent {
+                request_id: id,
+                outcome: WorkerOutcome::Failed(WorkerFailure::AuthorityChanged),
+            });
+            return;
+        }
         let token = CancellationToken::new();
         let adapter = self
             .registry
             .adapter(request.capability_id)
             .expect("registered adapter");
         let secrets = Arc::clone(&self.secrets);
+        let authority = Arc::clone(&self.authority);
         let tx = self.tx.clone();
         let job_token = token.clone();
         self.active.insert(id, token);
@@ -141,14 +251,20 @@ impl HelperWorker {
                 biased;
                 _ = job_token.cancelled() => WorkerOutcome::Canceled,
                 result = tokio::time::timeout(Duration::from_millis(remaining_ms as u64), async {
+                    authority.validate_current(&request)
+                        .map_err(|_| WorkerFailure::AuthorityChanged)?;
                     if let Some(scope) = request.scope.credential() {
-                        let _secret = secrets.resolve(scope, scope.purpose)?;
+                        let _secret = secrets.resolve(scope, scope.purpose)
+                            .map_err(|_| WorkerFailure::AdapterUnavailable)?;
                     }
+                    authority.validate_current(&request)
+                        .map_err(|_| WorkerFailure::AuthorityChanged)?;
                     adapter.collect(&request, secrets.as_ref(), job_token.clone()).await
+                        .map_err(|_| WorkerFailure::AdapterUnavailable)
                 }) => {
                     match result {
                         Err(_) => WorkerOutcome::TimedOut,
-                        Ok(Err(_)) => WorkerOutcome::Failed(WorkerFailure::AdapterUnavailable),
+                        Ok(Err(failure)) => WorkerOutcome::Failed(failure),
                         Ok(Ok(output)) => normalize(&request, output)
                             .map(Box::new)
                             .map(WorkerOutcome::Complete)
@@ -184,8 +300,13 @@ impl HelperWorker {
         while let Ok(event) = self.rx.try_recv() {
             let was_active = self.active.remove(&event.request_id).is_some();
             events.push(event);
-            if was_active && let Some(next) = self.queued.pop_front() {
-                self.launch(next);
+            if was_active {
+                while self.active.len() < MAX_ACTIVE {
+                    let Some(next) = self.queued.pop_front() else {
+                        break;
+                    };
+                    self.launch(next);
+                }
             }
         }
         events

@@ -2,7 +2,7 @@
 use std::{ffi::OsString, process::Stdio, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
-    process::{Child, Command},
+    process::Command,
     sync::Notify,
 };
 use tokio_util::sync::CancellationToken;
@@ -47,6 +47,10 @@ pub(crate) enum FixedToolOperation {
     TestWhoami,
     #[cfg(test)]
     TestWhereSecret,
+    #[cfg(test)]
+    TestPipeParent {
+        pid_file: std::path::PathBuf,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -74,7 +78,7 @@ fn value(input: &str) -> Result<OsString, ProcessFailure> {
 }
 
 impl FixedToolOperation {
-    fn argv(self) -> Result<(&'static str, Vec<OsString>), ProcessFailure> {
+    fn argv(self) -> Result<(OsString, Vec<OsString>), ProcessFailure> {
         let program = match &self {
             Self::DockerContainerInspect { .. } | Self::DockerContainerStats { .. } => "docker.exe",
             Self::KubernetesWorkloadGet { .. } | Self::KubernetesEvents { .. } => "kubectl.exe",
@@ -86,7 +90,19 @@ impl FixedToolOperation {
             Self::TestWhoami => "whoami.exe",
             #[cfg(test)]
             Self::TestWhereSecret => "where.exe",
+            #[cfg(test)]
+            Self::TestPipeParent { .. } => "",
         };
+        #[cfg(test)]
+        let program = if matches!(&self, Self::TestPipeParent { .. }) {
+            std::env::current_exe()
+                .map_err(|_| ProcessFailure::Spawn)?
+                .into_os_string()
+        } else {
+            OsString::from(program)
+        };
+        #[cfg(not(test))]
+        let program = OsString::from(program);
         let args: Vec<OsString> = match self {
             Self::DockerContainerInspect { container_id } => {
                 vec!["container".into(), "inspect".into(), value(&container_id)?]
@@ -173,6 +189,12 @@ impl FixedToolOperation {
             Self::TestWhoami => Vec::new(),
             #[cfg(test)]
             Self::TestWhereSecret => vec!["secret-sentinel-never-matches".into()],
+            #[cfg(test)]
+            Self::TestPipeParent { .. } => vec![
+                "--exact".into(),
+                "helper::process::tests::pipe_parent_fixture".into(),
+                "--nocapture".into(),
+            ],
         };
         Ok((program, args))
     }
@@ -198,39 +220,95 @@ async fn capture<R: AsyncRead + Unpin>(
     }
 }
 
-async fn terminate_tree(child: &mut Child) {
-    #[cfg(windows)]
-    if let Some(pid) = child.id() {
-        let mut kill = Command::new("taskkill.exe");
-        kill.args(["/PID", &pid.to_string(), "/T", "/F"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .creation_flags(0x08000000);
-        if let Ok(mut process) = kill.spawn() {
-            let _ = tokio::time::timeout(Duration::from_secs(2), process.wait()).await;
+#[cfg(windows)]
+struct JobGuard(std::os::windows::io::OwnedHandle);
+
+#[cfg(windows)]
+impl JobGuard {
+    fn attach_suspended(pid: u32) -> Result<Self, ProcessFailure> {
+        use std::os::windows::io::{AsRawHandle, FromRawHandle};
+        use windows_sys::Win32::{
+            Foundation::INVALID_HANDLE_VALUE,
+            System::{
+                Diagnostics::ToolHelp::{
+                    CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First,
+                    Thread32Next,
+                },
+                JobObjects::{
+                    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+                    SetInformationJobObject, TerminateJobObject,
+                },
+                Threading::{
+                    OpenProcess, OpenThread, PROCESS_SET_QUOTA, PROCESS_TERMINATE, ResumeThread,
+                    THREAD_SUSPEND_RESUME,
+                },
+            },
+        };
+        // SAFETY: All returned handles are checked and immediately owned. The root stays
+        // suspended until it is assigned to the kill-on-close job.
+        unsafe {
+            let raw_job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if raw_job.is_null() {
+                return Err(ProcessFailure::Spawn);
+            }
+            let job = std::os::windows::io::OwnedHandle::from_raw_handle(raw_job);
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if SetInformationJobObject(
+                job.as_raw_handle(),
+                JobObjectExtendedLimitInformation,
+                &limits as *const _ as *const std::ffi::c_void,
+                std::mem::size_of_val(&limits) as u32,
+            ) == 0
+            {
+                return Err(ProcessFailure::Spawn);
+            }
+            let raw_process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
+            if raw_process.is_null() {
+                return Err(ProcessFailure::Spawn);
+            }
+            let process = std::os::windows::io::OwnedHandle::from_raw_handle(raw_process);
+            if AssignProcessToJobObject(job.as_raw_handle(), process.as_raw_handle()) == 0 {
+                return Err(ProcessFailure::Spawn);
+            }
+            // ToolHelp can briefly lag a newly created suspended process.
+            for _ in 0..20 {
+                let raw_snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+                if raw_snapshot != INVALID_HANDLE_VALUE {
+                    let snapshot = std::os::windows::io::OwnedHandle::from_raw_handle(raw_snapshot);
+                    let mut entry: THREADENTRY32 = std::mem::zeroed();
+                    entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+                    let mut found = Thread32First(snapshot.as_raw_handle(), &mut entry) != 0;
+                    while found {
+                        if entry.th32OwnerProcessID == pid {
+                            let raw_thread =
+                                OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
+                            if !raw_thread.is_null() {
+                                let thread =
+                                    std::os::windows::io::OwnedHandle::from_raw_handle(raw_thread);
+                                if ResumeThread(thread.as_raw_handle()) != u32::MAX {
+                                    return Ok(Self(job));
+                                }
+                            }
+                            break;
+                        }
+                        found = Thread32Next(snapshot.as_raw_handle(), &mut entry) != 0;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let _ = TerminateJobObject(job.as_raw_handle(), 1);
+            Err(ProcessFailure::Spawn)
         }
     }
-    let _ = child.start_kill();
-    let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
-}
 
-/// Also terminates descendants when an adapter future is dropped by its parent worker.
-struct ProcessTreeGuard {
-    pid: Option<u32>,
-}
-impl Drop for ProcessTreeGuard {
-    fn drop(&mut self) {
-        #[cfg(windows)]
-        if let Some(pid) = self.pid {
-            use std::os::windows::process::CommandExt;
-            let _ = std::process::Command::new("taskkill.exe")
-                .args(["/PID", &pid.to_string(), "/T", "/F"])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .creation_flags(0x08000000)
-                .spawn();
+    fn terminate(&self) {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+        // SAFETY: The owned handle remains valid for this call.
+        unsafe {
+            let _ = TerminateJobObject(self.0.as_raw_handle(), 1);
         }
     }
 }
@@ -255,6 +333,11 @@ async fn run_with_limit(
     if cancel.is_cancelled() {
         return Err(ProcessFailure::Canceled);
     }
+    #[cfg(test)]
+    let pipe_pid_file = match &operation {
+        FixedToolOperation::TestPipeParent { pid_file } => Some(pid_file.clone()),
+        _ => None,
+    };
     let (program, args) = operation.argv()?;
     let mut command = Command::new(program);
     command
@@ -264,15 +347,33 @@ async fn run_with_limit(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    #[cfg(test)]
+    if let Some(path) = pipe_pid_file {
+        command
+            .env("RELAYNE_PIPE_FIXTURE", "1")
+            .env("RELAYNE_PIPE_PID_FILE", path);
+    }
     #[cfg(windows)]
     {
-        command.creation_flags(0x08000000);
+        command
+            .creation_flags(0x08000000 | windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
         if let Some(system_root) = std::env::var_os("SystemRoot") {
             command.env("SystemRoot", system_root);
         }
     }
+    let expires_at = tokio::time::Instant::now() + deadline;
     let mut child = command.spawn().map_err(|_| ProcessFailure::Spawn)?;
-    let mut tree_guard = ProcessTreeGuard { pid: child.id() };
+    #[cfg(windows)]
+    let job = match child
+        .id()
+        .and_then(|pid| JobGuard::attach_suspended(pid).ok())
+    {
+        Some(job) => job,
+        None => {
+            let _ = child.start_kill();
+            return Err(ProcessFailure::Spawn);
+        }
+    };
     let overflow = Arc::new(Notify::new());
     let stdout = tokio::spawn(capture(
         child.stdout.take().ok_or(ProcessFailure::Spawn)?,
@@ -287,35 +388,126 @@ async fn run_with_limit(
     let result = tokio::select! {
         biased;
         _ = cancel.cancelled() => Err(ProcessFailure::Canceled),
-        _ = tokio::time::sleep(deadline) => Err(ProcessFailure::TimedOut),
+        _ = tokio::time::sleep_until(expires_at) => Err(ProcessFailure::TimedOut),
         _ = overflow.notified() => Err(ProcessFailure::OutputLimit),
-        status = child.wait() => match status {
-            Ok(status) if status.success() => Ok(()),
-            _ => Err(ProcessFailure::ExitFailed),
-        },
+        completed = async {
+            let status = child.wait().await.map_err(|_| ProcessFailure::ExitFailed)?;
+            let out = stdout.await.map_err(|_| ProcessFailure::OutputLimit)?
+                .ok_or(ProcessFailure::OutputLimit)?;
+            let _ = stderr.await.map_err(|_| ProcessFailure::OutputLimit)?
+                .ok_or(ProcessFailure::OutputLimit)?;
+            if !status.success() { return Err(ProcessFailure::ExitFailed); }
+            Ok(out)
+        } => completed,
     };
-    if matches!(
-        &result,
-        Err(ProcessFailure::Canceled | ProcessFailure::TimedOut | ProcessFailure::OutputLimit)
-    ) {
-        terminate_tree(&mut child).await;
+    if result.is_err() {
+        #[cfg(windows)]
+        job.terminate();
+        let _ = child.start_kill();
+        let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
     }
-    tree_guard.pid = None;
-    let out = stdout
-        .await
-        .map_err(|_| ProcessFailure::OutputLimit)?
-        .ok_or(ProcessFailure::OutputLimit)?;
-    let _ = stderr
-        .await
-        .map_err(|_| ProcessFailure::OutputLimit)?
-        .ok_or(ProcessFailure::OutputLimit)?;
-    result?;
+    let out = result?;
     Ok(ProcessOutput { stdout: out })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pipe_parent_fixture() {
+        if std::env::var_os("RELAYNE_PIPE_FIXTURE").is_none() {
+            return;
+        }
+        let child = std::process::Command::new("ping.exe")
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let path = std::env::var_os("RELAYNE_PIPE_PID_FILE").unwrap();
+        std::fs::write(path, child.id().to_string()).unwrap();
+    }
+
+    #[cfg(windows)]
+    fn process_alive(pid: u32) -> bool {
+        use windows_sys::Win32::{
+            Foundation::CloseHandle,
+            System::Threading::{
+                OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, WaitForSingleObject,
+            },
+        };
+        // SAFETY: PID comes from the fixture child; handle is checked and closed.
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle.is_null() {
+                return false;
+            }
+            let active = WaitForSingleObject(handle, 0) != 0;
+            CloseHandle(handle);
+            active
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn parent_exit_with_child_holding_pipes_obeys_deadline_and_kills_child() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let pid_file =
+            std::env::temp_dir().join(format!("relayne-pipe-child-{}", uuid::Uuid::new_v4()));
+        let started = std::time::Instant::now();
+        let result = runtime.block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(3),
+                run_fixed_tool(
+                    FixedToolOperation::TestPipeParent {
+                        pid_file: pid_file.clone(),
+                    },
+                    CancellationToken::new(),
+                    Duration::from_millis(750),
+                ),
+            )
+            .await
+        });
+        let pid: u32 = std::fs::read_to_string(&pid_file)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "fixture did not launch: {error}; runner: {:?}",
+                    result.as_ref().map(|inner| inner.as_ref().map(|_| ()))
+                )
+            })
+            .parse()
+            .unwrap();
+        let _ = std::fs::remove_file(&pid_file);
+        let mut alive = process_alive(pid);
+        for _ in 0..30 {
+            if !alive {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+            alive = process_alive(pid);
+        }
+        if alive {
+            let _ = std::process::Command::new("taskkill.exe")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .and_then(|mut child| child.wait());
+        }
+        assert!(
+            matches!(result, Ok(Err(ProcessFailure::TimedOut))),
+            "runner escaped deadline"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "drain exceeded deadline"
+        );
+        assert!(!alive, "owned descendant survived timeout");
+    }
     #[test]
     fn native_process_is_bounded_cancellable_and_redacted() {
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -366,9 +558,12 @@ mod tests {
                     .args(["-n", "30", "127.0.0.1"])
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
-                    .creation_flags(0x08000000);
+                    .creation_flags(
+                        0x08000000 | windows_sys::Win32::System::Threading::CREATE_SUSPENDED,
+                    );
                 let mut child = process.spawn().unwrap();
-                drop(ProcessTreeGuard { pid: child.id() });
+                let job = JobGuard::attach_suspended(child.id().unwrap()).unwrap();
+                drop(job);
                 assert!(
                     tokio::time::timeout(Duration::from_secs(3), child.wait())
                         .await

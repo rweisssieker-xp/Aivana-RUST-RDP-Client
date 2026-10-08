@@ -14,6 +14,177 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+fn current_profile(scope: &BoundScope) -> crate::models::ConnectionProfile {
+    let target = scope.target().unwrap();
+    let mut profile =
+        crate::models::ConnectionProfile::sample("current", &target.host, "Default", false);
+    profile.id = target.profile_id;
+    profile.name = target.name.clone();
+    profile.port = target.port;
+    profile.username = target.username.clone();
+    profile.domain = target.domain.clone();
+    profile
+}
+
+fn authority_for(case: &HelperCase, scope: &BoundScope) -> Arc<SnapshotProbeAuthority> {
+    let authority = Arc::new(SnapshotProbeAuthority::default());
+    authority.publish(&[case.clone()], &[current_profile(scope)]);
+    authority
+}
+
+fn wait_for_adapter_calls(calls: &AtomicUsize, expected: usize) {
+    let until = std::time::Instant::now() + Duration::from_secs(2);
+    while calls.load(Ordering::SeqCst) < expected && std::time::Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), expected);
+}
+
+#[test]
+fn queued_profile_edit_rejects_before_adapter_contact() {
+    let (case, scope) = setup(9999, false);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let authority = Arc::new(SnapshotProbeAuthority::default());
+    let current = current_profile(&scope);
+    authority.publish(&[case.clone()], &[current.clone()]);
+    let mut registry = CapabilityRegistry::new();
+    registry
+        .register(
+            CapabilityDeclaration {
+                id: CapabilityId::NetworkReachability,
+                version: 1,
+                role: CheckRole::Diagnostic,
+                prerequisites: Vec::new(),
+            },
+            Arc::new(SlowProbe {
+                calls: calls.clone(),
+                delay: Duration::from_millis(200),
+                large: false,
+            }),
+        )
+        .unwrap();
+    let mut worker =
+        HelperWorker::new(Arc::new(registry), Arc::new(NoSecrets), authority.clone()).unwrap();
+    for _ in 0..4 {
+        worker.submit(request(&case, &scope, false)).unwrap();
+    }
+    wait_for_adapter_calls(&calls, MAX_ACTIVE);
+    let queued = worker.submit(request(&case, &scope, false)).unwrap();
+    let mut edited = current;
+    edited.host = "edited.invalid".into();
+    authority.publish(&[case], &[edited]);
+    std::thread::sleep(Duration::from_millis(250));
+    let mut rejected = false;
+    for _ in 0..100 {
+        for event in worker.poll() {
+            if event.request_id == queued {
+                rejected = matches!(
+                    event.outcome,
+                    WorkerOutcome::Failed(WorkerFailure::AuthorityChanged)
+                );
+            }
+        }
+        if rejected {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(rejected);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        4,
+        "queued adapter reached old endpoint"
+    );
+}
+
+#[test]
+fn queued_case_withdrawal_rejects_before_adapter_contact() {
+    let (case, scope) = setup(9999, false);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let authority = authority_for(&case, &scope);
+    let mut registry = CapabilityRegistry::new();
+    registry
+        .register(
+            CapabilityDeclaration {
+                id: CapabilityId::NetworkReachability,
+                version: 1,
+                role: CheckRole::Diagnostic,
+                prerequisites: Vec::new(),
+            },
+            Arc::new(SlowProbe {
+                calls: calls.clone(),
+                delay: Duration::from_millis(200),
+                large: false,
+            }),
+        )
+        .unwrap();
+    let mut worker =
+        HelperWorker::new(Arc::new(registry), Arc::new(NoSecrets), authority.clone()).unwrap();
+    for _ in 0..MAX_ACTIVE {
+        worker.submit(request(&case, &scope, false)).unwrap();
+    }
+    wait_for_adapter_calls(&calls, MAX_ACTIVE);
+    let queued = worker.submit(request(&case, &scope, false)).unwrap();
+    authority.publish(&[], &[current_profile(&scope)]);
+    let mut rejected = false;
+    for _ in 0..100 {
+        for event in worker.poll() {
+            if event.request_id == queued {
+                rejected = matches!(
+                    event.outcome,
+                    WorkerOutcome::Failed(WorkerFailure::AuthorityChanged)
+                );
+            }
+        }
+        if rejected {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(rejected);
+    assert_eq!(calls.load(Ordering::SeqCst), MAX_ACTIVE);
+}
+
+#[test]
+fn canceled_queued_intent_never_contacts_adapter() {
+    let (case, scope) = setup(9999, false);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = CapabilityRegistry::new();
+    registry
+        .register(
+            CapabilityDeclaration {
+                id: CapabilityId::NetworkReachability,
+                version: 1,
+                role: CheckRole::Diagnostic,
+                prerequisites: Vec::new(),
+            },
+            Arc::new(SlowProbe {
+                calls: calls.clone(),
+                delay: Duration::from_millis(200),
+                large: false,
+            }),
+        )
+        .unwrap();
+    let mut worker = HelperWorker::new(
+        Arc::new(registry),
+        Arc::new(NoSecrets),
+        authority_for(&case, &scope),
+    )
+    .unwrap();
+    for _ in 0..MAX_ACTIVE {
+        worker.submit(request(&case, &scope, false)).unwrap();
+    }
+    wait_for_adapter_calls(&calls, MAX_ACTIVE);
+    let queued = worker.submit(request(&case, &scope, false)).unwrap();
+    assert!(worker.cancel(queued));
+    let event = poll_one(&mut worker);
+    assert_eq!(event.request_id, queued);
+    assert!(matches!(event.outcome, WorkerOutcome::Canceled));
+    std::thread::sleep(Duration::from_millis(250));
+    let _ = worker.poll();
+    assert_eq!(calls.load(Ordering::SeqCst), MAX_ACTIVE);
+}
+
 struct NoSecrets;
 impl SecretResolver for NoSecrets {
     fn resolve(&self, _: &CredentialScope, _: CredentialPurpose) -> Result<ResolvedSecret> {
@@ -210,7 +381,12 @@ fn four_active_thirty_two_queued_and_typed_cancel() {
             }),
         )
         .unwrap();
-    let mut worker = HelperWorker::new(Arc::new(registry), Arc::new(NoSecrets)).unwrap();
+    let mut worker = HelperWorker::new(
+        Arc::new(registry),
+        Arc::new(NoSecrets),
+        authority_for(&case, &scope),
+    )
+    .unwrap();
     let mut ids = Vec::new();
     for _ in 0..MAX_ACTIVE + MAX_QUEUED {
         ids.push(worker.submit(request(&case, &scope, false)).unwrap());
@@ -235,8 +411,13 @@ fn real_loopback_tcp_and_http_produce_schema_two_evidence() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let (case, scope) = setup(port, false);
-    let mut worker =
-        HelperWorker::new(Arc::new(built_in_registry().unwrap()), Arc::new(NoSecrets)).unwrap();
+    let authority = authority_for(&case, &scope);
+    let mut worker = HelperWorker::new(
+        Arc::new(built_in_registry().unwrap()),
+        Arc::new(NoSecrets),
+        authority.clone(),
+    )
+    .unwrap();
     let probe = request(&case, &scope, false);
     worker.registry().validate_request(&case, &probe).unwrap();
     worker.submit(probe).unwrap();
@@ -261,6 +442,7 @@ fn real_loopback_tcp_and_http_produce_schema_two_evidence() {
             .unwrap();
     });
     let (case, scope) = setup(port, true);
+    authority.publish(&[case.clone()], &[current_profile(&scope)]);
     let probe = request(&case, &scope, true);
     worker.registry().validate_request(&case, &probe).unwrap();
     worker.submit(probe).unwrap();
@@ -291,7 +473,12 @@ fn oversized_output_and_deadline_are_terminal_without_raw_error() {
             }),
         )
         .unwrap();
-    let mut worker = HelperWorker::new(Arc::new(registry), Arc::new(NoSecrets)).unwrap();
+    let mut worker = HelperWorker::new(
+        Arc::new(registry),
+        Arc::new(NoSecrets),
+        authority_for(&case, &scope),
+    )
+    .unwrap();
     worker.submit(request(&case, &scope, false)).unwrap();
     assert!(matches!(
         poll_one(&mut worker).outcome,
@@ -335,7 +522,12 @@ fn running_deadline_and_adapter_error_have_closed_terminal_status() {
             }),
         )
         .unwrap();
-    let mut worker = HelperWorker::new(Arc::new(registry), Arc::new(NoSecrets)).unwrap();
+    let mut worker = HelperWorker::new(
+        Arc::new(registry),
+        Arc::new(NoSecrets),
+        authority_for(&case, &scope),
+    )
+    .unwrap();
     let mut probe = request(&case, &scope, false);
     probe.deadline_secs = Some(1);
     worker.submit(probe).unwrap();
@@ -355,7 +547,12 @@ fn running_deadline_and_adapter_error_have_closed_terminal_status() {
             Arc::new(RawErrorProbe),
         )
         .unwrap();
-    let mut worker = HelperWorker::new(Arc::new(registry), Arc::new(NoSecrets)).unwrap();
+    let mut worker = HelperWorker::new(
+        Arc::new(registry),
+        Arc::new(NoSecrets),
+        authority_for(&case, &scope),
+    )
+    .unwrap();
     worker.submit(request(&case, &scope, false)).unwrap();
     let event = poll_one(&mut worker);
     assert!(matches!(

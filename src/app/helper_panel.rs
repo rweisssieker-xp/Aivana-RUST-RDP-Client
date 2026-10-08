@@ -6,6 +6,7 @@ use crate::helper::{
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 mod connectors_ui;
 mod evidence_ui;
@@ -18,6 +19,7 @@ pub(super) struct HelperState {
     path: Option<PathBuf>,
     selected: Option<Uuid>,
     worker: Option<crate::helper::worker::HelperWorker>,
+    authority: Arc<crate::helper::worker::SnapshotProbeAuthority>,
     collect_jobs: HashMap<Uuid, Uuid>,
     editor: intake_ui::Editor,
     scope_editor: scope_ui::Editor,
@@ -41,6 +43,7 @@ impl HelperState {
                 path: None,
                 selected: None,
                 worker: None,
+                authority: Arc::default(),
                 collect_jobs: HashMap::new(),
                 editor: Default::default(),
                 scope_editor: Default::default(),
@@ -70,6 +73,7 @@ impl HelperState {
                     path: Some(path),
                     selected: None,
                     worker: None,
+                    authority: Arc::default(),
                     collect_jobs: HashMap::new(),
                     editor: Default::default(),
                     scope_editor: Default::default(),
@@ -87,6 +91,7 @@ impl HelperState {
                 path: Some(path),
                 selected: None,
                 worker: None,
+                authority: Arc::default(),
                 collect_jobs: HashMap::new(),
                 editor: Default::default(),
                 scope_editor: Default::default(),
@@ -180,6 +185,7 @@ impl HelperState {
             path: Some(path),
             selected: None,
             worker: None,
+            authority: Arc::default(),
             collect_jobs: HashMap::new(),
             editor: Default::default(),
             scope_editor: Default::default(),

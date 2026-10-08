@@ -137,10 +137,18 @@ impl HelperState {
         );
         let (capability_id, params) =
             supported(&scope).ok_or_else(|| anyhow::anyhow!("No executable adapter"))?;
+        self.authority.publish(
+            self.store
+                .as_ref()
+                .map(|store| store.cases())
+                .unwrap_or(&[]),
+            profiles,
+        );
         if self.worker.is_none() {
             self.worker = Some(worker::HelperWorker::new(
                 Arc::new(worker::built_in_registry()?),
                 Arc::new(PersistentSecretResolver::new()?),
+                self.authority.clone(),
             )?);
         }
         let id = Uuid::new_v4();
@@ -186,6 +194,13 @@ impl HelperState {
     }
 
     pub(super) fn poll_collect(&mut self, profiles: &[ConnectionProfile]) {
+        self.authority.publish(
+            self.store
+                .as_ref()
+                .map(|store| store.cases())
+                .unwrap_or(&[]),
+            profiles,
+        );
         let events = self
             .worker
             .as_mut()
@@ -230,6 +245,9 @@ impl HelperState {
                         }
                         worker::WorkerFailure::InvalidOutput => {
                             "Capture output invalid or over limit"
+                        }
+                        worker::WorkerFailure::AuthorityChanged => {
+                            "Capture case, scope or saved profile changed"
                         }
                     }
                 }
