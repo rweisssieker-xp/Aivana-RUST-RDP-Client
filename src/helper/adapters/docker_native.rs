@@ -543,11 +543,14 @@ pub(super) async fn collect_from_root(
 mod peer_verification_tests {
     use super::*;
     use std::sync::{
+        Mutex,
         atomic::{AtomicUsize, Ordering},
         mpsc,
     };
     use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
     use uuid::Uuid;
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn fixture() -> (String, NamedPipeServer) {
         let path = format!(r"\\.\pipe\relayne-fixture-{}", Uuid::new_v4());
@@ -559,6 +562,7 @@ mod peer_verification_tests {
 
     #[test]
     fn slow_peer_verification_obeys_deadline_and_cancel_without_writing() {
+        let _lock = TEST_LOCK.lock().unwrap();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -618,6 +622,7 @@ mod peer_verification_tests {
 
     #[test]
     fn canceled_verifications_keep_both_global_slots_occupied() {
+        let _lock = TEST_LOCK.lock().unwrap();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
