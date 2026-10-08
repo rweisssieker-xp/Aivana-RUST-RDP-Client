@@ -12,12 +12,56 @@ pub enum ReadState {
     Truncated,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SqlServerIndexKind {
+    Clustered,
+    Nonclustered,
+    Xml,
+    Spatial,
+    ClusteredColumnstore,
+    NonclusteredColumnstore,
+    NonclusteredHash,
+    Json,
+}
+
+impl SqlServerIndexKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Clustered => "CLUSTERED",
+            Self::Nonclustered => "NONCLUSTERED",
+            Self::Xml => "XML",
+            Self::Spatial => "SPATIAL",
+            Self::ClusteredColumnstore => "CLUSTERED COLUMNSTORE",
+            Self::NonclusteredColumnstore => "NONCLUSTERED COLUMNSTORE",
+            Self::NonclusteredHash => "NONCLUSTERED HASH",
+            Self::Json => "JSON",
+        }
+    }
+
+    pub fn from_type_desc(value: &str) -> Option<Self> {
+        Some(match value {
+            "CLUSTERED" => Self::Clustered,
+            "NONCLUSTERED" => Self::Nonclustered,
+            "XML" => Self::Xml,
+            "SPATIAL" => Self::Spatial,
+            "CLUSTERED COLUMNSTORE" => Self::ClusteredColumnstore,
+            "NONCLUSTERED COLUMNSTORE" => Self::NonclusteredColumnstore,
+            "NONCLUSTERED HASH" => Self::NonclusteredHash,
+            "JSON" => Self::Json,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SqlObservation {
     SqlServerIdentity {
         database: String,
         principal: String,
+        effective_principal: String,
+        database_principal: String,
         product_version: String,
         server_ip: String,
         server_port: u16,
@@ -56,6 +100,12 @@ pub enum SqlObservation {
         column_id: u32,
         name: String,
         plain: bool,
+    },
+    SqlServerIndex {
+        name: String,
+        index_kind: SqlServerIndexKind,
+        enabled: bool,
+        usage_count: Option<i64>,
     },
     SqlServerPermission {
         database_connect: Option<bool>,
@@ -155,6 +205,8 @@ impl SqlObservation {
             Self::SqlServerIdentity {
                 database,
                 principal,
+                effective_principal,
+                database_principal,
                 product_version,
                 server_ip,
                 server_port,
@@ -163,6 +215,8 @@ impl SqlObservation {
             } => {
                 field(database)
                     && field(principal)
+                    && field(effective_principal)
+                    && field(database_principal)
                     && Self::version_token(product_version)
                     && server_ip.parse::<std::net::IpAddr>().is_ok()
                     && *server_port > 0
@@ -213,6 +267,9 @@ impl SqlObservation {
                 name,
                 ..
             } => *object_id > 0 && *column_id > 0 && field(name),
+            Self::SqlServerIndex {
+                name, usage_count, ..
+            } => field(name) && usage_count.is_none_or(|value| value >= 0),
             Self::SqlServerPermission { .. } => true,
             Self::Identity {
                 database,

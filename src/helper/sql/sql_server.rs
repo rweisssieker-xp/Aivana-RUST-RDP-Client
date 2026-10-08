@@ -1,6 +1,6 @@
 //! Fixed, bounded SQL Server reads over a fresh OS-trusted TLS TDS connection.
 
-use super::types::{ReadState, SqlObservation};
+use super::types::{ReadState, SqlObservation, SqlServerIndexKind};
 use crate::helper::{
     capability::{ProbeAdapter, ProbeFuture, ProbeOutput, ProbeRequest},
     credentials::SecretResolver,
@@ -66,7 +66,7 @@ impl SqlServerReadProbe {
     pub fn sql(self) -> &'static str {
         match self {
             Self::Identity => {
-                "SELECT DB_NAME(), ORIGINAL_LOGIN(), CONVERT(nvarchar(32), SERVERPROPERTY('ProductVersion')), CONVERT(varchar(48), CONNECTIONPROPERTY('local_net_address')), CONVERT(int, CONNECTIONPROPERTY('local_tcp_port')), CONVERT(bit, HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW SERVER STATE')), CONVERT(bit, HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW SERVER PERFORMANCE STATE'))"
+                "SELECT DB_NAME(), ORIGINAL_LOGIN(), SUSER_SNAME(), USER_NAME(), CONVERT(nvarchar(32), SERVERPROPERTY('ProductVersion')), CONVERT(varchar(48), CONNECTIONPROPERTY('local_net_address')), CONVERT(int, CONNECTIONPROPERTY('local_tcp_port')), CONVERT(bit, HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW SERVER STATE')), CONVERT(bit, HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW SERVER PERFORMANCE STATE'))"
             }
             Self::Requests => {
                 "SELECT TOP (21) session_id, status, wait_type, CONVERT(bigint, total_elapsed_time) FROM sys.dm_exec_requests WHERE database_id = DB_ID() AND session_id <> @@SPID ORDER BY session_id"
@@ -87,7 +87,7 @@ impl SqlServerReadProbe {
                 "SELECT TOP (1) CONVERT(bigint, p.rows), CONVERT(bigint, p.modification_counter), CONVERT(bigint, p.steps) FROM sys.tables AS t JOIN sys.schemas AS s ON s.schema_id = t.schema_id OUTER APPLY sys.dm_db_stats_properties(t.object_id, 1) AS p WHERE s.name = @P1 AND t.name = @P2"
             }
             Self::Permissions => {
-                "SELECT TOP (1) CONVERT(bit, HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'CONNECT')), CONVERT(bit, HAS_PERMS_BY_NAME(@P1, 'SCHEMA', 'SELECT')), CONVERT(bit, HAS_PERMS_BY_NAME(@P1 + '.' + @P2, 'OBJECT', 'SELECT')), CONVERT(bit, HAS_PERMS_BY_NAME(@P1 + '.' + @P2, 'OBJECT', 'ALTER')), CONVERT(bit, HAS_PERMS_BY_NAME(@P1 + '.' + @P2, 'OBJECT', 'CONTROL'))"
+                "SELECT TOP (1) CONVERT(bit, HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'CONNECT')), CONVERT(bit, HAS_PERMS_BY_NAME(QUOTENAME(@P1), 'SCHEMA', 'SELECT')), CONVERT(bit, HAS_PERMS_BY_NAME(QUOTENAME(@P1) + '.' + QUOTENAME(@P2), 'OBJECT', 'SELECT')), CONVERT(bit, HAS_PERMS_BY_NAME(QUOTENAME(@P1) + '.' + QUOTENAME(@P2), 'OBJECT', 'ALTER')), CONVERT(bit, HAS_PERMS_BY_NAME(QUOTENAME(@P1) + '.' + QUOTENAME(@P2), 'OBJECT', 'CONTROL'))"
             }
         }
     }
@@ -267,20 +267,22 @@ fn project(probe: SqlServerReadProbe, row: &Row) -> std::result::Result<SqlObser
         SqlServerReadProbe::Identity => SqlObservation::SqlServerIdentity {
             database: required(0)?,
             principal: required(1)?,
-            product_version: required(2)?,
-            server_ip: required(3)?,
+            effective_principal: required(2)?,
+            database_principal: required(3)?,
+            product_version: required(4)?,
+            server_ip: required(5)?,
             server_port: u16::try_from(
-                row.try_get::<i32, _>(4)
+                row.try_get::<i32, _>(6)
                     .map_err(|_| Failure::InvalidProjection)?
                     .ok_or(Failure::InvalidProjection)?,
             )
             .map_err(|_| Failure::InvalidProjection)?,
             tls_required: true,
             server_state_access: row
-                .try_get::<bool, _>(5)
+                .try_get::<bool, _>(7)
                 .map_err(|_| Failure::InvalidProjection)?,
             server_performance_access: row
-                .try_get::<bool, _>(6)
+                .try_get::<bool, _>(8)
                 .map_err(|_| Failure::InvalidProjection)?,
         },
         SqlServerReadProbe::Requests => SqlObservation::SqlServerRequest {
@@ -331,14 +333,15 @@ fn project(probe: SqlServerReadProbe, row: &Row) -> std::result::Result<SqlObser
                 .map_err(|_| Failure::InvalidProjection)?
                 .ok_or(Failure::InvalidProjection)?,
         },
-        SqlServerReadProbe::Indexes => SqlObservation::Index {
+        SqlServerReadProbe::Indexes => SqlObservation::SqlServerIndex {
             name: required(0)?,
-            method: required(1)?,
-            valid: row
+            index_kind: SqlServerIndexKind::from_type_desc(&required(1)?)
+                .ok_or(Failure::InvalidProjection)?,
+            enabled: row
                 .try_get::<bool, _>(2)
                 .map_err(|_| Failure::InvalidProjection)?
                 .ok_or(Failure::InvalidProjection)?,
-            scans: row
+            usage_count: row
                 .try_get::<i64, _>(3)
                 .map_err(|_| Failure::InvalidProjection)?,
         },
@@ -394,6 +397,8 @@ fn verify_identity(
         SqlObservation::SqlServerIdentity {
             database: actual_db,
             principal: actual_principal,
+            effective_principal,
+            database_principal,
             product_version,
             server_ip,
             server_port,
@@ -408,6 +413,10 @@ fn verify_identity(
     ensure!(
         actual_db == database
             && actual_principal == principal
+            && effective_principal == principal
+            // The reviewed scope has no separately approved database-user mapping.
+            // Fail closed if the current database execution principal differs.
+            && database_principal == principal
             && *server_port == port
             && *tls_required
             && SqlObservation::version_token(product_version),
@@ -551,7 +560,10 @@ fn classify(probe: SqlServerReadProbe, rows: &[SqlObservation]) -> ReadState {
                     ..
                 }
                 | SqlObservation::SqlServerWait { wait_ms: None, .. }
-                | SqlObservation::Index { scans: None, .. }
+                | SqlObservation::SqlServerIndex {
+                    usage_count: None,
+                    ..
+                }
                 | SqlObservation::SqlServerStatistics { rows: None, .. }
                 | SqlObservation::SqlServerStatistics {
                     modification_counter: None,
@@ -750,6 +762,9 @@ async fn collect_with(
             }
             Err(Failure::Denied) => states.push((probe, ReadState::Denied)),
             Err(Failure::Unavailable) => states.push((probe, ReadState::Unknown)),
+            Err(Failure::InvalidProjection) if probe == SqlServerReadProbe::Indexes => {
+                states.push((probe, ReadState::Unknown));
+            }
             Err(_) => anyhow::bail!("SQL Server collection interrupted"),
         }
     }
