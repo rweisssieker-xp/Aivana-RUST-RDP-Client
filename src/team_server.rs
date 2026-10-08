@@ -5,6 +5,8 @@ pub mod collaboration_session;
 pub mod commerce;
 #[path = "team_oidc.rs"]
 pub mod oidc;
+#[path = "team_server/repair.rs"]
+mod repair;
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -19,6 +21,14 @@ pub enum Role {
     Viewer,
     Operator,
     Admin,
+}
+
+#[derive(Clone)]
+struct AuthIdentity {
+    actor: String,
+    role: Role,
+    token_id: Option<String>,
+    jwt_exp: Option<chrono::DateTime<chrono::Utc>>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -103,6 +113,7 @@ pub fn open_store(path: &Path) -> Result<Connection> {
       CREATE TABLE IF NOT EXISTS tokens(id TEXT PRIMARY KEY, hash TEXT UNIQUE NOT NULL, actor TEXT NOT NULL, role TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS items(id TEXT PRIMARY KEY, revision INTEGER NOT NULL, payload TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS audit(sequence INTEGER PRIMARY KEY AUTOINCREMENT, actor TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL, time TEXT NOT NULL);")?;
+    repair::migrate(&db)?;
     Ok(db)
 }
 fn audit(db: &Connection, actor: &str, action: &str, target: &str) -> Result<()> {
@@ -303,29 +314,39 @@ fn serve_request_with_oidc(
             "SELECT actor,role,id FROM tokens WHERE hash=?1 AND revoked=0 AND actor NOT LIKE 'oidc:%'",
             [hash(token)],
             |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                ))
+                Ok(AuthIdentity {
+                    actor: r.get(0)?,
+                    role: parse_role(&r.get::<_, String>(1)?).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    token_id: Some(r.get(2)?),
+                    jwt_exp: None,
+                })
             },
         )
         .optional()?
     } else if let (Some(token), Some(verifier)) = (bearer, oidc) {
-        verifier
-            .verify(token)
-            .ok()
-            .map(|(actor, role)| (actor, role_name(&role).to_owned(), String::new()))
+        verifier.verify(token).ok().and_then(|(actor, role)| {
+            Some(AuthIdentity {
+                actor,
+                role,
+                token_id: None,
+                jwt_exp: Some(oidc::verified_expiry(token).ok()?),
+            })
+        })
     } else {
         None
     };
-    let Some((actor, role, token_id)) = identity else {
+    let Some(identity) = identity else {
         err(request, 401, "Authentication required");
         return Ok(());
     };
-    let role = parse_role(&role)?;
     let path = request.url().to_owned();
     let method = request.method().clone();
+    if path.starts_with("/v1/repair-") {
+        return repair::serve(db, request, &path, &method, &identity);
+    }
+    let actor = identity.actor;
+    let role = identity.role;
+    let token_id = identity.token_id.unwrap_or_default();
     if path == "/v1/escalations" && method == Method::Get {
         respond(
             request,
@@ -839,7 +860,7 @@ mod tests {
             let thread = std::thread::spawn(move || {
                 let mut db = open_store(&path).unwrap();
                 while let Ok(req) = worker.recv() {
-                    serve_request(&mut db, req).unwrap();
+                    let _ = serve_request(&mut db, req);
                 }
             });
             Self {
@@ -868,12 +889,15 @@ mod tests {
                 .unwrap()
         }
         fn issue(&self, role: Role) -> IssuedToken {
+            self.issue_actor(role_name(&role), role)
+        }
+        fn issue_actor(&self, actor: &str, role: Role) -> IssuedToken {
             self.request(
                 reqwest::Method::POST,
                 "/v1/tokens",
                 &self.admin.token,
                 serde_json::to_value(TokenRequest {
-                    actor: role_name(&role).into(),
+                    actor: actor.into(),
                     role,
                 })
                 .unwrap(),
@@ -1303,5 +1327,422 @@ mod tests {
                 .iter()
                 .all(|v| v != &h.admin.token && v != &viewer.token && v != &operator.token)
         );
+    }
+
+    fn repair_binding() -> crate::repair_approval::RepairBinding {
+        use crate::repair_approval::*;
+        let now = chrono::Utc::now();
+        RepairBinding {
+            version: 1,
+            run_id: Uuid::new_v4(),
+            target_index: 0,
+            profile_id: Uuid::new_v4(),
+            plan_sha256: "a".repeat(64),
+            target_sha256: "b".repeat(64),
+            service: "Spooler".into(),
+            before: RepairServiceState::Stopped,
+            desired: RepairServiceState::Running,
+            captured_at: now,
+            baseline_passed: false,
+            baseline_sha256: "c".repeat(64),
+            health_sha256: "d".repeat(64),
+            proof: RepairProof {
+                kind: ProofKind::Rehearsal,
+                reference_id: Uuid::new_v4(),
+                sha256: "e".repeat(64),
+                expires_at: now + chrono::Duration::minutes(5),
+            },
+        }
+    }
+
+    fn create_repair(
+        h: &Harness,
+        token: &str,
+        binding: crate::repair_approval::RepairBinding,
+    ) -> crate::repair_approval::RepairApproval {
+        let response = h.request(
+            reqwest::Method::POST,
+            "/v1/repair-approvals",
+            token,
+            serde_json::to_value(crate::repair_approval::CreateRepairApproval {
+                request_id: Uuid::new_v4(),
+                binding,
+            })
+            .unwrap(),
+        );
+        assert_eq!(response.status(), 201);
+        response.json().unwrap()
+    }
+
+    fn decide_repair(
+        h: &Harness,
+        token: &str,
+        id: Uuid,
+        decision: crate::repair_approval::RepairDecision,
+    ) -> reqwest::blocking::Response {
+        h.request(
+            reqwest::Method::POST,
+            &format!("/v1/repair-approvals/{id}/decision"),
+            token,
+            serde_json::to_value(crate::repair_approval::DecideRepairApproval { decision })
+                .unwrap(),
+        )
+    }
+
+    fn consume_repair(
+        h: &Harness,
+        token: &str,
+        item: &crate::repair_approval::RepairApproval,
+    ) -> reqwest::blocking::Response {
+        h.request(
+            reqwest::Method::POST,
+            &format!("/v1/repair-approvals/{}/consume", item.id),
+            token,
+            serde_json::to_value(crate::repair_approval::ConsumeRepairApproval {
+                binding: item.binding.clone(),
+            })
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn repair_requires_distinct_authenticated_actors_and_exact_binding() {
+        use crate::repair_approval::*;
+        let h = Harness::new();
+        let alice = h.issue_actor("alice", Role::Operator);
+        let alice_second = h.issue_actor("alice", Role::Operator);
+        let bob = h.issue_actor("bob", Role::Operator);
+        let viewer = h.issue_actor("watcher", Role::Viewer);
+        let binding = repair_binding();
+        assert_eq!(
+            h.request(
+                reqwest::Method::POST,
+                "/v1/repair-approvals",
+                &viewer.token,
+                serde_json::to_value(CreateRepairApproval {
+                    request_id: Uuid::new_v4(),
+                    binding: binding.clone()
+                })
+                .unwrap()
+            )
+            .status(),
+            403
+        );
+        let item = create_repair(&h, &alice.token, binding);
+        assert_eq!(
+            decide_repair(&h, &alice_second.token, item.id, RepairDecision::Approve).status(),
+            409
+        );
+        assert_eq!(
+            decide_repair(&h, &viewer.token, item.id, RepairDecision::Approve).status(),
+            403
+        );
+        assert_eq!(
+            decide_repair(&h, &bob.token, item.id, RepairDecision::Approve).status(),
+            200
+        );
+        assert_eq!(consume_repair(&h, &bob.token, &item).status(), 409);
+        let mut changed = item.clone();
+        changed.binding.health_sha256 = "f".repeat(64);
+        assert_eq!(consume_repair(&h, &alice.token, &changed).status(), 409);
+        assert_eq!(consume_repair(&h, &alice.token, &item).status(), 200);
+        assert_eq!(consume_repair(&h, &alice.token, &item).status(), 409);
+    }
+
+    #[test]
+    fn repair_original_token_revocation_cannot_be_replaced_by_same_actor_token() {
+        use crate::repair_approval::*;
+        for revoke_requester in [true, false] {
+            let h = Harness::new();
+            let alice = h.issue_actor("alice", Role::Operator);
+            let alice_second = h.issue_actor("alice", Role::Operator);
+            let bob = h.issue_actor("bob", Role::Operator);
+            let _bob_second = h.issue_actor("bob", Role::Operator);
+            let item = create_repair(&h, &alice.token, repair_binding());
+            assert_eq!(
+                decide_repair(&h, &bob.token, item.id, RepairDecision::Approve).status(),
+                200
+            );
+            let revoked = if revoke_requester { alice.id } else { bob.id };
+            assert_eq!(
+                h.request(
+                    reqwest::Method::POST,
+                    "/v1/revoke",
+                    &h.admin.token,
+                    serde_json::to_value(RevokeRequest { id: revoked }).unwrap()
+                )
+                .status(),
+                200
+            );
+            assert_eq!(consume_repair(&h, &alice_second.token, &item).status(), 409);
+        }
+    }
+
+    #[test]
+    fn repair_denial_expiry_unknown_fields_and_outcome_idempotence() {
+        use crate::repair_approval::*;
+        let h = Harness::new();
+        let alice = h.issue_actor("alice", Role::Operator);
+        let bob = h.issue_actor("bob", Role::Admin);
+        let mut invalid = serde_json::to_value(CreateRepairApproval {
+            request_id: Uuid::new_v4(),
+            binding: repair_binding(),
+        })
+        .unwrap();
+        invalid["binding"]["password"] = "secret-do-not-store".into();
+        assert_eq!(
+            h.request(
+                reqwest::Method::POST,
+                "/v1/repair-approvals",
+                &alice.token,
+                invalid
+            )
+            .status(),
+            400
+        );
+        let denied = create_repair(&h, &alice.token, repair_binding());
+        assert_eq!(
+            decide_repair(&h, &bob.token, denied.id, RepairDecision::Deny).status(),
+            200
+        );
+        assert_eq!(consume_repair(&h, &alice.token, &denied).status(), 409);
+        let item = create_repair(&h, &alice.token, repair_binding());
+        assert_eq!(
+            decide_repair(&h, &bob.token, item.id, RepairDecision::Approve).status(),
+            200
+        );
+        assert_eq!(consume_repair(&h, &alice.token, &item).status(), 200);
+        let event = RepairOutcomeEvent {
+            event_id: Uuid::new_v4(),
+            approval_id: item.id,
+            run_id: item.binding.run_id,
+            target_index: item.binding.target_index,
+            outcome: RepairOutcome::Unknown,
+            occurred_at: chrono::Utc::now(),
+        };
+        let event_json = serde_json::to_value(&event).unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                h.request(
+                    reqwest::Method::POST,
+                    "/v1/repair-outcomes",
+                    &alice.token,
+                    event_json.clone()
+                )
+                .status(),
+                200
+            );
+        }
+        let mut conflict = event_json;
+        conflict["outcome"] = "passed".into();
+        assert_eq!(
+            h.request(
+                reqwest::Method::POST,
+                "/v1/repair-outcomes",
+                &alice.token,
+                conflict
+            )
+            .status(),
+            409
+        );
+        let db = open_store(&h.db).unwrap();
+        let count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM repair_outcomes WHERE event_id=?1",
+                [event.event_id.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        let audit_json = serde_json::to_string(
+            &db.prepare("SELECT target FROM audit")
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            !audit_json.contains("secret-do-not-store")
+                && !audit_json.contains(&alice.token)
+                && !audit_json.contains(&bob.token)
+        );
+    }
+
+    #[test]
+    fn expired_repair_cannot_be_decided_or_consumed_and_is_persisted() {
+        use crate::repair_approval::*;
+        let h = Harness::new();
+        let alice = h.issue_actor("alice", Role::Operator);
+        let bob = h.issue_actor("bob", Role::Operator);
+        let item = create_repair(&h, &alice.token, repair_binding());
+        let db = open_store(&h.db).unwrap();
+        db.execute(
+            "UPDATE repair_approvals SET expires_at=?1 WHERE id=?2",
+            params![
+                (chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339(),
+                item.id.to_string()
+            ],
+        )
+        .unwrap();
+        drop(db);
+        assert_eq!(
+            decide_repair(&h, &bob.token, item.id, RepairDecision::Approve).status(),
+            409
+        );
+        assert_eq!(consume_repair(&h, &alice.token, &item).status(), 409);
+        let db = open_store(&h.db).unwrap();
+        let state: String = db
+            .query_row(
+                "SELECT state FROM repair_approvals WHERE id=?1",
+                [item.id.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "expired");
+        let count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM audit WHERE action='repair_expired' AND target=?1",
+                [item.id.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn concurrent_consume_has_one_winner_and_one_audit_event() {
+        use crate::repair_approval::*;
+        let h = Harness::new();
+        let alice = h.issue_actor("alice", Role::Operator);
+        let bob = h.issue_actor("bob", Role::Operator);
+        let item = create_repair(&h, &alice.token, repair_binding());
+        assert_eq!(
+            decide_repair(&h, &bob.token, item.id, RepairDecision::Approve).status(),
+            200
+        );
+        let url = format!("{}/v1/repair-approvals/{}/consume", h.url, item.id);
+        let body = serde_json::to_value(ConsumeRepairApproval {
+            binding: item.binding.clone(),
+        })
+        .unwrap();
+        let handles = (0..8)
+            .map(|_| {
+                let url = url.clone();
+                let token = alice.token.clone();
+                let body = body.clone();
+                std::thread::spawn(move || {
+                    reqwest::blocking::Client::new()
+                        .post(url)
+                        .bearer_auth(token)
+                        .json(&body)
+                        .send()
+                        .unwrap()
+                        .status()
+                        .as_u16()
+                })
+            })
+            .collect::<Vec<_>>();
+        let statuses = handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(statuses.iter().filter(|&&status| status == 200).count(), 1);
+        assert_eq!(statuses.iter().filter(|&&status| status == 409).count(), 7);
+        let db = open_store(&h.db).unwrap();
+        let count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM audit WHERE action='repair_consumed' AND target=?1",
+                [item.id.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn failed_consume_audit_rolls_back_consumed_state() {
+        use crate::repair_approval::*;
+        let h = Harness::new();
+        let alice = h.issue_actor("alice", Role::Operator);
+        let bob = h.issue_actor("bob", Role::Operator);
+        let item = create_repair(&h, &alice.token, repair_binding());
+        assert_eq!(
+            decide_repair(&h, &bob.token, item.id, RepairDecision::Approve).status(),
+            200
+        );
+        let db = open_store(&h.db).unwrap();
+        db.execute_batch("CREATE TRIGGER reject_repair_consume_audit BEFORE INSERT ON audit WHEN NEW.action='repair_consumed' BEGIN SELECT RAISE(ABORT, 'injected failure'); END;").unwrap();
+        drop(db);
+        let failed = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_millis(500))
+            .build()
+            .unwrap()
+            .post(format!("{}/v1/repair-approvals/{}/consume", h.url, item.id))
+            .bearer_auth(&alice.token)
+            .json(&ConsumeRepairApproval {
+                binding: item.binding.clone(),
+            })
+            .send();
+        assert!(
+            failed
+                .map(|response| !response.status().is_success())
+                .unwrap_or(true)
+        );
+        let db = open_store(&h.db).unwrap();
+        let (state, consume_id): (String, Option<String>) = db
+            .query_row(
+                "SELECT state,consume_id FROM repair_approvals WHERE id=?1",
+                [item.id.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state, "approved");
+        assert!(consume_id.is_none());
+        let count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM audit WHERE action='repair_consumed' AND target=?1",
+                [item.id.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn additive_migration_preserves_legacy_rows_and_rejects_corrupt_repair_table() {
+        let path = std::env::temp_dir().join(format!(
+            "relayne-repair-migration-{}.sqlite",
+            Uuid::new_v4()
+        ));
+        let old = Connection::open(&path).unwrap();
+        old.execute_batch("CREATE TABLE tokens(id TEXT PRIMARY KEY, hash TEXT UNIQUE NOT NULL, actor TEXT NOT NULL, role TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0); CREATE TABLE items(id TEXT PRIMARY KEY, revision INTEGER NOT NULL, payload TEXT NOT NULL); CREATE TABLE audit(sequence INTEGER PRIMARY KEY AUTOINCREMENT, actor TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL, time TEXT NOT NULL); INSERT INTO tokens VALUES('legacy','hash','old-actor','operator',0);").unwrap();
+        drop(old);
+        let db = open_store(&path).unwrap();
+        let legacy: String = db
+            .query_row("SELECT actor FROM tokens WHERE id='legacy'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(legacy, "old-actor");
+        let table: String = db
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE name='repair_approvals'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(table, "repair_approvals");
+        drop(db);
+        let corrupt =
+            std::env::temp_dir().join(format!("relayne-repair-corrupt-{}.sqlite", Uuid::new_v4()));
+        let db = Connection::open(&corrupt).unwrap();
+        db.execute_batch("CREATE TABLE repair_approvals (broken TEXT);")
+            .unwrap();
+        drop(db);
+        assert!(open_store(&corrupt).is_err());
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(corrupt);
     }
 }

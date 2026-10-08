@@ -91,6 +91,12 @@ impl Config {
     fn binding(&self, sub: &str) -> Option<&SubjectBinding> {
         self.bindings.iter().find(|binding| binding.sub == sub)
     }
+    fn actor_can_operate(&self, actor: &str) -> bool {
+        self.bindings.iter().any(|binding| {
+            matches!(binding.role, Role::Operator | Role::Admin)
+                && actor_id(&self.issuer, &binding.sub) == actor
+        })
+    }
 }
 pub fn actor_id(issuer: &str, sub: &str) -> String {
     let mut hash = Sha256::new();
@@ -99,17 +105,20 @@ pub fn actor_id(issuer: &str, sub: &str) -> String {
     hash.update(sub.as_bytes());
     format!("oidc:{:x}", hash.finalize())
 }
+
+/// Call only after `Verifier::verify` succeeds: the returned expiry then comes
+/// from the same signature-verified JWT and may be bound to an approval.
+pub fn verified_expiry(token: &str) -> Result<chrono::DateTime<chrono::Utc>> {
+    let payload = token.split('.').nth(1).context("Malformed JWT")?;
+    let claims: Claims = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload)?)?;
+    chrono::DateTime::from_timestamp(i64::try_from(claims.exp)?, 0).context("Invalid JWT expiry")
+}
 /// Read current bindings on every operation. Deleting/invalidating the file fails closed.
 pub fn actor_can_operate(actor: &str) -> bool {
     CONFIG_PATH
         .get()
         .and_then(|path| Config::load(path).ok())
-        .is_some_and(|config| {
-            config.bindings.iter().any(|binding| {
-                matches!(binding.role, Role::Operator | Role::Admin)
-                    && actor_id(&config.issuer, &binding.sub) == actor
-            })
-        })
+        .is_some_and(|config| config.actor_can_operate(actor))
 }
 
 #[derive(Deserialize)]
@@ -467,5 +476,22 @@ mod tests {
             actor_id("https://one", "user"),
             actor_id("https://one", "other")
         );
+    }
+    #[test]
+    fn repair_actor_authority_follows_current_subject_role_and_verified_expiry() {
+        let (mut config, keys, key) = fixture();
+        let actor = actor_id(&config.issuer, "known-user");
+        let token = signed(&key, header(), claims());
+        assert_eq!(
+            verify_with_keys(&config, &keys, &token, 1000).unwrap().0,
+            actor
+        );
+        assert_eq!(verified_expiry(&token).unwrap().timestamp(), 2000);
+        assert!(verify_with_keys(&config, &keys, &token, 2000).is_err());
+        assert!(config.actor_can_operate(&actor));
+        config.bindings[0].role = Role::Viewer;
+        assert!(!config.actor_can_operate(&actor));
+        config.bindings.clear();
+        assert!(!config.actor_can_operate(&actor));
     }
 }

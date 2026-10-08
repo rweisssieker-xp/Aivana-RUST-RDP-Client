@@ -1,4 +1,5 @@
 use super::*;
+use crate::repair_approval::{DecideRepairApproval, RepairApproval, RepairDecision, RepairState};
 use crate::team_client::TeamClient;
 use crate::team_server::{Audit, IssuedToken, Role, SharedItem, Snapshot, TokenInfo, TokenRequest};
 use std::sync::mpsc;
@@ -20,8 +21,10 @@ pub(super) struct TeamState {
     issued: Option<IssuedToken>,
     tokens: Vec<TokenInfo>,
     audit: Vec<Audit>,
+    repairs: Vec<RepairApproval>,
     pending: Option<mpsc::Receiver<Result<TeamResult, String>>>,
     message: String,
+    repair_identity_generation: Uuid,
 }
 enum TeamResult {
     State(Snapshot),
@@ -29,6 +32,8 @@ enum TeamResult {
     Issued(IssuedToken),
     Admin(Vec<TokenInfo>, Vec<Audit>),
     Revoked,
+    Repairs(Vec<RepairApproval>),
+    RepairDecision(RepairApproval),
 }
 impl Default for TeamState {
     fn default() -> Self {
@@ -49,12 +54,28 @@ impl Default for TeamState {
             issued: None,
             tokens: vec![],
             audit: vec![],
+            repairs: vec![],
             pending: None,
             message: String::new(),
+            repair_identity_generation: Uuid::new_v4(),
         }
     }
 }
 impl TeamState {
+    pub(super) fn repair_client(&self) -> anyhow::Result<(TeamClient, Uuid, String)> {
+        let client = TeamClient::new(&self.endpoint, &self.token)?;
+        Ok((
+            client,
+            self.repair_identity_generation,
+            self.endpoint.trim().trim_end_matches('/').to_owned(),
+        ))
+    }
+    pub(super) fn repair_generation(&self) -> Uuid {
+        self.repair_identity_generation
+    }
+    fn invalidate_repair_identity(&mut self) {
+        self.repair_identity_generation = Uuid::new_v4();
+    }
     fn start(
         &mut self,
         work: impl FnOnce(TeamClient) -> anyhow::Result<TeamResult> + Send + 'static,
@@ -84,9 +105,9 @@ impl AivanaApp {
             .as_ref()
             .and_then(|flow| match flow.events.try_recv() {
                 Ok(event) => Some(event),
-                Err(mpsc::TryRecvError::Disconnected) => Some(LoginEvent::Finished(Err(
-                    "Browser sign-in ended.".into(),
-                ))),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Some(LoginEvent::Finished(Err("Browser sign-in ended.".into())))
+                }
                 Err(mpsc::TryRecvError::Empty) => None,
             });
         if let Some(event) = event {
@@ -107,6 +128,8 @@ impl AivanaApp {
                             self.team.audit.clear();
                             self.team.issued = None;
                             self.team.token = token;
+                            self.team.invalidate_repair_identity();
+                            self.team.repairs.clear();
                             self.team
                                 .start(|client| Ok(TeamResult::State(client.snapshot()?)));
                         }
@@ -147,9 +170,7 @@ impl AivanaApp {
             .as_ref()
             .and_then(|rx| match rx.try_recv() {
                 Ok(v) => Some(v),
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    Some(Err("Team request canceled".into()))
-                }
+                Err(mpsc::TryRecvError::Disconnected) => Some(Err("Team request canceled".into())),
                 Err(_) => None,
             });
         if let Some(result) = result {
@@ -179,6 +200,11 @@ impl AivanaApp {
                             self.team.message = "Token revoked. Reload administration.".into();
                             self.team.tokens.clear();
                         }
+                        TeamResult::Repairs(items) => self.team.repairs = items,
+                        TeamResult::RepairDecision(item) => {
+                            self.team.repairs.retain(|old| old.id != item.id);
+                            self.team.repairs.push(item);
+                        }
                     }
                 }
             }
@@ -188,7 +214,9 @@ impl AivanaApp {
         self.poll_team();
         ui.heading("Relayne Team");
         ui.label("Central team server · workspaces, connection targets, and job handoffs");
-        ui.label("Endpoints are shared without credentials. Roles apply to the entire team server.");
+        ui.label(
+            "Endpoints are shared without credentials. Roles apply to the entire team server.",
+        );
         self.team_browser_login(ui);
         let mut identity_changed = false;
         ui.horizontal(|ui| {
@@ -211,6 +239,8 @@ impl AivanaApp {
         });
         ui.small("Organization JWTs require a server-configured OIDC provider and an explicit user role. Tokens are held only in memory.");
         if identity_changed {
+            self.team.invalidate_repair_identity();
+            self.team.repairs.clear();
             self.team.live = Default::default();
             self.team.snapshot = None;
             self.team.selected = None;
@@ -256,6 +286,29 @@ impl AivanaApp {
             "Signed in: {} · Server role: {:?}",
             snapshot.actor, snapshot.role
         ));
+        if snapshot.role != Role::Viewer {
+            ui.collapsing("Repair approval decisions", |ui| {
+                ui.small("Compare the complete fingerprint and intended change with the requester through your review channel. A second token for the same actor cannot approve it.");
+                if ui.add_enabled(self.team.pending.is_none(), egui::Button::new("Load recent repair requests")).clicked() {
+                    self.team.start(|client| Ok(TeamResult::Repairs(client.list_repairs(0)?)));
+                }
+                for item in self.team.repairs.clone().into_iter().filter(|item| item.state == RepairState::Pending && item.requester != snapshot.actor) {
+                    ui.group(|ui| {
+                        ui.label(format!("Requester {} · Run {} · target {}", item.requester, item.binding.run_id, item.binding.target_index + 1));
+                        ui.label(format!("Service {} · {:?} → {:?} · expires {}", item.binding.service, item.binding.before, item.binding.desired, item.expires_at));
+                        ui.monospace(format!("Fingerprint: {}", item.fingerprint));
+                        ui.horizontal(|ui| {
+                            for (label, decision) in [("Approve", RepairDecision::Approve), ("Deny", RepairDecision::Deny)] {
+                                if ui.add_enabled(self.team.pending.is_none(), egui::Button::new(format!("{label}##{}", item.id))).clicked() {
+                                    let id = item.id;
+                                    self.team.start(move |client| Ok(TeamResult::RepairDecision(client.decide_repair(id, &DecideRepairApproval { decision })?)));
+                                }
+                            }
+                        });
+                    });
+                }
+            });
+        }
         let busy = self.team.pending.is_some();
         ui.add_enabled_ui(!busy,|ui|{
             if snapshot.role==Role::Admin {

@@ -389,7 +389,10 @@ pub(crate) mod tests {
         );
         let mut run = crate::execution::Run::new(plan.clone(), false).unwrap();
         run.lab_receipts = refs.clone();
-        let journal = crate::execution::Journal { runs: vec![run] };
+        let journal = crate::execution::Journal {
+            runs: vec![run],
+            approval_mode: Default::default(),
+        };
         let path = dir.join("production.dpapi");
         journal.save(&path).unwrap();
         let resumed = crate::execution::Journal::load(&path).unwrap();

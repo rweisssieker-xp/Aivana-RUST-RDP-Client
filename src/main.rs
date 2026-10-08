@@ -10,6 +10,7 @@ mod mstsc_settings;
 mod diagnostics;
 mod equivalence;
 mod execution;
+mod repair_approval;
 mod health_suggestions;
 mod application_checks;
 mod incident;

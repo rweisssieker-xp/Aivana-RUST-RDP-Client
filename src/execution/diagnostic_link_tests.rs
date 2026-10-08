@@ -149,6 +149,7 @@ fn journal_selects_only_the_case_linked_production_check() {
     rehearsal.bind_diagnostic(link.clone()).unwrap();
     let journal = Journal {
         runs: vec![run.clone(), unrelated, rehearsal],
+        approval_mode: Default::default(),
     };
     let (id, result) = journal.functional_result_for(&link).unwrap();
     assert_eq!(id, run.id);
@@ -170,6 +171,7 @@ fn journal_load_rejects_tampered_link_and_preserves_old_run() {
     ));
     let mut value = serde_json::to_value(Journal {
         runs: vec![run.clone()],
+        approval_mode: Default::default(),
     })
     .unwrap();
     value["runs"][0]["diagnostic"]["target"]["host"] = "wrong.example.test".into();

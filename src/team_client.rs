@@ -1,6 +1,10 @@
 //! Explicit, foreground initiated team operations; bearer tokens remain in memory.
 #[path = "team_login.rs"]
 pub mod login;
+use crate::repair_approval::{
+    ConsumeReceipt, ConsumeRepairApproval, CreateRepairApproval, DecideRepairApproval,
+    RepairApproval, RepairOutcomeAck, RepairOutcomeEvent,
+};
 use crate::team_server::{
     Audit, IssuedToken, RevokeRequest, SharedItem, Snapshot, TokenInfo, TokenRequest,
 };
@@ -14,6 +18,32 @@ pub struct TeamClient {
     token: String,
 }
 impl TeamClient {
+    pub fn request_repair(&self, input: &CreateRepairApproval) -> Result<RepairApproval> {
+        self.request("/v1/repair-approvals", Some(input))
+    }
+    pub fn list_repairs(&self, offset: usize) -> Result<Vec<RepairApproval>> {
+        self.request(
+            &format!("/v1/repair-approvals?limit=20&offset={offset}"),
+            None::<()>,
+        )
+    }
+    pub fn decide_repair(
+        &self,
+        id: uuid::Uuid,
+        input: &DecideRepairApproval,
+    ) -> Result<RepairApproval> {
+        self.request(&format!("/v1/repair-approvals/{id}/decision"), Some(input))
+    }
+    pub fn consume_repair(
+        &self,
+        id: uuid::Uuid,
+        input: &ConsumeRepairApproval,
+    ) -> Result<ConsumeReceipt> {
+        self.request(&format!("/v1/repair-approvals/{id}/consume"), Some(input))
+    }
+    pub fn report_repair_outcome(&self, input: &RepairOutcomeEvent) -> Result<RepairOutcomeAck> {
+        self.request("/v1/repair-outcomes", Some(input))
+    }
     pub fn escalation(&self, action: &str, body: serde_json::Value) -> Result<serde_json::Value> {
         match action {
             "config" => self.request("/v1/escalations/config", None::<()>),
@@ -105,7 +135,9 @@ impl TeamClient {
             )
         }
         let mut bytes = Vec::new();
-        let limit = if path == "/v1/collaboration" {
+        let limit = if path.starts_with("/v1/repair-") {
+            256_000u64
+        } else if path == "/v1/collaboration" {
             4_000_000u64
         } else {
             64_000_000u64

@@ -225,6 +225,21 @@ pub enum Phase {
     Failed,
     Unknown,
 }
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ApprovalMode {
+    #[default]
+    Standalone,
+    TeamControlled {
+        server_origin: String,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PendingRepairOutcome {
+    pub event: crate::repair_approval::RepairOutcomeEvent,
+    pub delivered: bool,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TargetRun {
     pub target: Target,
@@ -234,6 +249,12 @@ pub struct TargetRun {
     pub baseline: Option<HealthEvidence>,
     pub health: Option<HealthEvidence>,
     pub evidence: Vec<String>,
+    #[serde(default)]
+    pub approval_id: Option<Uuid>,
+    #[serde(default)]
+    pub apply_attempted: bool,
+    #[serde(default)]
+    pub outcome: Option<PendingRepairOutcome>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DiagnosticLink {
@@ -270,6 +291,8 @@ pub struct Run {
     pub recovery_case: Option<Uuid>,
     #[serde(default)]
     pub diagnostic: Option<DiagnosticLink>,
+    #[serde(default)]
+    pub approval_mode: ApprovalMode,
 }
 impl Run {
     pub fn new(plan: ExecutionPlan, rehearsal: bool) -> Result<Self> {
@@ -297,6 +320,9 @@ impl Run {
                 baseline: None,
                 health: None,
                 evidence: vec![],
+                approval_id: None,
+                apply_attempted: false,
+                outcome: None,
             })
             .collect();
         Ok(Self {
@@ -310,6 +336,7 @@ impl Run {
             lab_receipts: vec![],
             recovery_case: None,
             diagnostic: None,
+            approval_mode: ApprovalMode::Standalone,
         })
     }
     pub fn bind_diagnostic(&mut self, link: DiagnosticLink) -> Result<()> {
@@ -337,10 +364,11 @@ impl Run {
         Ok(())
     }
     pub fn matches_diagnostic(&self, link: &DiagnosticLink) -> bool {
-        self.diagnostic.as_ref().is_some_and(|stored| stored.case_id == link.case_id
-            && stored.case_binding == link.case_binding
-            && stored.target.same_endpoint(&link.target))
-            && self.validate_diagnostic_link(link).is_ok()
+        self.diagnostic.as_ref().is_some_and(|stored| {
+            stored.case_id == link.case_id
+                && stored.case_binding == link.case_binding
+                && stored.target.same_endpoint(&link.target)
+        }) && self.validate_diagnostic_link(link).is_ok()
     }
     pub fn functional_result(&self, link: &DiagnosticLink) -> FunctionalResult {
         let scope = match self.plan.health {
@@ -348,8 +376,12 @@ impl Run {
             HealthCheck::Http { .. } => "configured HTTP application check",
         };
         if self.rehearsal || !self.matches_diagnostic(link) {
-            return FunctionalResult { outcome: FunctionalOutcome::Unknown, observed_at: None,
-                evidence: None, scope };
+            return FunctionalResult {
+                outcome: FunctionalOutcome::Unknown,
+                observed_at: None,
+                evidence: None,
+                scope,
+            };
         }
         let target = &self.targets[0];
         let observation = target.health.as_ref();
@@ -364,8 +396,12 @@ impl Run {
         } else {
             FunctionalOutcome::Pending
         };
-        FunctionalResult { outcome, observed_at: observation.map(|e| e.at),
-            evidence: observation.map(|e| e.detail.clone()), scope }
+        FunctionalResult {
+            outcome,
+            observed_at: observation.map(|e| e.at),
+            evidence: observation.map(|e| e.detail.clone()),
+            scope,
+        }
     }
     pub fn successful(&self) -> bool {
         self.finished.is_some()
@@ -498,6 +534,8 @@ impl Run {
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Journal {
     pub runs: Vec<Run>,
+    #[serde(default)]
+    pub approval_mode: ApprovalMode,
 }
 #[derive(Clone, Debug, Default)]
 pub struct LessonCounts {
@@ -705,6 +743,19 @@ impl Journal {
             {
                 bail!("Journal contains inconsistent target or plan binding");
             }
+            if let ApprovalMode::TeamControlled { server_origin } = &run.approval_mode {
+                anyhow::ensure!(matches!(&book.approval_mode, ApprovalMode::TeamControlled { server_origin: configured } if configured == server_origin), "Journal contains inconsistent repair authority");
+            }
+            for (index, target) in run.targets.iter().enumerate() {
+                if target.apply_attempted || target.approval_id.is_some() || target.outcome.is_some() {
+                    anyhow::ensure!(!run.rehearsal && matches!(run.approval_mode, ApprovalMode::TeamControlled { .. })
+                        && target.apply_attempted && target.approval_id.is_some(), "Journal contains inconsistent repair authority");
+                }
+                if let Some(marker) = &target.outcome {
+                    anyhow::ensure!(marker.event.run_id == run.id && marker.event.target_index as usize == index
+                        && Some(marker.event.approval_id) == target.approval_id, "Journal contains inconsistent repair outcome");
+                }
+            }
             run.interrupt_after_restart();
         }
         Ok(book)
@@ -843,7 +894,10 @@ mod tests {
         run.targets[0].baseline.as_mut().unwrap().at = start;
         run.targets[0].health.as_mut().unwrap().at = start + chrono::Duration::seconds(20);
         run.finished = Some(now);
-        let journal = Journal { runs: vec![run] };
+        let journal = Journal {
+            runs: vec![run],
+            approval_mode: Default::default(),
+        };
         let before = serde_json::to_value(&journal).unwrap();
         let report = impact::report(&journal, &selected, now);
         assert_eq!(report.production.repaired, 1);
@@ -867,6 +921,7 @@ mod tests {
         let report = impact::report(
             &Journal {
                 runs: vec![rehearsal, failed],
+                approval_mode: Default::default(),
             },
             &selected,
             Utc::now(),
@@ -892,6 +947,7 @@ mod tests {
         let rows = learning::rank(
             &Journal {
                 runs: vec![good, rehearsal, other],
+                approval_mode: Default::default(),
             },
             &selected,
             Utc::now(),
@@ -919,6 +975,7 @@ mod tests {
         let rows = learning::rank(
             &Journal {
                 runs: vec![bad, good],
+                approval_mode: Default::default(),
             },
             &selected,
             Utc::now(),
@@ -941,6 +998,7 @@ mod tests {
         let rows = learning::rank(
             &Journal {
                 runs: vec![good.clone(), good, old, future],
+                approval_mode: Default::default(),
             },
             &selected,
             Utc::now(),
@@ -957,14 +1015,31 @@ mod tests {
         let mut noop = completed_success(p, false);
         noop.targets[0].before = Some(ServiceState::Running);
         noop.targets[0].baseline.as_mut().unwrap().passed = true;
-        let rows = learning::rank(&Journal { runs: vec![noop] }, &selected, Utc::now());
+        let rows = learning::rank(
+            &Journal {
+                runs: vec![noop],
+                approval_mode: Default::default(),
+            },
+            &selected,
+            Utc::now(),
+        );
         assert_eq!(rows[0].lesson.production.unknown, 1);
         assert!(!rows[0].eligible());
         assert!(rows[0].gaps.contains(&"gap_baseline"));
         assert!(rows[0].gaps.contains(&"gap_transition"));
         let tcp = completed_success(plan(), false);
         let selected = tcp.plan.mappings[0].production.clone();
-        assert!(!learning::rank(&Journal { runs: vec![tcp] }, &selected, Utc::now())[0].eligible());
+        assert!(
+            !learning::rank(
+                &Journal {
+                    runs: vec![tcp],
+                    approval_mode: Default::default(),
+                },
+                &selected,
+                Utc::now()
+            )[0]
+            .eligible()
+        );
     }
     #[test]
     fn execution_lessons_group_hosts_but_separate_rehearsal_and_health_plan() {
@@ -978,6 +1053,7 @@ mod tests {
         let another_check = completed_success(other_plan, false);
         let journal = Journal {
             runs: vec![first, second, rehearsal, another_check],
+            approval_mode: Default::default(),
         };
         let lessons = journal.lessons();
         assert_eq!(lessons.len(), 2);
@@ -1012,6 +1088,7 @@ mod tests {
                 restored,
                 failed,
             ],
+            approval_mode: Default::default(),
         }
         .lessons();
         assert_eq!(lessons.len(), 1);

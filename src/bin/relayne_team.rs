@@ -1,6 +1,8 @@
 #[cfg(test)]
 #[path = "../team_client.rs"]
 mod team_client;
+#[path = "../repair_approval.rs"]
+mod repair_approval;
 #[path = "../team_server.rs"]
 mod team_server;
 #[path = "../ticket_escalation.rs"]
