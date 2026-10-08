@@ -112,9 +112,51 @@ function New-Secret {
     return [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
 }
 
-function Invoke-Native([string]$Executable, [string[]]$Arguments) {
-    & $Executable @Arguments
-    if ($LASTEXITCODE -ne 0) { throw "$([IO.Path]::GetFileName($Executable)) failed with exit code $LASTEXITCODE." }
+function Invoke-Native([string]$Executable, [string[]]$Arguments, [string]$ErrorFile) {
+    $nativeException = $false
+    if ($ErrorFile) {
+        # psql diagnostics may quote SQL; retain them only in the guarded guest root.
+        $oldPreference = $ErrorActionPreference
+        try {
+            # PS 5.1 promotes native stderr to a terminating error under Stop.
+            $ErrorActionPreference = 'Continue'
+            & $Executable @Arguments 2> $ErrorFile
+        } catch { $nativeException = $true }
+        finally { $ErrorActionPreference = $oldPreference }
+    } else {
+        & $Executable @Arguments
+    }
+    $exitCode = $LASTEXITCODE
+    if ($nativeException -or $exitCode -ne 0) {
+        $status = if ($null -ne $exitCode) { "exit code $exitCode" } else { 'native invocation error' }
+        $message = "$([IO.Path]::GetFileName($Executable)) failed with $status."
+        if ($ErrorFile) { $message += " Guest diagnostic file: $ErrorFile" }
+        throw $message
+    }
+}
+
+function Write-SqlFile([string]$Path, [string]$Sql) {
+    # Windows PowerShell 5.1's Encoding.UTF8 emits a BOM; psql SQL input must not.
+    [IO.File]::WriteAllText($Path, $Sql, [Text.UTF8Encoding]::new($false))
+}
+
+function Write-ProvisionSql([string]$Path, [string]$OwnerPassword, [string]$ReaderPassword) {
+    $sql = @"
+CREATE ROLE relayne_fixture_owner LOGIN PASSWORD '$OwnerPassword';
+CREATE ROLE relayne_fixture_reader LOGIN PASSWORD '$ReaderPassword';
+CREATE DATABASE relayne_helper_acceptance OWNER relayne_fixture_owner;
+"@
+    Write-SqlFile $Path $sql
+}
+
+function Write-GrantSql([string]$Path) {
+    $sql = @'
+GRANT CONNECT ON DATABASE relayne_helper_acceptance TO relayne_fixture_reader;
+GRANT USAGE ON SCHEMA fixture TO relayne_fixture_reader;
+GRANT SELECT ON ALL TABLES IN SCHEMA fixture TO relayne_fixture_reader;
+ALTER DEFAULT PRIVILEGES FOR ROLE relayne_fixture_owner IN SCHEMA fixture GRANT SELECT ON TABLES TO relayne_fixture_reader;
+'@
+    Write-SqlFile $Path $sql
 }
 
 $validation = Get-Validation
@@ -199,25 +241,15 @@ $env:PGSSLROOTCERT = Join-Path $rootPath 'root.crt'
 # The supplied certificate must cover 127.0.0.1; no trust-mode fallback is used.
 try {
     $provisionFile = Join-Path $rootPath 'provision.sql'
-    $sql = @"
-CREATE ROLE relayne_fixture_owner LOGIN PASSWORD '$ownerPassword';
-CREATE ROLE relayne_fixture_reader LOGIN PASSWORD '$readerPassword';
-CREATE DATABASE relayne_helper_acceptance OWNER relayne_fixture_owner;
-"@
-    [IO.File]::WriteAllText($provisionFile, $sql, [Text.Encoding]::UTF8)
-    Invoke-Native (Join-Path $binPath 'psql.exe') @('-X', '-v', 'ON_ERROR_STOP=1', '-d', 'postgres', '-f', $provisionFile)
+    Write-ProvisionSql $provisionFile $ownerPassword $readerPassword
+    Invoke-Native (Join-Path $binPath 'psql.exe') @('-X', '-v', 'ON_ERROR_STOP=1', '-d', 'postgres', '-f', $provisionFile) (Join-Path $rootPath 'provision.stderr.log')
     Remove-Item -LiteralPath $provisionFile
     $env:PGPASSWORD = $ownerPassword
-    Invoke-Native (Join-Path $binPath 'psql.exe') @('-X', '-v', 'ON_ERROR_STOP=1', '-U', 'relayne_fixture_owner', '-d', $Database, '-f', (Join-Path $PSScriptRoot 'seed.sql'))
+    Invoke-Native (Join-Path $binPath 'psql.exe') @('-X', '-v', 'ON_ERROR_STOP=1', '-U', 'relayne_fixture_owner', '-d', $Database, '-f', (Join-Path $PSScriptRoot 'seed.sql')) (Join-Path $rootPath 'seed.stderr.log')
     $env:PGPASSWORD = $adminPassword
     $grantFile = Join-Path $rootPath 'grant.sql'
-    [IO.File]::WriteAllText($grantFile, @'
-GRANT CONNECT ON DATABASE relayne_helper_acceptance TO relayne_fixture_reader;
-GRANT USAGE ON SCHEMA fixture TO relayne_fixture_reader;
-GRANT SELECT ON ALL TABLES IN SCHEMA fixture TO relayne_fixture_reader;
-ALTER DEFAULT PRIVILEGES FOR ROLE relayne_fixture_owner IN SCHEMA fixture GRANT SELECT ON TABLES TO relayne_fixture_reader;
-'@, [Text.Encoding]::UTF8)
-    Invoke-Native (Join-Path $binPath 'psql.exe') @('-X', '-v', 'ON_ERROR_STOP=1', '-d', $Database, '-f', $grantFile)
+    Write-GrantSql $grantFile
+    Invoke-Native (Join-Path $binPath 'psql.exe') @('-X', '-v', 'ON_ERROR_STOP=1', '-d', $Database, '-f', $grantFile) (Join-Path $rootPath 'grant.stderr.log')
     Remove-Item -LiteralPath $grantFile
     [IO.File]::WriteAllText($secretPath, "admin=$adminPassword`nowner=$ownerPassword`nreader=$readerPassword`n", [Text.Encoding]::ASCII)
 } finally {

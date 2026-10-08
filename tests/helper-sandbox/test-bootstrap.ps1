@@ -69,6 +69,32 @@ try {
     try { Assert-ClusterSetupState 'InstallTls' $probe } catch { $caught = $_.Exception.Message -match 'Refusing to overwrite' }
     Assert-That $caught 'Existing TLS key was accepted for overwrite.'
 
+    # Invoke the same writers used by the live provision/grant path. Check bytes,
+    # including non-ASCII UTF-8, because Windows PowerShell 5.1 otherwise adds BOM.
+    $provisionProbe = Join-Path $fixtureDir 'provision.sql'
+    $grantProbe = Join-Path $fixtureDir 'grant.sql'
+    Write-ProvisionSql $provisionProbe 'owner-é' 'reader-test'
+    Write-GrantSql $grantProbe
+    $strictUtf8 = [Text.UTF8Encoding]::new($false, $true)
+    foreach ($sqlPath in @($provisionProbe, $grantProbe)) {
+        $bytes = [IO.File]::ReadAllBytes($sqlPath)
+        Assert-That ($bytes.Length -gt 3) 'Generated SQL was empty.'
+        Assert-That (-not ($bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)) 'Generated SQL contains a UTF-8 BOM.'
+        [void]$strictUtf8.GetString($bytes)
+    }
+    Assert-That ($strictUtf8.GetString([IO.File]::ReadAllBytes($provisionProbe)).Contains('owner-é')) 'Provision SQL lost UTF-8 content.'
+    Assert-That ($strictUtf8.GetString([IO.File]::ReadAllBytes($grantProbe)).Contains('GRANT SELECT ON ALL TABLES IN SCHEMA fixture')) 'Grant SQL writer produced wrong content.'
+
+    $stderrProbe = Join-Path $fixtureDir 'native.stderr.log'
+    $nativeFailure = ''
+    try {
+        Invoke-Native $env:ComSpec @('/d', '/c', 'echo SECRET_PROBE 1>&2 & exit /b 7') $stderrProbe
+    } catch { $nativeFailure = $_.Exception.Message }
+    Assert-That ($nativeFailure -match 'cmd.exe failed with exit code 7') 'Native failure status was not captured.'
+    Assert-That ($nativeFailure -match [regex]::Escape($stderrProbe)) 'Native failure omitted diagnostic location.'
+    Assert-That (-not $nativeFailure.Contains('SECRET_PROBE')) 'Raw native stderr leaked into failure status.'
+    Assert-That ((Get-Content -LiteralPath $stderrProbe -Raw).Contains('SECRET_PROBE')) 'Native stderr was not retained in its diagnostic file.'
+
     $changed = $args.Clone(); $changed.Port = 55432
     $badPort = & $bootstrap @changed
     Assert-That (-not $badPort.Valid -and ($badPort.Errors -match 'Port must be 55433').Count -eq 1) 'Reference port guard failed.'
@@ -97,7 +123,7 @@ try {
         try { & $bootstrap @executeArgs | Out-Null } catch { $hostRejected = $_.Exception.Message -match 'requires Windows Sandbox' }
         Assert-That $hostRejected 'Host execution was not rejected.'
     }
-    Write-Output 'PASS: parser, validation-only side effects, guest refusal, path/port/database/schema/TLS guards, cluster setup order and state guards.'
+    Write-Output 'PASS: parser, validation-only side effects, guest refusal, path/port/database/schema/TLS guards, cluster order, BOMless SQL, native stderr containment.'
 } finally {
     Remove-Item -LiteralPath $fixtureDir -Recurse -Force -ErrorAction SilentlyContinue
 }
