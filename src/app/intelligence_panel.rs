@@ -167,12 +167,17 @@ impl AivanaApp {
         egui::CollapsingHeader::new("Narrow down causes with comparison tests").default_open(true).show(ui, |ui| {
             self.intelligence.diagnostic.draw(ui, diagnostic_profile.as_ref());
         });
+        self.intelligence.diagnostic.clear_stale_handoff(&mut self.verification_handoff);
+        if let Ok(handoff) = self.intelligence.diagnostic.verification_handoff(diagnostic_profile.as_ref()) {
+            self.show_diagnostic_functional_result(ui, &handoff);
+        }
         if ui.button("Continue to reviewed functional verification …").clicked() {
             match self.intelligence.diagnostic.verification_handoff(diagnostic_profile.as_ref()) {
-                Ok(handoff) => {
+                Ok(handoff) if !self.execution_busy() => {
                     self.verification_handoff = Some(handoff);
                     self.view = View::Execution;
                 }
+                Ok(_) => self.status = "Complete or cancel the current execution run before opening an incident handoff.".into(),
                 Err(error) => self.status = format!("Functional verification handoff unavailable: {error}"),
             }
         }

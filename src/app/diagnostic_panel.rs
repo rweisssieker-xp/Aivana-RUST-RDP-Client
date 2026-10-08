@@ -116,6 +116,29 @@ impl State {
             profile.ok_or_else(|| anyhow::anyhow!("Select the original Windows profile"))?,
         )
     }
+    pub(super) fn selected_matches_handoff(&self, handoff: &d::VerificationHandoff) -> bool {
+        self.selected
+            .and_then(|id| self.book.cases.iter().find(|case| case.id == id))
+            .is_some_and(|case| {
+                case.id == handoff.case_id
+                    && case
+                        .binding()
+                        .is_ok_and(|binding| binding == handoff.binding)
+                    && case
+                        .config
+                        .target
+                        .as_ref()
+                        .is_some_and(|target| target.same_endpoint(&handoff.target))
+            })
+    }
+    pub(super) fn clear_stale_handoff(&self, active: &mut Option<d::VerificationHandoff>) {
+        if active
+            .as_ref()
+            .is_some_and(|handoff| !self.selected_matches_handoff(handoff))
+        {
+            *active = None;
+        }
+    }
     fn save(&mut self, mut next: Book) -> bool {
         if self.store_error {
             return false;
@@ -508,6 +531,51 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn changing_case_binding_or_incident_clears_active_verification_context() {
+        let mut state = State::default();
+        let profile = ConnectionProfile::sample("Affected", "affected.example.test", "", false);
+        let case = Case::new(
+            Config {
+                mode: Mode::ReadOnly,
+                scenario: None,
+                target: Some(Target::from_profile(&profile)),
+                incident: "Failure one".into(),
+                service: "ExampleSvc".into(),
+                application: "https://app.example.test/".into(),
+                dependency: "https://dependency.example.test/health".into(),
+            },
+            Utc::now(),
+        )
+        .unwrap();
+        state.selected = Some(case.id);
+        state.book.cases.push(case);
+        let mut active = Some(state.verification_handoff(Some(&profile)).unwrap());
+        state.clear_stale_handoff(&mut active);
+        assert!(active.is_some());
+
+        state.book.cases.last_mut().unwrap().config.incident = "Edited case".into();
+        state.clear_stale_handoff(&mut active);
+        assert!(active.is_none());
+        active = Some(state.verification_handoff(Some(&profile)).unwrap());
+        state.selected = None;
+        state.clear_stale_handoff(&mut active);
+        assert!(active.is_none());
+
+        state.selected = state.book.cases.last().map(|case| case.id);
+        active = Some(state.verification_handoff(Some(&profile)).unwrap());
+        let target = Target::from_profile(&profile);
+        state.accept_incident(crate::incident::Source {
+            record_id: "new-failure".into(),
+            profile_id: profile.id,
+            endpoint: crate::incident::endpoint_key(&target),
+            observed_at: Utc::now(),
+            title: "Failure two".into(),
+            evidence: vec!["new-evidence".into()],
+        });
+        state.clear_stale_handoff(&mut active);
+        assert!(active.is_none());
+    }
     #[test]
     fn accepting_incident_context_is_inert_and_requires_real_case_preparation() {
         let mut state = State::default();

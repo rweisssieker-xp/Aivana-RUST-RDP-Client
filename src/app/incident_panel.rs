@@ -145,6 +145,7 @@ impl AivanaApp {
                     if let (true, Some(source)) = (clicked, source) {
                         self.selected_profile = Some(source.profile_id);
                         self.intelligence.diagnostic.accept_incident(source);
+                        self.verification_handoff = None;
                         self.view = View::Intelligence;
                     }
                     if selected.is_none() {

@@ -1,5 +1,5 @@
 use super::*;
-use crate::execution::{ExecutionPlan, HealthCheck, HealthEvidence, Journal, Mapping, Phase, Run};
+use crate::execution::{ExecutionPlan, FunctionalOutcome, FunctionalResult, HealthCheck, HealthEvidence, Journal, Mapping, Phase, Run};
 use crate::intelligence::{self, ServiceState};
 use crate::mission::Target;
 use crate::operations::{JobQueue, JobStatus};
@@ -197,6 +197,34 @@ impl Default for ExecutionState {
     }
 }
 impl AivanaApp {
+    pub(super) fn execution_busy(&self) -> bool {
+        self.execution.remote.is_some() || self.execution.health.is_some()
+            || self.execution.selected.is_some_and(|i| self.execution.book.runs.get(i).is_some_and(|run| run.finished.is_none()))
+    }
+    pub(super) fn diagnostic_functional_result(&self, handoff: &crate::diagnostic_lab::VerificationHandoff) -> Option<(Uuid, FunctionalResult)> {
+        self.execution.book.functional_result_for(&handoff.execution_link())
+    }
+    pub(super) fn show_diagnostic_functional_result(&self, ui: &mut Ui, handoff: &crate::diagnostic_lab::VerificationHandoff) {
+        if let Some(error) = &self.execution.error {
+            ui.colored_label(tw::RED_600, format!("Functional verification unknown: execution journal unavailable ({error})."));
+            return;
+        }
+        match self.diagnostic_functional_result(handoff) {
+            None => { ui.label("Functional verification pending: no case-linked production run has observed the affected target."); }
+            Some((run_id, result)) => {
+                let status = match result.outcome {
+                    FunctionalOutcome::Pending => "Pending",
+                    FunctionalOutcome::Succeeded => "Succeeded",
+                    FunctionalOutcome::Failed => "Failed",
+                    FunctionalOutcome::Unknown => "Unknown — inspect the run and current system state",
+                };
+                ui.strong(format!("Observed check {status} · Run {run_id}"));
+                ui.label(format!("Check scope: {}", result.scope));
+                if let Some(at) = result.observed_at { ui.label(format!("Observed at {} UTC", at.format("%Y-%m-%d %H:%M:%S"))); }
+                if let Some(detail) = result.evidence { ui.label(format!("Check evidence: {detail}")); }
+            }
+        }
+    }
     pub(super) fn recovery_execution_runs(&self) -> &[Run] {
         &self.execution.book.runs
     }
@@ -525,6 +553,12 @@ impl AivanaApp {
             return;
         };
         let r = &self.execution.book.runs[i];
+        if self.verification_handoff.as_ref().is_some_and(|handoff| {
+            !r.matches_diagnostic(&handoff.execution_link())
+        }) {
+            self.status = "Selected execution run does not match the active diagnostic case and target; dismiss the handoff or select its linked run.".into();
+            return;
+        }
         if r.finished.is_some() {
             self.execution.http_runtime = None;
             return;
@@ -650,16 +684,20 @@ impl AivanaApp {
         ui.heading("Reviewed execution & test run");
         if let Some(handoff) = &self.verification_handoff {
             ui.group(|ui| {
-                ui.strong("Functional verification pending for Diagnostic Lab case");
+                ui.strong("Diagnostic Lab functional verification handoff");
                 ui.label(format!("Incident: {} · Case {}", handoff.incident, handoff.case_id));
                 ui.label(format!("Original target: {} · Profile {}", handoff.target.host, handoff.target.profile_id));
                 ui.small(format!("Diagnostic binding: {} · Source record: {} · Evidence IDs: {}", handoff.binding, handoff.source_record.as_deref().unwrap_or("standalone case"), handoff.source_evidence.join(" · ")));
                 if !self.selected_profile().is_some_and(|p| handoff.target.matches(p)) {
                     ui.colored_label(tw::RED_600, "The original Windows profile changed or is not selected. This handoff cannot verify another target.");
                 } else {
-                    ui.label("Prepare and review the functional check for this exact target. Only a separate successful observed check recorded by this workflow can establish functional success; diagnostic matches do not.");
+                    ui.label("Prepare one production/test mapping with this exact production target. The existing review, rehearsal proof and journal gates still apply.");
                 }
+                self.show_diagnostic_functional_result(ui, handoff);
             });
+            if ui.button("Dismiss incident handoff and use standalone execution").clicked() {
+                self.verification_handoff = None;
+            }
         }
         ui.label("HTTP runtime slots as JSON (memory only; enter again for production access)");
         let runtime_editable = self.execution.http_runtime.is_none()
@@ -740,11 +778,19 @@ impl AivanaApp {
                 } else {
                     "No valid test evidence for this exact plan and target mapping."
                 });
+                let handoff_plan_ok = self.verification_handoff.as_ref().is_none_or(|handoff| {
+                    self.selected_profile().is_some_and(|profile| handoff.target.matches(profile))
+                        && p.mappings.len() == 1
+                        && p.mappings[0].production.same_endpoint(&handoff.target)
+                });
+                if !handoff_plan_ok {
+                    ui.colored_label(tw::RED_600, "Active incident handoff requires one mapping with its unchanged production target. Dismiss it to prepare an unrelated run.");
+                }
                 let mut start = None;
                 ui.horizontal(|ui| {
                     if ui
                         .add_enabled(
-                            !busy && self.execution.error.is_none() && self.execution.distinct,
+                            !busy && self.execution.error.is_none() && self.execution.distinct && handoff_plan_ok,
                             egui::Button::new("Prepare test run"),
                         )
                         .clicked()
@@ -756,7 +802,8 @@ impl AivanaApp {
                             !busy
                                 && proof
                                 && self.execution.error.is_none()
-                                && self.execution.distinct,
+                                && self.execution.distinct
+                                && handoff_plan_ok,
                             egui::Button::new("Prepare production pilot"),
                         )
                         .clicked()
@@ -765,7 +812,12 @@ impl AivanaApp {
                     }
                 });
                 if let Some(rehearsal) = start {
-                    match Run::new(p.clone(), rehearsal) {
+                    match Run::new(p.clone(), rehearsal).and_then(|mut run| {
+                        if let Some(handoff) = &self.verification_handoff {
+                            run.bind_diagnostic(handoff.execution_link())?;
+                        }
+                        Ok(run)
+                    }) {
                         Ok(r) => {
                             self.execution.book.runs.push(r);
                             self.execution.selected = Some(self.execution.book.runs.len() - 1);
@@ -786,6 +838,13 @@ impl AivanaApp {
             return;
         };
         let run = self.execution.book.runs[i].clone();
+        let handoff_run_ok = self.verification_handoff.as_ref().is_none_or(|handoff| {
+            self.selected_profile().is_some_and(|profile| handoff.target.matches(profile))
+                && run.matches_diagnostic(&handoff.execution_link())
+        });
+        if !handoff_run_ok {
+            ui.colored_label(tw::RED_600, "This selected run is not linked to the active diagnostic case and target. Its approval is blocked until the handoff is dismissed or its linked run is selected.");
+        }
         ui.label(format!(
             "{} · {}",
             if run.rehearsal {
@@ -854,7 +913,8 @@ impl AivanaApp {
                                 && t.baseline.as_ref().is_some_and(|b| !b.passed)))
                         && (!run.rehearsal || change)
                         && (run.recovery_case.is_none() || self.recovery_actions_allowed())
-                        && self.execution.error.is_none(),
+                        && self.execution.error.is_none()
+                        && handoff_run_ok,
                     egui::Button::new(if run.current == 0 {
                         "Approve and verify pilot"
                     } else {

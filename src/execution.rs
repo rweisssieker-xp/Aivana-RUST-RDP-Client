@@ -236,6 +236,26 @@ pub struct TargetRun {
     pub evidence: Vec<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DiagnosticLink {
+    pub case_id: Uuid,
+    pub case_binding: String,
+    pub target: Target,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FunctionalOutcome {
+    Pending,
+    Succeeded,
+    Failed,
+    Unknown,
+}
+#[derive(Clone, Debug)]
+pub struct FunctionalResult {
+    pub outcome: FunctionalOutcome,
+    pub observed_at: Option<DateTime<Utc>>,
+    pub evidence: Option<String>,
+    pub scope: &'static str,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Run {
     pub id: Uuid,
     pub plan: ExecutionPlan,
@@ -248,6 +268,8 @@ pub struct Run {
     pub lab_receipts: Vec<String>,
     #[serde(default)]
     pub recovery_case: Option<Uuid>,
+    #[serde(default)]
+    pub diagnostic: Option<DiagnosticLink>,
 }
 impl Run {
     pub fn new(plan: ExecutionPlan, rehearsal: bool) -> Result<Self> {
@@ -287,7 +309,63 @@ impl Run {
             finished: None,
             lab_receipts: vec![],
             recovery_case: None,
+            diagnostic: None,
         })
+    }
+    pub fn bind_diagnostic(&mut self, link: DiagnosticLink) -> Result<()> {
+        anyhow::ensure!(self.diagnostic.is_none() && self.recovery_case.is_none()
+            && self.finished.is_none() && self.targets.iter().all(|t| t.phase == Phase::Capture),
+            "Only a fresh execution run can receive a diagnostic link");
+        self.validate_diagnostic_link(&link)?;
+        self.diagnostic = Some(link);
+        Ok(())
+    }
+    fn validate_diagnostic_link(&self, link: &DiagnosticLink) -> Result<()> {
+        anyhow::ensure!(link.case_id != Uuid::nil()
+            && link.case_binding.len() == 64
+            && link.case_binding.bytes().all(|c| c.is_ascii_hexdigit())
+            && self.plan.hash()? == self.hash
+            && self.plan.mappings.len() == 1
+            && self.targets.len() == 1
+            && self.plan.mappings[0].production.same_endpoint(&link.target)
+            && self.targets[0].target.same_endpoint(if self.rehearsal {
+                &self.plan.mappings[0].staging
+            } else {
+                &link.target
+            }),
+            "Diagnostic run must use exactly the original production target and unchanged check plan");
+        Ok(())
+    }
+    pub fn matches_diagnostic(&self, link: &DiagnosticLink) -> bool {
+        self.diagnostic.as_ref().is_some_and(|stored| stored.case_id == link.case_id
+            && stored.case_binding == link.case_binding
+            && stored.target.same_endpoint(&link.target))
+            && self.validate_diagnostic_link(link).is_ok()
+    }
+    pub fn functional_result(&self, link: &DiagnosticLink) -> FunctionalResult {
+        let scope = match self.plan.health {
+            HealthCheck::Tcp { .. } => "TCP reachability only",
+            HealthCheck::Http { .. } => "configured HTTP application check",
+        };
+        if self.rehearsal || !self.matches_diagnostic(link) {
+            return FunctionalResult { outcome: FunctionalOutcome::Unknown, observed_at: None,
+                evidence: None, scope };
+        }
+        let target = &self.targets[0];
+        let observation = target.health.as_ref();
+        let outcome = if target.phase == Phase::Unknown {
+            FunctionalOutcome::Unknown
+        } else if observation.is_some_and(|e| !e.passed) {
+            FunctionalOutcome::Failed
+        } else if target.phase == Phase::Passed && evidenced_success(self, target) {
+            FunctionalOutcome::Succeeded
+        } else if self.finished.is_some() || matches!(target.phase, Phase::Failed | Phase::Restored | Phase::Passed) {
+            FunctionalOutcome::Unknown
+        } else {
+            FunctionalOutcome::Pending
+        };
+        FunctionalResult { outcome, observed_at: observation.map(|e| e.at),
+            evidence: observation.map(|e| e.detail.clone()), scope }
     }
     pub fn successful(&self) -> bool {
         self.finished.is_some()
@@ -515,6 +593,11 @@ fn evidenced_success(run: &Run, target: &TargetRun) -> bool {
     })
 }
 impl Journal {
+    pub fn functional_result_for(&self, link: &DiagnosticLink) -> Option<(Uuid, FunctionalResult)> {
+        self.runs.iter().rev()
+            .find(|run| !run.rehearsal && run.matches_diagnostic(link))
+            .map(|run| (run.id, run.functional_result(link)))
+    }
     /// Recomputed from current journal evidence; no manual registration or probability estimates.
     pub fn lessons(&self) -> Vec<ExecutionLesson> {
         let mut groups = std::collections::BTreeMap::<String, ExecutionLesson>::new();
@@ -579,6 +662,11 @@ impl Journal {
         if !cfg!(windows) {
             bail!("Windows DPAPI required");
         }
+        for run in &self.runs {
+            if let Some(link) = &run.diagnostic {
+                run.validate_diagnostic_link(link)?;
+            }
+        }
         let raw = serde_json::to_vec(self)?;
         if raw.len() > 16 * 1024 * 1024 {
             bail!("Journal limit reached");
@@ -595,6 +683,9 @@ impl Journal {
         let mut book: Self =
             serde_json::from_slice(&security::unprotect_secret(&std::fs::read(path)?)?)?;
         for run in &mut book.runs {
+            if let Some(link) = &run.diagnostic {
+                run.validate_diagnostic_link(link)?;
+            }
             if run.hash != run.plan.hash()?
                 || run.targets.len() != run.plan.mappings.len()
                 || run.current >= run.targets.len()
@@ -613,6 +704,9 @@ impl Journal {
         Ok(book)
     }
 }
+#[cfg(test)]
+#[path = "execution/diagnostic_link_tests.rs"]
+mod diagnostic_link_tests;
 
 #[cfg(test)]
 mod tests {

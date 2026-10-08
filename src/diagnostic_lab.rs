@@ -178,6 +178,15 @@ pub struct VerificationHandoff {
     pub source_record: Option<String>,
     pub source_evidence: Vec<String>,
 }
+impl VerificationHandoff {
+    pub fn execution_link(&self) -> crate::execution::DiagnosticLink {
+        crate::execution::DiagnosticLink {
+            case_id: self.case_id,
+            case_binding: self.binding.clone(),
+            target: self.target.clone(),
+        }
+    }
+}
 #[derive(Clone, Debug)]
 pub struct Request {
     pub id: Uuid,
