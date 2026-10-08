@@ -62,7 +62,7 @@ fn required<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
         .ok_or_else(|| anyhow::anyhow!("Missing provider field"))
 }
 
-fn token_tenant(token: &str, tenant: &str, principal: &str) -> Result<()> {
+pub(crate) fn token_tenant(token: &str, tenant: &str, principal: &str) -> Result<()> {
     ensure!(
         token.len() <= 16 * 1024 && !token.chars().any(char::is_control),
         "Invalid token"
@@ -250,7 +250,7 @@ fn aws_identity(value: &Value, account: &str, principal: &str) -> Result<()> {
 
 // Vault principal is the exact STS ARN. The vault's domain field carries the
 // access-key ID, optionally followed by a session token separated by '|'.
-fn aws_key_material(value: &str) -> Result<(&str, &str)> {
+pub(crate) fn aws_key_material(value: &str) -> Result<(&str, &str)> {
     ensure!(
         value.len() <= 4117 && !value.chars().any(char::is_control),
         "Invalid AWS key material"

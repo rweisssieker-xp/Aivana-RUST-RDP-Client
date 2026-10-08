@@ -80,22 +80,79 @@ fn value(input: &str) -> Result<OsString, ProcessFailure> {
     Ok(OsString::from(input))
 }
 
-#[cfg(not(test))]
+#[cfg(windows)]
+fn system_program_files() -> Result<std::path::PathBuf, ProcessFailure> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::{
+        System::Com::CoTaskMemFree,
+        UI::Shell::{FOLDERID_ProgramFiles, SHGetKnownFolderPath},
+    };
+    let mut raw: windows_sys::core::PWSTR = std::ptr::null_mut();
+    // SAFETY: the shell writes a CoTaskMem-owned terminated UTF-16 string.
+    let result =
+        unsafe { SHGetKnownFolderPath(&FOLDERID_ProgramFiles, 0, std::ptr::null_mut(), &mut raw) };
+    if result < 0 || raw.is_null() {
+        return Err(ProcessFailure::Spawn);
+    }
+    let mut length = 0usize;
+    // SAFETY: SHGetKnownFolderPath returns a terminated string. The bound prevents runaway reads.
+    while length < 32768 && unsafe { *raw.add(length) } != 0 {
+        length += 1;
+    }
+    let root = if length < 32768 {
+        // SAFETY: the returned buffer has at least `length` initialized UTF-16 units.
+        std::path::PathBuf::from(OsString::from_wide(unsafe {
+            std::slice::from_raw_parts(raw, length)
+        }))
+    } else {
+        std::path::PathBuf::new()
+    };
+    // SAFETY: raw is the CoTaskMem allocation returned by the shell.
+    unsafe { CoTaskMemFree(raw.cast()) };
+    if !root.is_absolute() {
+        return Err(ProcessFailure::Spawn);
+    }
+    Ok(root)
+}
+
+#[cfg(windows)]
+fn verified_windows_aws_program() -> Result<OsString, ProcessFailure> {
+    let root = system_program_files()?
+        .canonicalize()
+        .map_err(|_| ProcessFailure::Spawn)?;
+    let candidate = root.join("Amazon/AWSCLIV2/aws.exe");
+    if !candidate.is_file() {
+        return Err(ProcessFailure::Spawn);
+    }
+    let actual = candidate
+        .canonicalize()
+        .map_err(|_| ProcessFailure::Spawn)?;
+    let relative = actual
+        .strip_prefix(&root)
+        .map_err(|_| ProcessFailure::Spawn)?;
+    if !relative
+        .to_string_lossy()
+        .replace('\\', "/")
+        .eq_ignore_ascii_case("Amazon/AWSCLIV2/aws.exe")
+    {
+        return Err(ProcessFailure::Spawn);
+    }
+    Ok(actual.into_os_string())
+}
+
+#[cfg(all(not(windows), not(test)))]
 fn trusted_aws_program() -> Result<OsString, ProcessFailure> {
-    #[cfg(windows)]
-    let candidates = [std::env::var_os("ProgramFiles")
-        .map(|root| std::path::PathBuf::from(root).join("Amazon/AWSCLIV2/aws.exe"))
-        .ok_or(ProcessFailure::Spawn)?];
-    #[cfg(not(windows))]
-    let candidates = [
-        std::path::PathBuf::from("/usr/local/bin/aws"),
-        std::path::PathBuf::from("/usr/bin/aws"),
-    ];
-    candidates
+    ["/usr/local/bin/aws", "/usr/bin/aws"]
         .into_iter()
+        .map(std::path::PathBuf::from)
         .find(|path| path.is_file())
         .map(std::path::PathBuf::into_os_string)
         .ok_or(ProcessFailure::Spawn)
+}
+
+#[cfg(all(windows, not(test)))]
+fn trusted_aws_program() -> Result<OsString, ProcessFailure> {
+    verified_windows_aws_program()
 }
 
 impl FixedToolOperation {
@@ -512,6 +569,30 @@ async fn run_with_limit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test]
+    fn aws_program_does_not_follow_mutated_programfiles_environment() {
+        let root = system_program_files().unwrap();
+        let before = verified_windows_aws_program();
+        let previous = std::env::var_os("ProgramFiles");
+        // SAFETY: this test runs with --test-threads=1 and restores the variable below.
+        unsafe {
+            std::env::set_var(
+                "ProgramFiles",
+                std::env::temp_dir().join("attacker-selected"),
+            )
+        };
+        assert_eq!(system_program_files().unwrap(), root);
+        assert_eq!(verified_windows_aws_program(), before);
+        // SAFETY: restore the process environment before leaving this serial test.
+        unsafe {
+            if let Some(previous) = previous {
+                std::env::set_var("ProgramFiles", previous)
+            } else {
+                std::env::remove_var("ProgramFiles")
+            }
+        }
+    }
     #[test]
     fn aws_commands_are_fixed_exact_read_only_and_reject_option_ids() {
         let (_, sts) = FixedToolOperation::AwsCallerIdentity {

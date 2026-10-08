@@ -2,11 +2,13 @@
 use super::*;
 use crate::{
     helper::{
+        cloud,
         inventory::{InventoryEntry, derive_inventory},
         scope::{BoundScope, CredentialPurpose, CredentialScope, DatabaseEngine},
     },
     mission::Target,
-    models::ConnectionProfile,
+    models::{ConnectionProfile, SecretCredential},
+    security::PersistentCredentialStore,
     telemetry,
 };
 
@@ -50,6 +52,12 @@ pub(super) struct Editor {
     credential_generation: String,
     credential_principal: String,
     credential_context: String,
+    cloud_case: Option<Uuid>,
+    cloud_scope_digest: String,
+    cloud_principal: String,
+    cloud_secret: String,
+    cloud_access_key: String,
+    cloud_session_token: String,
 }
 
 fn optional(value: &str) -> Option<String> {
@@ -60,6 +68,118 @@ fn optional(value: &str) -> Option<String> {
     }
 }
 impl Editor {
+    pub(super) fn clear_cloud_draft(&mut self) {
+        self.cloud_case = None;
+        self.cloud_scope_digest.clear();
+        self.cloud_principal.clear();
+        self.cloud_secret.clear();
+        self.cloud_access_key.clear();
+        self.cloud_session_token.clear();
+    }
+
+    fn prepare_cloud(&mut self, case_id: Uuid, scope: &BoundScope) -> anyhow::Result<()> {
+        self.clear_cloud_draft();
+        anyhow::ensure!(
+            matches!(
+                scope,
+                BoundScope::AzureVm { .. } | BoundScope::AwsEc2 { .. }
+            ),
+            "Cloud scope required"
+        );
+        self.cloud_case = Some(case_id);
+        self.cloud_scope_digest = scope.digest()?;
+        self.cloud_principal = scope
+            .credential()
+            .map(|credential| credential.principal.clone())
+            .unwrap_or_default();
+        Ok(())
+    }
+
+    fn provision_cloud(
+        &mut self,
+        case_id: Uuid,
+        scope: &BoundScope,
+        store: &mut PersistentCredentialStore,
+    ) -> anyhow::Result<BoundScope> {
+        anyhow::ensure!(
+            self.cloud_case == Some(case_id) && self.cloud_scope_digest == scope.digest()?,
+            "Cloud scope changed"
+        );
+        let principal = std::mem::take(&mut self.cloud_principal);
+        let password = std::mem::take(&mut self.cloud_secret);
+        let access_key = std::mem::take(&mut self.cloud_access_key);
+        let session_token = std::mem::take(&mut self.cloud_session_token);
+        anyhow::ensure!(
+            !password.is_empty() && password.len() <= 16 * 1024,
+            "Invalid cloud secret"
+        );
+        let domain = match scope {
+            BoundScope::AzureVm { tenant, .. } => {
+                cloud::token_tenant(&password, tenant, &principal)?;
+                String::new()
+            }
+            BoundScope::AwsEc2 {
+                account, region, ..
+            } => {
+                anyhow::ensure!(
+                    password.len() <= 4096 && !password.chars().any(char::is_control),
+                    "Invalid AWS secret access key"
+                );
+                let partition = if region.starts_with("cn-") {
+                    "arn:aws-cn:"
+                } else if region.starts_with("us-gov-") {
+                    "arn:aws-us-gov:"
+                } else {
+                    "arn:aws:"
+                };
+                anyhow::ensure!(
+                    principal.starts_with(partition)
+                        && principal.contains(&format!("::{account}:")),
+                    "Invalid reviewed AWS principal"
+                );
+                let material = if session_token.is_empty() {
+                    access_key
+                } else {
+                    format!("{access_key}|{session_token}")
+                };
+                cloud::aws_key_material(&material)?;
+                material
+            }
+            _ => anyhow::bail!("Cloud scope required"),
+        };
+        let resource_digest = scope.resource_digest()?;
+        let reference = store.save_scoped(
+            &resource_digest,
+            CredentialPurpose::Read,
+            SecretCredential {
+                username: principal,
+                password,
+                domain,
+            },
+        )?;
+        let credential = CredentialScope {
+            reference: reference.id,
+            purpose: reference.purpose,
+            generation: reference.generation,
+            principal: reference.principal,
+            context: reference.context,
+            context_digest: reference.scope_digest,
+        };
+        let mut updated = scope.clone();
+        match &mut updated {
+            BoundScope::AzureVm {
+                credential: slot, ..
+            }
+            | BoundScope::AwsEc2 {
+                credential: slot, ..
+            } => *slot = Some(credential),
+            _ => unreachable!("validated cloud scope"),
+        }
+        updated.validate()?;
+        self.clear_cloud_draft();
+        Ok(updated)
+    }
+
     fn credential(&self) -> anyhow::Result<Option<CredentialScope>> {
         if self.credential_ref.trim().is_empty() {
             return Ok(None);
@@ -190,6 +310,95 @@ pub(super) fn show(
                     ui.monospace(line);
                 }
             });
+            if matches!(
+                scope,
+                BoundScope::AzureVm { .. } | BoundScope::AwsEc2 { .. }
+            ) && ui
+                .button("Set up or rotate protected cloud read credential")
+                .clicked()
+            {
+                if state.scope_editor.prepare_cloud(case.id(), scope).is_err() {
+                    state.notice = "Cloud scope unavailable".into();
+                }
+            }
+        });
+    }
+    if let Some(index) = case.scopes().iter().position(|scope| {
+        state.scope_editor.cloud_case == Some(case.id())
+            && scope.digest().ok().as_deref() == Some(&state.scope_editor.cloud_scope_digest)
+    }) {
+        let is_aws = matches!(case.scopes()[index], BoundScope::AwsEc2 { .. });
+        ui.group(|ui| {
+            ui.label("Protected read credential for this exact reviewed cloud resource");
+            field(
+                ui,
+                if is_aws {
+                    "Exact STS principal ARN"
+                } else {
+                    "Token principal ID or name"
+                },
+                &mut state.scope_editor.cloud_principal,
+            );
+            ui.horizontal(|ui| {
+                ui.label(if is_aws {
+                    "Secret access key"
+                } else {
+                    "ARM bearer token"
+                });
+                ui.add(
+                    egui::TextEdit::singleline(&mut state.scope_editor.cloud_secret).password(true),
+                );
+            });
+            if is_aws {
+                ui.horizontal(|ui| {
+                    ui.label("Access key ID");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut state.scope_editor.cloud_access_key)
+                            .password(true),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Session token (optional)");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut state.scope_editor.cloud_session_token)
+                            .password(true),
+                    );
+                });
+            }
+            if ui
+                .button("Protect credential and update reviewed scope")
+                .clicked()
+            {
+                let result = PersistentCredentialStore::new().and_then(|mut store| {
+                    state
+                        .scope_editor
+                        .provision_cloud(case.id(), &case.scopes()[index], &mut store)
+                });
+                match result {
+                    Ok(updated) => {
+                        let mut scopes = case.scopes().to_vec();
+                        scopes[index] = updated;
+                        state.revise(CaseEdit::Scopes(scopes));
+                        if state.notice.starts_with("Answer recorded") {
+                            state.save();
+                            if state.notice == "Case workspace saved securely" {
+                                state.notice =
+                                    "Protected cloud credential and reviewed scope saved".into();
+                            } else {
+                                state.notice = "Cloud credential protected, but case save failed; retry saving the case".into();
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        state.scope_editor.clear_cloud_draft();
+                        state.notice =
+                            "Cloud credential could not be protected for this scope".into();
+                    }
+                }
+            }
+            if ui.button("Cancel credential entry").clicked() {
+                state.scope_editor.clear_cloud_draft();
+            }
         });
     }
     let mut pending_profile_ids = None;
@@ -518,6 +727,170 @@ fn review_from_editor(state: &mut HelperState, case: &HelperCase, profiles: &[Co
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::helper::credentials::{PersistentSecretResolver, SecretResolver};
+    use base64::Engine;
+
+    #[test]
+    fn azure_token_provisioning_is_bound_to_reviewed_vm_and_protected_vault() {
+        let dir = std::env::temp_dir().join(format!("relayne-azure-authoring-{}", Uuid::new_v4()));
+        let tenant = Uuid::new_v4().to_string();
+        let subscription = Uuid::new_v4().to_string();
+        let resource_id = format!(
+            "/subscriptions/{subscription}/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm"
+        );
+        let scope = BoundScope::AzureVm {
+            tenant: tenant.clone(),
+            subscription,
+            resource_id,
+            credential: None,
+        };
+        let payload = serde_json::json!({"tid":tenant,"aud":"https://management.azure.com/","oid":"reviewed-principal","exp":chrono::Utc::now().timestamp()+600});
+        let token = format!(
+            "e30.{}.signature",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string())
+        );
+        let mut editor = Editor::default();
+        let case_id = Uuid::new_v4();
+        editor.prepare_cloud(case_id, &scope).unwrap();
+        editor.cloud_principal = "reviewed-principal".into();
+        editor.cloud_secret = token.clone();
+        let mut vault = PersistentCredentialStore::at(dir.join("credentials.json")).unwrap();
+        let updated = editor.provision_cloud(case_id, &scope, &mut vault).unwrap();
+        let resolver = PersistentSecretResolver::at(dir.join("credentials.scoped.dpapi"));
+        assert!(super::super::connectors_ui::collect_enabled(
+            &updated,
+            &[],
+            Some(&resolver)
+        ));
+        assert_eq!(
+            resolver
+                .resolve(updated.credential().unwrap(), CredentialPurpose::Read)
+                .unwrap()
+                .password(),
+            token
+        );
+        assert!(editor.cloud_secret.is_empty());
+        let bytes = std::fs::read(dir.join("credentials.scoped.dpapi")).unwrap();
+        assert!(
+            !bytes
+                .windows(token.len())
+                .any(|part| part == token.as_bytes())
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn protected_cloud_provisioning_and_rotation_enable_only_current_vault_reference() {
+        let dir = std::env::temp_dir().join(format!("relayne-cloud-authoring-{}", Uuid::new_v4()));
+        let mut state = HelperState::at_path(dir.join("cases.dpapi"));
+        state.create();
+        let case_id = state.current().unwrap().id();
+        let scope = BoundScope::AwsEc2 {
+            account: "123456789012".into(),
+            region: "eu-central-1".into(),
+            instance_id: "i-0123456789abcdef0".into(),
+            credential: None,
+        };
+        state.revise(CaseEdit::Scopes(vec![scope.clone()]));
+        state.save();
+        let mut vault = PersistentCredentialStore::at(dir.join("credentials.json")).unwrap();
+        let resolver = PersistentSecretResolver::at(dir.join("credentials.scoped.dpapi"));
+        assert!(!super::super::connectors_ui::collect_enabled(
+            &scope,
+            &[],
+            Some(&resolver)
+        ));
+        let mut metadata_only = scope.clone();
+        let digest = scope.resource_digest().unwrap();
+        if let BoundScope::AwsEc2 { credential, .. } = &mut metadata_only {
+            *credential = Some(CredentialScope {
+                reference: Uuid::new_v4(),
+                purpose: CredentialPurpose::Read,
+                generation: 1,
+                principal: "arn:aws:iam::123456789012:user/read".into(),
+                context: digest.clone(),
+                context_digest: digest,
+            });
+        }
+        metadata_only.validate().unwrap();
+        assert!(!super::super::connectors_ui::collect_enabled(
+            &metadata_only,
+            &[],
+            Some(&resolver)
+        ));
+        state.scope_editor.prepare_cloud(case_id, &scope).unwrap();
+        state.scope_editor.cloud_principal = "arn:aws:iam::123456789012:user/read".into();
+        state.scope_editor.cloud_access_key = "AKIA1234567890123456".into();
+        state.scope_editor.cloud_secret = "secret-sentinel-1".into();
+        let first = state
+            .scope_editor
+            .provision_cloud(case_id, &scope, &mut vault)
+            .unwrap();
+        let first_ref = first.credential().unwrap().clone();
+        assert!(state.scope_editor.cloud_secret.is_empty());
+        assert!(
+            resolver
+                .resolve(&first_ref, CredentialPurpose::Read)
+                .is_ok()
+        );
+        assert!(super::super::connectors_ui::collect_enabled(
+            &first,
+            &[],
+            Some(&resolver)
+        ));
+        assert!(!super::super::connectors_ui::collect_enabled(
+            &first,
+            &[],
+            None
+        ));
+        let missing = PersistentSecretResolver::at(dir.join("missing.scoped.dpapi"));
+        assert!(!super::super::connectors_ui::collect_enabled(
+            &first,
+            &[],
+            Some(&missing)
+        ));
+        state.scope_editor.prepare_cloud(case_id, &first).unwrap();
+        state.scope_editor.cloud_access_key = "AKIA1234567890123456".into();
+        state.scope_editor.cloud_secret = "secret-sentinel-2".into();
+        let second = state
+            .scope_editor
+            .provision_cloud(case_id, &first, &mut vault)
+            .unwrap();
+        assert_eq!(
+            second.credential().unwrap().generation,
+            first_ref.generation + 1
+        );
+        assert!(
+            resolver
+                .resolve(&first_ref, CredentialPurpose::Read)
+                .is_err()
+        );
+        assert_eq!(
+            resolver
+                .resolve(second.credential().unwrap(), CredentialPurpose::Read)
+                .unwrap()
+                .password(),
+            "secret-sentinel-2"
+        );
+        state.revise(CaseEdit::Scopes(vec![second]));
+        assert!(state.notice.starts_with("Answer recorded"));
+        state.save();
+        let reloaded = crate::helper::store::HelperStore::load(&dir.join("cases.dpapi")).unwrap();
+        assert_eq!(
+            reloaded.case(case_id).unwrap().scopes()[0]
+                .credential()
+                .unwrap()
+                .generation,
+            first_ref.generation + 1
+        );
+        let stored = std::fs::read(dir.join("cases.dpapi")).unwrap();
+        assert!(
+            !stored
+                .windows("secret-sentinel".len())
+                .any(|part| part == b"secret-sentinel")
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn all_editor_variants_are_reviewable_inspectable_persisted_and_inert() {

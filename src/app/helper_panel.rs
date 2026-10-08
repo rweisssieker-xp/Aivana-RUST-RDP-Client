@@ -113,6 +113,7 @@ impl HelperState {
         self.store.as_ref()?.case(id)
     }
     fn select(&mut self, id: Uuid) {
+        self.scope_editor.clear_cloud_draft();
         if let Some(cancel) = self.advisory_cancel.take() {
             cancel.cancel();
         }

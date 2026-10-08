@@ -3,10 +3,10 @@ use super::HelperState;
 use crate::{
     helper::{
         capability::ProbeRequest,
-        credentials::PersistentSecretResolver,
+        credentials::{PersistentSecretResolver, SecretResolver},
         evidence::EvidenceBinding,
         manifest::{CapabilityId, ProbeParams},
-        scope::BoundScope,
+        scope::{BoundScope, CredentialPurpose},
         worker::{self, WorkerOutcome},
     },
     models::ConnectionProfile,
@@ -64,6 +64,36 @@ fn supported(scope: &BoundScope) -> Option<(CapabilityId, ProbeParams)> {
     }
 }
 
+pub(super) fn cloud_credential_ready(
+    scope: &BoundScope,
+    resolver: Option<&dyn SecretResolver>,
+) -> bool {
+    if !matches!(
+        scope,
+        BoundScope::AzureVm { .. } | BoundScope::AwsEc2 { .. }
+    ) {
+        return true;
+    }
+    scope.credential().is_some_and(|credential| {
+        credential.purpose == CredentialPurpose::Read
+            && resolver.is_some_and(|resolver| {
+                resolver
+                    .resolve(credential, CredentialPurpose::Read)
+                    .is_ok()
+            })
+    })
+}
+
+pub(super) fn collect_enabled(
+    scope: &BoundScope,
+    profiles: &[ConnectionProfile],
+    resolver: Option<&dyn SecretResolver>,
+) -> bool {
+    supported(scope).is_some()
+        && current_profile_matches(scope, profiles)
+        && cloud_credential_ready(scope, resolver)
+}
+
 pub(super) fn show(
     state: &mut HelperState,
     ui: &mut egui::Ui,
@@ -72,6 +102,7 @@ pub(super) fn show(
 ) {
     ui.separator();
     ui.heading("Collect live evidence");
+    let credential_resolver = PersistentSecretResolver::new().ok();
     ui.small("Cloud checks use the reviewed credential and verify provider identity for the exact resource. Missing tools, access or status never imply live readiness; fixture tests only verify parser behavior.");
     ui.label(
         "Collection uses a registered read probe on the reviewed endpoint. AI consent is separate.",
@@ -85,8 +116,13 @@ pub(super) fn show(
         ));
     }
     for (index, scope) in case.scopes().iter().enumerate() {
-        let executable = supported(scope);
         let profile_current = current_profile_matches(scope, profiles);
+        let credential_ready = cloud_credential_ready(
+            scope,
+            credential_resolver
+                .as_ref()
+                .map(|resolver| resolver as &dyn SecretResolver),
+        );
         let name = match scope {
             BoundScope::Http { .. } => "HTTP health",
             BoundScope::Database {
@@ -107,9 +143,18 @@ pub(super) fn show(
             if scope.credential().is_some() {
                 ui.label("Credential rechecked at dispatch");
             }
+            if !credential_ready {
+                ui.label("Protected cloud credential missing, revoked or mismatched");
+            }
             if ui
                 .add_enabled(
-                    executable.is_some() && profile_current,
+                    collect_enabled(
+                        scope,
+                        profiles,
+                        credential_resolver
+                            .as_ref()
+                            .map(|resolver| resolver as &dyn SecretResolver),
+                    ),
                     egui::Button::new("Collect"),
                 )
                 .clicked()
@@ -164,6 +209,15 @@ impl HelperState {
             .get(index)
             .ok_or_else(|| anyhow::anyhow!("Scope missing"))?
             .clone();
+        if matches!(
+            scope,
+            BoundScope::AzureVm { .. } | BoundScope::AwsEc2 { .. }
+        ) {
+            ensure!(
+                cloud_credential_ready(&scope, Some(&PersistentSecretResolver::new()?)),
+                "Protected cloud credential unavailable"
+            );
+        }
         ensure!(
             current_profile_matches(&scope, profiles),
             "Saved endpoint changed"
