@@ -7,18 +7,82 @@ use crate::helper::{
         NormalizedRecord, Observation, RecordKind, SampleWindow, source_id_digest,
     },
     manifest::CapabilityId,
-    process::{FixedToolOperation, ProcessFailure, run_fixed_tool},
     scope::BoundScope,
 };
 use anyhow::{Result, ensure};
 use chrono::Utc;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
-use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 pub struct DockerAdapter;
 pub struct KubernetesAdapter;
+pub(crate) fn local_docker_principal_digest() -> Result<String> {
+    super::docker_native::process_sid_digest()
+}
+pub(crate) struct LocalReadiness {
+    pub(crate) label: &'static str,
+    pub(crate) ready: bool,
+}
+
+pub(crate) fn local_readiness(scope: &BoundScope) -> LocalReadiness {
+    let (label, ready) = local_readiness_detail(scope);
+    LocalReadiness { label, ready }
+}
+
+fn local_readiness_detail(scope: &BoundScope) -> (&'static str, bool) {
+    match scope {
+        BoundScope::Docker {
+            daemon_context,
+            credential,
+            ..
+        } => {
+            let Some(credential) = credential else {
+                return ("Credential reference missing", false);
+            };
+            let Some((reviewed_uri, _)) = credential.context.split_once('|') else {
+                return ("Reviewed pipe identity missing", false);
+            };
+            let configured = super::docker_native::context_meta_root()
+                .and_then(|root| super::docker_native::load_context(&root, daemon_context));
+            if configured.ok().as_deref() != Some(reviewed_uri) {
+                return ("Docker context unavailable or changed", false);
+            }
+            if super::docker_native::process_sid_digest().ok().as_deref()
+                != Some(&credential.principal)
+            {
+                return ("Local process identity differs", false);
+            }
+            (
+                "Local pipe and process identity verified; vault and remote access unverified",
+                true,
+            )
+        }
+        BoundScope::Kubernetes {
+            context,
+            cluster_fingerprint,
+            credential,
+            ..
+        } => {
+            if credential.is_none() {
+                return ("Credential reference missing", false);
+            }
+            let configured = super::kube_native::config_path().and_then(|path| {
+                super::kube_native::load_endpoint(&path, context, cluster_fingerprint)
+            });
+            if configured.is_err() {
+                return (
+                    "Kubernetes endpoint/CA configuration unavailable or changed",
+                    false,
+                );
+            }
+            (
+                "Local HTTPS endpoint/CA verified; vault and remote access unverified",
+                true,
+            )
+        }
+        _ => ("No container capability for this scope", false),
+    }
+}
 
 pub(crate) fn validate_scoped_operation(scope: &BoundScope, id: CapabilityId) -> Result<()> {
     match (scope, id) {
@@ -38,7 +102,16 @@ pub(crate) fn validate_scoped_operation(scope: &BoundScope, id: CapabilityId) ->
             let credential = credential
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("Read credential missing"))?;
-            atom(&credential.context, 128)?;
+            let (uri, daemon_id) = credential
+                .context
+                .split_once('|')
+                .ok_or_else(|| anyhow::anyhow!("Reviewed pipe and daemon ID required"))?;
+            super::docker_native::pipe_path(uri)?;
+            atom(daemon_id, 128)?;
+            ensure!(
+                crate::helper::evidence::is_digest(&credential.principal),
+                "Reviewed process SID digest required"
+            );
             Ok(())
         }
         (
@@ -133,21 +206,22 @@ fn record(subject: &str, observation: Observation) -> NormalizedRecord {
         subject_sha256: source_id_digest(subject.as_bytes()),
     }
 }
-fn metric(kind: MetricKind, counter: MetricSourceCounter, value: f64) -> Result<NormalizedMetric> {
+fn metric(
+    kind: MetricKind,
+    counter: MetricSourceCounter,
+    value: f64,
+    window: &SampleWindow,
+) -> Result<NormalizedMetric> {
     ensure!(
-        value.is_finite() && (0.0..=100.0).contains(&value),
+        value.is_finite() && (0.0..=100_000.0).contains(&value),
         "Metric out of range"
     );
-    let now = Utc::now();
     Ok(NormalizedMetric {
         kind,
         value: Some(value),
         unit: MetricUnit::Percent,
         source_counter: counter,
-        sample_window: SampleWindow {
-            started_at: now,
-            ended_at: now,
-        },
+        sample_window: window.clone(),
         missing_reason: None,
     })
 }
@@ -173,28 +247,8 @@ fn output(
         parser_version: 1,
     }
 }
-fn failure(error: ProcessFailure, subject: &str) -> ProbeOutput {
-    let status = match error {
-        ProcessFailure::Canceled => EvidenceStatus::Canceled,
-        ProcessFailure::OutputLimit => EvidenceStatus::Truncated,
-        // Exit status alone cannot distinguish auth denial from missing object or network failure.
-        ProcessFailure::ExitFailed => EvidenceStatus::Unavailable,
-        ProcessFailure::Spawn | ProcessFailure::TimedOut | ProcessFailure::InvalidInvocation => {
-            EvidenceStatus::Unavailable
-        }
-    };
+pub(super) fn unavailable(subject: &str, status: EvidenceStatus) -> ProbeOutput {
     output(status, subject, Vec::new(), Vec::new())
-}
-fn percent(text: &str) -> Result<f64> {
-    let raw = text
-        .strip_suffix('%')
-        .ok_or_else(|| anyhow::anyhow!("Missing percent unit"))?;
-    let number: f64 = raw.trim().parse()?;
-    ensure!(
-        number.is_finite() && (0.0..=100.0).contains(&number),
-        "Percent out of range"
-    );
-    Ok(number)
 }
 pub(super) fn parse_docker_inspect(bytes: &[u8], expected: &str) -> Result<ProbeOutput> {
     let value = json(bytes, 64 * 1024)?;
@@ -232,30 +286,81 @@ pub(super) fn parse_docker_inspect(bytes: &[u8], expected: &str) -> Result<Probe
 }
 pub(super) fn parse_docker_stats(bytes: &[u8], expected: &str) -> Result<ProbeOutput> {
     let value = json(bytes, 64 * 1024)?;
-    let id = string(&value, "ID")?;
+    ensure!(string(&value, "id")? == expected, "Container mismatch");
+    let read = chrono::DateTime::parse_from_rfc3339(string(&value, "read")?)?.with_timezone(&Utc);
+    let preread =
+        chrono::DateTime::parse_from_rfc3339(string(&value, "preread")?)?.with_timezone(&Utc);
     ensure!(
-        id == expected || expected.starts_with(id) && id.len() >= 12,
-        "Container mismatch"
+        preread < read
+            && read <= Utc::now()
+            && read.signed_duration_since(preread).num_seconds() <= 24 * 60 * 60,
+        "Invalid Docker sample window"
     );
-    let cpu = percent(string(&value, "CPUPerc")?)?;
-    let memory = percent(string(&value, "MemPerc")?)?;
+    let window = SampleWindow {
+        started_at: preread,
+        ended_at: read,
+    };
+    let cpu_stats = value
+        .get("cpu_stats")
+        .ok_or_else(|| anyhow::anyhow!("CPU stats missing"))?;
+    let previous = value
+        .get("precpu_stats")
+        .ok_or_else(|| anyhow::anyhow!("Previous CPU stats missing"))?;
+    let total = |v: &Value| {
+        v.get("cpu_usage")
+            .and_then(|v| v.get("total_usage"))
+            .and_then(Value::as_u64)
+            .ok_or_else(|| anyhow::anyhow!("CPU total missing"))
+    };
+    let cpu_delta = total(cpu_stats)?
+        .checked_sub(total(previous)?)
+        .ok_or_else(|| anyhow::anyhow!("CPU counter reset"))?;
+    let system = |v: &Value| {
+        v.get("system_cpu_usage")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| anyhow::anyhow!("System CPU total missing"))
+    };
+    let system_delta = system(cpu_stats)?
+        .checked_sub(system(previous)?)
+        .ok_or_else(|| anyhow::anyhow!("System CPU counter reset"))?;
+    ensure!(system_delta > 0, "Zero CPU sample");
+    let cpus = cpu_stats
+        .get("online_cpus")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow::anyhow!("CPU count missing"))?;
+    ensure!((1..=1024).contains(&cpus), "Invalid CPU count");
+    let cpu = cpu_delta as f64 / system_delta as f64 * cpus as f64 * 100.0;
+    let memory_stats = value
+        .get("memory_stats")
+        .ok_or_else(|| anyhow::anyhow!("Memory stats missing"))?;
+    let used = memory_stats
+        .get("usage")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow::anyhow!("Memory usage missing"))?;
+    let limit = memory_stats
+        .get("limit")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow::anyhow!("Memory limit missing"))?;
+    ensure!(limit > 0, "Zero memory limit");
+    let memory = used as f64 / limit as f64 * 100.0;
     let metrics = vec![
-        metric(MetricKind::CpuPercent, MetricSourceCounter::OsCpu, cpu)?,
+        metric(
+            MetricKind::CpuPercent,
+            MetricSourceCounter::DockerCpu,
+            cpu,
+            &window,
+        )?,
         metric(
             MetricKind::MemoryPercent,
-            MetricSourceCounter::OsMemory,
+            MetricSourceCounter::DockerMemory,
             memory,
+            &window,
         )?,
     ];
-    let observation = if cpu < 90.0 && memory < 90.0 {
-        Observation::Healthy
-    } else {
-        Observation::Degraded
-    };
     Ok(output(
         EvidenceStatus::Complete,
         expected,
-        vec![record(expected, observation)],
+        vec![record(expected, Observation::Unknown)],
         metrics,
     ))
 }
@@ -283,39 +388,102 @@ pub(super) fn parse_kube_status(
     let status = value
         .get("status")
         .ok_or_else(|| anyhow::anyhow!("Missing status"))?;
-    let observation = match resource_kind.to_ascii_lowercase().as_str() {
-        "pod" => match status.get("phase").and_then(Value::as_str) {
-            Some("Running") => Observation::Healthy,
-            Some("Pending" | "Failed" | "Unknown") => Observation::Degraded,
-            _ => Observation::Unknown,
-        },
-        "job" => {
-            if status
-                .get("succeeded")
-                .and_then(Value::as_u64)
-                .is_some_and(|n| n > 0)
-            {
-                Observation::Healthy
-            } else if status
-                .get("failed")
-                .and_then(Value::as_u64)
-                .is_some_and(|n| n > 0)
-            {
-                Observation::Degraded
-            } else {
-                Observation::Unknown
+    let generation = metadata.get("generation").and_then(Value::as_u64);
+    let observed_generation = status.get("observedGeneration").and_then(Value::as_u64);
+    let stale = matches!((generation, observed_generation), (Some(g), Some(o)) if o < g);
+    let condition = |name: &str| {
+        status
+            .get("conditions")
+            .and_then(Value::as_array)
+            .and_then(|items| {
+                items
+                    .iter()
+                    .find(|c| c.get("type").and_then(Value::as_str) == Some(name))
+            })
+            .and_then(|c| c.get("status"))
+            .and_then(Value::as_str)
+    };
+    let observation = if stale {
+        Observation::Unknown
+    } else {
+        match resource_kind.to_ascii_lowercase().as_str() {
+            "pod" => {
+                let containers_ready = status
+                    .get("containerStatuses")
+                    .and_then(Value::as_array)
+                    .filter(|items| !items.is_empty() && items.len() <= 100)
+                    .is_some_and(|items| {
+                        items
+                            .iter()
+                            .all(|item| item.get("ready").and_then(Value::as_bool) == Some(true))
+                    });
+                match (
+                    status.get("phase").and_then(Value::as_str),
+                    condition("Ready"),
+                ) {
+                    (Some("Running"), Some("True"))
+                        if metadata.get("deletionTimestamp").is_none()
+                            && containers_ready
+                            && generation.is_none_or(|g| {
+                                g <= 1 || observed_generation.is_some_and(|o| o >= g)
+                            }) =>
+                    {
+                        Observation::Healthy
+                    }
+                    (Some("Running"), Some("False")) | (Some("Failed"), _) => Observation::Degraded,
+                    _ => Observation::Unknown,
+                }
             }
-        }
-        _ => {
-            let desired = value
-                .get("spec")
-                .and_then(|v| v.get("replicas"))
-                .and_then(Value::as_u64);
-            let ready = status.get("readyReplicas").and_then(Value::as_u64);
-            match (desired, ready) {
-                (Some(d), Some(r)) if d == r => Observation::Healthy,
-                (Some(_), Some(_)) => Observation::Degraded,
-                _ => Observation::Unknown,
+            "job" => {
+                let desired = value
+                    .get("spec")
+                    .and_then(|v| v.get("completions"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(1);
+                let succeeded = status.get("succeeded").and_then(Value::as_u64).unwrap_or(0);
+                if condition("Failed") == Some("True") {
+                    Observation::Degraded
+                } else if desired > 0
+                    && succeeded >= desired
+                    && condition("Complete") == Some("True")
+                {
+                    Observation::Healthy
+                } else {
+                    Observation::Unknown
+                }
+            }
+            "daemonset" => {
+                let desired = status.get("desiredNumberScheduled").and_then(Value::as_u64);
+                let ready = status.get("numberReady").and_then(Value::as_u64);
+                let updated = status.get("updatedNumberScheduled").and_then(Value::as_u64);
+                match (generation, observed_generation, desired, ready, updated) {
+                    (Some(g), Some(o), Some(d), Some(r), Some(u)) if o >= g && d == r && d == u => {
+                        Observation::Healthy
+                    }
+                    (Some(g), Some(o), Some(d), Some(r), _) if o >= g && r < d => {
+                        Observation::Degraded
+                    }
+                    _ => Observation::Unknown,
+                }
+            }
+            _ => {
+                let desired = value
+                    .get("spec")
+                    .and_then(|v| v.get("replicas"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(1);
+                let ready = status
+                    .get("readyReplicas")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let updated = status.get("updatedReplicas").and_then(Value::as_u64);
+                match (generation, observed_generation, updated) {
+                    (Some(g), Some(o), Some(u)) if o >= g && ready == desired && u == desired => {
+                        Observation::Healthy
+                    }
+                    (Some(g), Some(o), _) if o >= g && ready < desired => Observation::Degraded,
+                    _ => Observation::Unknown,
+                }
             }
         }
     };
@@ -375,33 +543,6 @@ pub(super) fn docker_identity(bytes: &[u8], reviewed_id: &str) -> Result<()> {
     );
     Ok(())
 }
-pub(super) fn docker_local_context(bytes: &[u8], reviewed_context: &str) -> Result<()> {
-    let value = json(bytes, 64 * 1024)?;
-    ensure!(
-        string(&value, "Name")? == reviewed_context,
-        "Docker context mismatch"
-    );
-    let endpoint = value
-        .get("Endpoints")
-        .and_then(|v| v.get("docker"))
-        .ok_or_else(|| anyhow::anyhow!("Missing Docker endpoint"))?;
-    ensure!(
-        string(endpoint, "Host")?.starts_with("npipe:////./pipe/"),
-        "Daemon authentication is not bound to local OS principal"
-    );
-    Ok(())
-}
-pub(super) fn local_principal(bytes: &[u8], reviewed: &str) -> Result<()> {
-    let actual = std::str::from_utf8(bytes)?.trim();
-    ensure!(
-        !actual.is_empty()
-            && actual.len() <= 512
-            && !actual.chars().any(char::is_control)
-            && actual.eq_ignore_ascii_case(reviewed),
-        "Local principal mismatch"
-    );
-    Ok(())
-}
 pub(super) fn kube_principal(bytes: &[u8], reviewed: &str) -> Result<()> {
     let value = json(bytes, 64 * 1024)?;
     ensure!(
@@ -418,87 +559,6 @@ pub(super) fn kube_principal(bytes: &[u8], reviewed: &str) -> Result<()> {
     );
     Ok(())
 }
-pub(super) fn kube_identity(
-    bytes: &[u8],
-    reviewed_context: &str,
-    reviewed_fingerprint: &str,
-) -> Result<()> {
-    let value = json(bytes, 64 * 1024)?;
-    ensure!(
-        string(&value, "current-context")? == reviewed_context,
-        "Context mismatch"
-    );
-    let contexts = value
-        .get("contexts")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow::anyhow!("No context"))?;
-    ensure!(
-        contexts.len() == 1 && string(&contexts[0], "name")? == reviewed_context,
-        "Context mismatch"
-    );
-    let clusters = value
-        .get("clusters")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow::anyhow!("No cluster"))?;
-    ensure!(clusters.len() == 1, "Ambiguous cluster");
-    let selected_cluster = string(
-        contexts[0]
-            .get("context")
-            .ok_or_else(|| anyhow::anyhow!("No context body"))?,
-        "cluster",
-    )?;
-    ensure!(
-        string(&clusters[0], "name")? == selected_cluster,
-        "Context cluster mismatch"
-    );
-    let selected_user = string(
-        contexts[0]
-            .get("context")
-            .ok_or_else(|| anyhow::anyhow!("No context body"))?,
-        "user",
-    )?;
-    let users = value
-        .get("users")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow::anyhow!("No user"))?;
-    ensure!(
-        users.len() == 1 && string(&users[0], "name")? == selected_user,
-        "Context user mismatch"
-    );
-    let user = users[0]
-        .get("user")
-        .ok_or_else(|| anyhow::anyhow!("No user config"))?;
-    ensure!(
-        user.get("exec").is_none() && user.get("auth-provider").is_none(),
-        "Dynamic credential plugins are unsupported"
-    );
-    let cluster = clusters[0]
-        .get("cluster")
-        .ok_or_else(|| anyhow::anyhow!("No cluster"))?;
-    let server = string(cluster, "server")?;
-    ensure!(server.starts_with("https://"), "Unsafe cluster endpoint");
-    let ca = cluster
-        .get("certificate-authority-data")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("Missing CA identity"))?;
-    ensure!(
-        !ca.is_empty() && ca.len() <= 64 * 1024,
-        "Invalid CA identity"
-    );
-    let mut hash = Sha256::new();
-    hash.update(b"relayne-kubernetes-cluster-v1\0");
-    hash.update(server.as_bytes());
-    hash.update(b"\0");
-    hash.update(ca.as_bytes());
-    ensure!(
-        format!("{:x}", hash.finalize()) == reviewed_fingerprint,
-        "Cluster identity mismatch"
-    );
-    Ok(())
-}
-fn remaining(request: &ProbeRequest) -> Duration {
-    Duration::from_secs(request.deadline_secs.unwrap_or(15).min(30))
-}
 impl ProbeAdapter for DockerAdapter {
     fn collect<'a>(
         &'a self,
@@ -506,151 +566,7 @@ impl ProbeAdapter for DockerAdapter {
         secrets: &'a dyn SecretResolver,
         cancel: CancellationToken,
     ) -> ProbeFuture<'a> {
-        Box::pin(async move {
-            let BoundScope::Docker {
-                daemon_context,
-                container_id,
-                credential,
-            } = &request.scope
-            else {
-                anyhow::bail!("Scope mismatch")
-            };
-            atom(daemon_context, 128)?;
-            ensure!(
-                container_id.len() == 64 && container_id.bytes().all(|b| b.is_ascii_hexdigit()),
-                "Full container ID required"
-            );
-            let reviewed_id = credential
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("Daemon identity missing"))?
-                .context
-                .as_str();
-            atom(reviewed_id, 128)?;
-            let subject = format!("docker:{daemon_context}:{container_id}");
-            let reviewed_principal = &credential.as_ref().expect("checked credential").principal;
-            let local_context = match run_fixed_tool(
-                FixedToolOperation::DockerContextInfo {
-                    context: daemon_context.clone(),
-                },
-                cancel.clone(),
-                remaining(request),
-            )
-            .await
-            {
-                Ok(v) => v,
-                Err(e) => return Ok(failure(e, &subject)),
-            };
-            if docker_local_context(&local_context.stdout, daemon_context).is_err() {
-                return Ok(output(
-                    EvidenceStatus::Unavailable,
-                    &subject,
-                    Vec::new(),
-                    Vec::new(),
-                ));
-            }
-            let principal = match run_fixed_tool(
-                FixedToolOperation::LocalCurrentPrincipal,
-                cancel.clone(),
-                remaining(request),
-            )
-            .await
-            {
-                Ok(v) => v,
-                Err(e) => return Ok(failure(e, &subject)),
-            };
-            if local_principal(&principal.stdout, reviewed_principal).is_err() {
-                return Ok(output(
-                    EvidenceStatus::Unavailable,
-                    &subject,
-                    Vec::new(),
-                    Vec::new(),
-                ));
-            }
-            let info = match run_fixed_tool(
-                FixedToolOperation::DockerDaemonInfo {
-                    context: daemon_context.clone(),
-                },
-                cancel.clone(),
-                remaining(request),
-            )
-            .await
-            {
-                Ok(v) => v,
-                Err(e) => return Ok(failure(e, &subject)),
-            };
-            if docker_identity(&info.stdout, reviewed_id).is_err() {
-                return Ok(output(
-                    EvidenceStatus::Unavailable,
-                    &subject,
-                    Vec::new(),
-                    Vec::new(),
-                ));
-            }
-            let operation = match request.capability_id {
-                CapabilityId::DockerContainerInspect => {
-                    FixedToolOperation::DockerContainerInspect {
-                        context: daemon_context.clone(),
-                        container_id: container_id.clone(),
-                    }
-                }
-                CapabilityId::DockerContainerStats => FixedToolOperation::DockerContainerStats {
-                    context: daemon_context.clone(),
-                    container_id: container_id.clone(),
-                },
-                _ => anyhow::bail!("Capability mismatch"),
-            };
-            let result = match run_fixed_tool(operation, cancel.clone(), remaining(request)).await {
-                Ok(v) => v,
-                Err(e) => return Ok(failure(e, &subject)),
-            };
-            if secrets
-                .resolve(
-                    credential.as_ref().expect("checked credential"),
-                    credential.as_ref().expect("checked credential").purpose,
-                )
-                .is_err()
-            {
-                return Ok(output(
-                    EvidenceStatus::Unavailable,
-                    &subject,
-                    Vec::new(),
-                    Vec::new(),
-                ));
-            }
-            let current = match run_fixed_tool(
-                FixedToolOperation::DockerDaemonInfo {
-                    context: daemon_context.clone(),
-                },
-                cancel,
-                remaining(request),
-            )
-            .await
-            {
-                Ok(v) => v,
-                Err(e) => return Ok(failure(e, &subject)),
-            };
-            if docker_identity(&current.stdout, reviewed_id).is_err() {
-                return Ok(output(
-                    EvidenceStatus::Unavailable,
-                    &subject,
-                    Vec::new(),
-                    Vec::new(),
-                ));
-            }
-            let mut parsed = match request.capability_id {
-                CapabilityId::DockerContainerInspect => {
-                    parse_docker_inspect(&result.stdout, container_id)
-                }
-                _ => parse_docker_stats(&result.stdout, container_id),
-            }
-            .unwrap_or_else(|_| output(EvidenceStatus::Partial, &subject, Vec::new(), Vec::new()));
-            // Local pipe user is checked, but the CLI does not consume the protected vault secret.
-            // Keep this observation ineligible for verification of a repair.
-            if parsed.status == EvidenceStatus::Complete {
-                parsed.status = EvidenceStatus::Partial;
-            }
-            Ok(parsed)
-        })
+        Box::pin(async move { super::docker_native::collect(request, secrets, cancel).await })
     }
 }
 impl ProbeAdapter for KubernetesAdapter {
@@ -660,155 +576,6 @@ impl ProbeAdapter for KubernetesAdapter {
         secrets: &'a dyn SecretResolver,
         cancel: CancellationToken,
     ) -> ProbeFuture<'a> {
-        Box::pin(async move {
-            let BoundScope::Kubernetes {
-                context,
-                cluster_fingerprint,
-                namespace,
-                resource_kind,
-                resource_name,
-                credential,
-            } = &request.scope
-            else {
-                anyhow::bail!("Scope mismatch")
-            };
-            atom(context, 128)?;
-            dns(namespace)?;
-            dns(resource_name)?;
-            kind(resource_kind)?;
-            ensure!(
-                credential.as_ref().is_some_and(|c| c.context == *context),
-                "Credential context mismatch"
-            );
-            let subject =
-                format!("kubernetes:{context}:{namespace}:{resource_kind}:{resource_name}");
-            let info = match run_fixed_tool(
-                FixedToolOperation::KubernetesContextInfo {
-                    context: context.clone(),
-                },
-                cancel.clone(),
-                remaining(request),
-            )
-            .await
-            {
-                Ok(v) => v,
-                Err(e) => return Ok(failure(e, &subject)),
-            };
-            if kube_identity(&info.stdout, context, cluster_fingerprint).is_err() {
-                return Ok(output(
-                    EvidenceStatus::Unavailable,
-                    &subject,
-                    Vec::new(),
-                    Vec::new(),
-                ));
-            }
-            let principal = match run_fixed_tool(
-                FixedToolOperation::KubernetesCurrentPrincipal {
-                    context: context.clone(),
-                },
-                cancel.clone(),
-                remaining(request),
-            )
-            .await
-            {
-                Ok(v) => v,
-                Err(e) => return Ok(failure(e, &subject)),
-            };
-            if kube_principal(
-                &principal.stdout,
-                &credential.as_ref().expect("checked credential").principal,
-            )
-            .is_err()
-            {
-                return Ok(output(
-                    EvidenceStatus::Unavailable,
-                    &subject,
-                    Vec::new(),
-                    Vec::new(),
-                ));
-            }
-            let get = FixedToolOperation::KubernetesWorkloadGet {
-                context: context.clone(),
-                namespace: namespace.clone(),
-                kind: resource_kind.clone(),
-                name: resource_name.clone(),
-            };
-            let result = match run_fixed_tool(get, cancel.clone(), remaining(request)).await {
-                Ok(v) => v,
-                Err(e) => return Ok(failure(e, &subject)),
-            };
-            let (status, uid) =
-                match parse_kube_status(&result.stdout, namespace, resource_kind, resource_name) {
-                    Ok(v) => v,
-                    Err(_) => {
-                        return Ok(output(
-                            EvidenceStatus::Partial,
-                            &subject,
-                            Vec::new(),
-                            Vec::new(),
-                        ));
-                    }
-                };
-            if request.capability_id == CapabilityId::KubernetesWorkloadStatus {
-                if secrets
-                    .resolve(
-                        credential.as_ref().expect("checked credential"),
-                        credential.as_ref().expect("checked credential").purpose,
-                    )
-                    .is_err()
-                {
-                    return Ok(output(
-                        EvidenceStatus::Unavailable,
-                        &subject,
-                        Vec::new(),
-                        Vec::new(),
-                    ));
-                }
-                let mut status = status;
-                if status.status == EvidenceStatus::Complete {
-                    status.status = EvidenceStatus::Partial;
-                }
-                return Ok(status);
-            }
-            ensure!(
-                request.capability_id == CapabilityId::KubernetesEvents,
-                "Capability mismatch"
-            );
-            let result = match run_fixed_tool(
-                FixedToolOperation::KubernetesEvents {
-                    context: context.clone(),
-                    namespace: namespace.clone(),
-                    uid: uid.clone(),
-                },
-                cancel.clone(),
-                remaining(request),
-            )
-            .await
-            {
-                Ok(v) => v,
-                Err(e) => return Ok(failure(e, &subject)),
-            };
-            if secrets
-                .resolve(
-                    credential.as_ref().expect("checked credential"),
-                    credential.as_ref().expect("checked credential").purpose,
-                )
-                .is_err()
-            {
-                return Ok(output(
-                    EvidenceStatus::Unavailable,
-                    &subject,
-                    Vec::new(),
-                    Vec::new(),
-                ));
-            }
-            let mut parsed = parse_kube_events(&result.stdout, &uid).unwrap_or_else(|_| {
-                output(EvidenceStatus::Partial, &subject, Vec::new(), Vec::new())
-            });
-            if parsed.status == EvidenceStatus::Complete {
-                parsed.status = EvidenceStatus::Partial;
-            }
-            Ok(parsed)
-        })
+        Box::pin(async move { super::kube_native::collect(request, secrets, cancel).await })
     }
 }

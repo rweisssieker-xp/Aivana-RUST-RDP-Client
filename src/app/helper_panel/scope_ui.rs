@@ -523,11 +523,26 @@ pub(super) fn show(
                         }
                     });
                 field(ui, "Generation", &mut editor.credential_generation);
-                field(ui, "Principal", &mut editor.credential_principal);
                 field(
                     ui,
                     if editor.kind == 4 {
-                        "Reviewed daemon ID"
+                        "Local process SID SHA-256"
+                    } else {
+                        "Principal"
+                    },
+                    &mut editor.credential_principal,
+                );
+                if editor.kind == 4 {
+                    if let Ok(sid) =
+                        crate::helper::adapters::containers::local_docker_principal_digest()
+                    {
+                        ui.small(format!("Current local process SID SHA-256: {sid}"));
+                    }
+                }
+                field(
+                    ui,
+                    if editor.kind == 4 {
+                        "Reviewed pipe URI | daemon ID"
                     } else if editor.kind == 5 {
                         "Reviewed Kubernetes context"
                     } else {

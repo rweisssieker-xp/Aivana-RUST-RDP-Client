@@ -265,6 +265,8 @@ pub enum MetricSourceCounter {
     OsInterfaceRx,
     OsInterfaceTx,
     OsProcessCount,
+    DockerCpu,
+    DockerMemory,
     SqlRowCount,
     SqlExecutionTime,
     ErrorEvents,
@@ -345,8 +347,20 @@ impl NormalizedMetric {
                 (MetricUnit::CostUnits, MetricSourceCounter::SqlEstimatedCost)
             }
         };
+        let docker = matches!(
+            (self.kind, self.unit, self.source_counter),
+            (
+                MetricKind::CpuPercent,
+                MetricUnit::Percent,
+                MetricSourceCounter::DockerCpu
+            ) | (
+                MetricKind::MemoryPercent,
+                MetricUnit::Percent,
+                MetricSourceCounter::DockerMemory
+            )
+        );
         ensure!(
-            (self.unit, self.source_counter) == expected,
+            (self.unit, self.source_counter) == expected || docker,
             "Metric unit/counter mismatch"
         );
         Ok(())

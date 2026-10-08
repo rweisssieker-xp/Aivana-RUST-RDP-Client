@@ -23,6 +23,16 @@ pub struct ResolvedSecret {
     secret: SecretCredential,
 }
 impl ResolvedSecret {
+    #[cfg(test)]
+    pub(crate) fn fixture(username: String, password: String) -> Self {
+        Self {
+            secret: SecretCredential {
+                username,
+                password,
+                domain: String::new(),
+            },
+        }
+    }
     pub fn username(&self) -> &str {
         &self.secret.username
     }

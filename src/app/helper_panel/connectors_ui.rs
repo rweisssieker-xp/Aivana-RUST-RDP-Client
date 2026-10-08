@@ -201,7 +201,7 @@ pub(super) fn show(
     ui.label(
         "Collection uses a registered read probe on the reviewed endpoint. AI consent is separate.",
     );
-    ui.label("Container reads verify reviewed context, target and current CLI principal first. The CLI does not use the protected vault secret, so observations remain partial.");
+    ui.label("Container reads bind a reviewed endpoint and current identity before selecting a resource. Kubernetes uses the scoped vault token; Docker uses the current Windows process token on a local named pipe.");
     if let Some(worker) = state.worker.as_ref() {
         ui.label(format!(
             "Captures: {} running, {} queued",
@@ -256,6 +256,29 @@ pub(super) fn show(
             }
             _ => "No executable adapter in this wave",
         };
+        let container_readiness = if matches!(
+            scope,
+            BoundScope::Docker { .. } | BoundScope::Kubernetes { .. }
+        ) {
+            Some(crate::helper::adapters::containers::local_readiness(scope))
+        } else {
+            None
+        };
+        if let Some(readiness) = container_readiness.as_ref() {
+            ui.small(match scope {
+                BoundScope::Docker { daemon_context, container_id, .. } =>
+                    format!("Docker context: {daemon_context}; selected container: {container_id}; native local pipe. {}", readiness.label),
+                BoundScope::Kubernetes { context, namespace, resource_kind, resource_name, .. } =>
+                    format!("Kubernetes context: {context}; namespace: {namespace}; selected {resource_kind}: {resource_name}; native HTTPS. {}", readiness.label),
+                _ => unreachable!(),
+            });
+            ui.small("Prerequisites: reviewed scope, current scoped read credential, target identity and remote read permission. Remote permission: not verified; fixture-tested transport, live interoperability not verified.");
+        } else if executable.is_none() {
+            ui.small("Unsupported: no executable read adapter for this scope.");
+        }
+        let local_ready = container_readiness
+            .as_ref()
+            .is_none_or(|status| status.ready);
         ui.horizontal(|ui| {
             ui.label(format!("Scope {}: {name}", index + 1));
             if !profile_current {
@@ -276,6 +299,8 @@ pub(super) fn show(
                             .as_ref()
                             .map(|resolver| resolver as &dyn SecretResolver),
                     ) && tool_ready
+                        && executable.is_some()
+                        && local_ready
                         && (scope.credential().is_some()
                             || !matches!(
                                 scope,
@@ -303,7 +328,10 @@ pub(super) fn show(
             };
             if ui
                 .add_enabled(
-                    second.is_some() && profile_current && scope.credential().is_some(),
+                    second.is_some()
+                        && local_ready
+                        && profile_current
+                        && scope.credential().is_some(),
                     egui::Button::new(second_label),
                 )
                 .clicked()

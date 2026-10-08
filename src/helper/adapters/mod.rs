@@ -816,6 +816,8 @@ impl ProbeAdapter for SystemAdapter {
 mod tests;
 
 pub mod containers;
+mod docker_native;
+mod kube_native;
 
 #[cfg(test)]
 mod containers_tests;
