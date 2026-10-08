@@ -1497,6 +1497,7 @@ mod tests {
                 credential_scope_sha256: read_credential_sha,
                 run_id: None,
             },
+            request_intent_sha256: None,
             capability_id: CapabilityId::SqlRead,
             capability_version: 1,
             parser_version: 1,
@@ -1516,6 +1517,7 @@ mod tests {
                 kind: RecordKind::SqlRead,
                 observation: Observation::Healthy,
                 subject_sha256: d(),
+                detail: None,
             }],
             metrics: vec![],
             sql_observations: vec![
@@ -1532,6 +1534,7 @@ mod tests {
                     plain: true,
                 },
             ],
+            sql_artifacts: vec![],
             evidence_refs: vec![],
         };
         let mut value = serde_json::to_value(case).unwrap();
@@ -1559,6 +1562,8 @@ mod tests {
                 prerequisites: declaration.prerequisites.clone(),
                 params: ProbeParams::SqlWorkload {
                     workload_digest: d(),
+                    review_evidence_id: Uuid::nil(),
+                    review_content_sha256: String::new(),
                 },
                 scope_sha256: change_sha,
                 evidence_refs: vec![],

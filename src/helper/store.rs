@@ -91,15 +91,6 @@ impl HelperStore {
     pub fn path() -> Result<std::path::PathBuf> {
         crate::security::app_data_file("relayne-helper-cases.dpapi")
     }
-    pub(crate) fn inspect_locked<T>(
-        path: &Path,
-        inspect: impl FnOnce(&Self) -> Result<T>,
-    ) -> Result<T> {
-        let _guard = lock(path)?;
-        let store = Self::load(path)?;
-        inspect(&store)
-    }
-
     pub fn load(path: &Path) -> Result<Self> {
         let Some(bytes) = read_bounded(path)? else {
             return Ok(Self::default());
