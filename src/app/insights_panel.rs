@@ -3,7 +3,7 @@ use crate::{
     mission::{Mission, Target},
     operations::{JobQueue, JobStatus},
     recommendations::{Library, Requirements},
-    telemetry::{self, Edge, Observation, Store},
+    telemetry::{self, Edge, Observation, PathEvidence, Store},
 };
 #[derive(Clone)]
 enum Work {
@@ -17,6 +17,7 @@ pub(super) struct InsightsState {
     selected: Vec<Uuid>,
     queue: JobQueue,
     pending: HashMap<u64, Work>,
+    probe_failures: HashMap<String, (Edge, String)>,
     query: String,
     os_prefix: String,
     required_services: String,
@@ -34,9 +35,7 @@ impl Default for InsightsState {
             Err(e) => (
                 Store::default(),
                 Library::default(),
-                Some(format!(
-                    "Cannot read knowledge data; writes blocked: {e}"
-                )),
+                Some(format!("Cannot read knowledge data; writes blocked: {e}")),
             ),
         };
         Self {
@@ -46,6 +45,7 @@ impl Default for InsightsState {
             selected: vec![],
             queue: JobQueue::default(),
             pending: HashMap::new(),
+            probe_failures: HashMap::new(),
             query: String::new(),
             os_prefix: String::new(),
             required_services: String::new(),
@@ -87,21 +87,42 @@ impl AivanaApp {
             };
             let Some(result) = result.filter(|r| r.status == JobStatus::Completed && !r.truncated)
             else {
-                self.status =
-                    "Telemetry/check failed or was canceled. No finding inferred."
-                        .into();
+                if let Work::Probe(edge) = work {
+                    self.insights.probe_failures.insert(
+                        edge.key(),
+                        (edge, "Check failed, was canceled, or returned incomplete output. Reachability is unknown.".into()),
+                    );
+                }
+                self.status = "Telemetry/check failed or was canceled. No finding inferred.".into();
                 continue;
             };
             let result = match work {
                 Work::Collect(target) => {
                     Observation::parse(target, &result.stdout).map(|o| self.insights.store.add(o))
                 }
-                Work::Probe(edge) => telemetry::parse_probe(edge, &result.stdout).map(|p| {
-                    self.insights.store.probes.push(p);
-                    if self.insights.store.probes.len() > 512 {
-                        self.insights.store.probes.remove(0);
+                Work::Probe(edge) => {
+                    let key = edge.key();
+                    match telemetry::parse_probe(edge.clone(), &result.stdout) {
+                        Ok(p) => {
+                            self.insights.probe_failures.remove(&key);
+                            self.insights.store.probes.push(p);
+                            if self.insights.store.probes.len() > 512 {
+                                self.insights.store.probes.remove(0);
+                            }
+                            Ok(())
+                        }
+                        Err(e) => {
+                            self.insights.probe_failures.insert(
+                                key,
+                                (
+                                    edge,
+                                    "Check response was invalid. Reachability is unknown.".into(),
+                                ),
+                            );
+                            Err(e)
+                        }
                     }
-                }),
+                }
             };
             if let Err(e) = result {
                 self.status = e.to_string();
@@ -171,35 +192,126 @@ impl AivanaApp {
             });
         }
         for o in telemetry::latest(&self.insights.store.observations) {
-            ui.collapsing(format!("{} · {} · {}",o.target.name,o.received.format("%H:%M:%S"),if o.fresh(){"current"}else{"outdated"}),|ui|{ui.label(format!("OS {} · {} services · {} TCP entries · {} error events",o.payload.os_version,o.payload.services.len(),o.payload.sockets.len(),o.payload.events.len()));ui.small(format!("Evidence {} · Remote time {}",o.id,o.payload.observed_at));if o.payload.truncated{ui.label("Output limited: missing entries do not support a negative conclusion.");}if !o.payload.events_available{ui.label("Event source unavailable or no matching events.");}});
-        }
-        ui.separator();
-        ui.heading("Observed connections");
-        for edge in self.insights.store.edges.clone() {
-            let identity_ok = self.profiles.iter().any(|p| edge.source.matches(p))
-                && self.profiles.iter().any(|p| edge.destination.matches(p));
             ui.collapsing(
                 format!(
-                    "{} → {}:{}",
-                    edge.source.name, edge.destination.name, edge.port
+                    "{} · {} · {}",
+                    o.target.name,
+                    o.received.format("%H:%M:%S"),
+                    if o.fresh() { "current" } else { "outdated" }
                 ),
                 |ui| {
                     ui.label(format!(
-                        "Mapping: {}",
+                        "OS {} · {} services · {} TCP entries · {} error events",
+                        o.payload.os_version,
+                        o.payload.services.len(),
+                        o.payload.sockets.len(),
+                        o.payload.events.len()
+                    ));
+                    ui.small(format!(
+                        "Evidence {} · Remote time {}",
+                        o.id, o.payload.observed_at
+                    ));
+                    if o.payload.truncated {
+                        ui.label(
+                            "Output limited: missing entries do not support a negative conclusion.",
+                        );
+                    }
+                    if !o.payload.events_available {
+                        ui.label("Event source unavailable or no matching events.");
+                    }
+                },
+            );
+        }
+        ui.separator();
+        ui.heading("Observed connections");
+        let current_targets: Vec<Target> = self.profiles.iter().map(Target::from_profile).collect();
+        for edge in self.insights.store.edges.clone() {
+            let evidence =
+                self.insights
+                    .store
+                    .dependency_status(&edge, &current_targets, chrono::Utc::now());
+            ui.collapsing(
+                format!(
+                    "{} → {} ({}:{})",
+                    edge.source.name, edge.destination.name, edge.address, edge.port
+                ),
+                |ui| {
+                    ui.label(format!(
+                        "Service associated with destination port at observation time: {}",
                         if edge.services.is_empty() {
                             "No unique service identified".into()
                         } else {
                             edge.services.join(", ")
                         }
                     ));
-                    ui.label(self.insights.store.explanation(&edge));
+                    ui.label(format!(
+                        "Saved endpoints: {} ({}) → {} ({}) · observed destination {}:{}",
+                        edge.source.name,
+                        edge.source.host,
+                        edge.destination.name,
+                        edge.destination.host,
+                        edge.address,
+                        edge.port
+                    ));
+                    ui.label(format!(
+                        "Historical TCP relationship · observed {} · {}. Connection alone does not establish application function or cause.",
+                        edge.observed,
+                        if evidence.observation_fresh { "recent observation" } else { "outdated observation; capture again for current relationship" }
+                    ));
+                    if !evidence.source_matches || !evidence.destination_matches {
+                        ui.label(format!(
+                            "Profile changed or missing: {}{}. Saved evidence applies only to the former endpoints.",
+                            if !evidence.source_matches { "source" } else { "" },
+                            if !evidence.source_matches && !evidence.destination_matches { " and destination" } else if !evidence.destination_matches { "destination" } else { "" }
+                        ));
+                    }
+                    let failure = self.insights.probe_failures.get(&edge.key()).filter(|(attempt, _)| {
+                        attempt.source.same_endpoint(&edge.source)
+                            && attempt.destination.same_endpoint(&edge.destination)
+                    });
+                    let pending_check = self.insights.pending.values().any(|work| {
+                        matches!(work, Work::Probe(attempt) if attempt.key() == edge.key()
+                            && attempt.source.same_endpoint(&edge.source)
+                            && attempt.destination.same_endpoint(&edge.destination))
+                    });
+                    ui.label(format!(
+                        "Targeted TCP path check: {} → {}:{}",
+                        edge.source.host, edge.address, edge.port
+                    ));
+                    if evidence.can_probe() && pending_check {
+                        ui.label("Manual check in progress; its outcome is unknown until completion.");
+                    } else if evidence.can_probe() && let Some((_, reason)) = failure {
+                        ui.label(format!("Latest check unknown/failed: {reason}"));
+                    }
+                    let check = match &evidence.path {
+                        PathEvidence::ProfileChanged => "profile mismatch; no current result for these profiles".into(),
+                        PathEvidence::NotRun => "no stored check; reachability unknown".into(),
+                        PathEvidence::Reachable { id, at } => format!("TCP reachable at {at} · probe {id}; application function unknown"),
+                        PathEvidence::Unreachable { id, at } => format!("TCP unreachable at {at} · probe {id}; cause unknown"),
+                        PathEvidence::Outdated { id, at } => format!("outdated check at {at} · probe {id}; current reachability unknown"),
+                        PathEvidence::InvalidTime { id, at } => format!("invalid future check time {at} · probe {id}; reachability unknown"),
+                    };
+                    ui.label(format!("{}: {check}", if pending_check || failure.is_some() { "Previous stored check" } else { "Stored check" }));
+                    if matches!(&evidence.path, PathEvidence::Unreachable { .. }) {
+                        let stopped: Vec<_> = self.insights.store.current(&edge.destination)
+                            .filter(|observation| observation.fresh())
+                            .into_iter()
+                            .flat_map(|observation| observation.payload.services.iter())
+                            .filter(|service| edge.services.contains(&service.name) && service.state == "Stopped")
+                            .map(|service| service.name.as_str())
+                            .collect();
+                        if !stopped.is_empty() {
+                            ui.label(format!("Services historically associated with this port are stopped: {}. This is a hypothesis, not proof of cause.", stopped.join(", ")));
+                        }
+                    }
+                    ui.small("Application function: unknown until separately verified.");
                     ui.small(format!(
                         "Observed {} · Evidence {:?}",
                         edge.observed, edge.evidence
                     ));
                     if ui
                         .add_enabled(
-                            identity_ok && self.insights.pending.is_empty(),
+                            evidence.can_probe() && self.insights.pending.is_empty() && self.insights.error.is_none(),
                             egui::Button::new("Check path from the affected computer"),
                         )
                         .clicked()
@@ -337,9 +449,7 @@ impl AivanaApp {
             &self.missions.book,
         );
         if ranked.is_empty() {
-            ui.label(
-                "No matching registered solution yet. Capture and verify a job first.",
-            );
+            ui.label("No matching registered solution yet. Capture and verify a job first.");
         }
         for suggestion in ranked.into_iter().take(20) {
             let Some(recipe) = self

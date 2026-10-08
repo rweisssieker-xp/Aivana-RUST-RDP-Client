@@ -223,6 +223,35 @@ pub struct Probe {
     pub at: DateTime<Utc>,
     pub reachable: bool,
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PathEvidence {
+    ProfileChanged,
+    NotRun,
+    Reachable { id: Uuid, at: DateTime<Utc> },
+    Unreachable { id: Uuid, at: DateTime<Utc> },
+    Outdated { id: Uuid, at: DateTime<Utc> },
+    InvalidTime { id: Uuid, at: DateTime<Utc> },
+}
+
+#[derive(Clone, Debug)]
+pub struct DependencyStatus {
+    pub source_matches: bool,
+    pub destination_matches: bool,
+    pub observation_fresh: bool,
+    pub path: PathEvidence,
+}
+
+impl DependencyStatus {
+    pub fn can_probe(&self) -> bool {
+        self.source_matches && self.destination_matches
+    }
+}
+
+fn fresh_at(at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+    let age = now - at;
+    age >= chrono::Duration::zero() && age < chrono::Duration::minutes(15)
+}
+
 pub fn probe_spec(edge: &Edge) -> Result<CommandSpec> {
     let addr: IpAddr = edge.address.parse()?;
     if edge.port == 0 {
@@ -270,6 +299,47 @@ pub struct Store {
     pub probes: Vec<Probe>,
 }
 impl Store {
+    pub fn dependency_status(
+        &self,
+        edge: &Edge,
+        current_targets: &[Target],
+        now: DateTime<Utc>,
+    ) -> DependencyStatus {
+        let source_matches = current_targets.iter().any(|t| edge.source.same_endpoint(t));
+        let destination_matches = current_targets
+            .iter()
+            .any(|t| edge.destination.same_endpoint(t));
+        let path = if !source_matches || !destination_matches {
+            PathEvidence::ProfileChanged
+        } else {
+            self.probes
+                .iter()
+                .filter(|p| {
+                    p.edge.key() == edge.key()
+                        && p.edge.source.same_endpoint(&edge.source)
+                        && p.edge.destination.same_endpoint(&edge.destination)
+                })
+                .max_by_key(|p| p.at)
+                .map_or(PathEvidence::NotRun, |p| {
+                    if p.at > now {
+                        PathEvidence::InvalidTime { id: p.id, at: p.at }
+                    } else if !fresh_at(p.at, now) {
+                        PathEvidence::Outdated { id: p.id, at: p.at }
+                    } else if p.reachable {
+                        PathEvidence::Reachable { id: p.id, at: p.at }
+                    } else {
+                        PathEvidence::Unreachable { id: p.id, at: p.at }
+                    }
+                })
+        };
+        DependencyStatus {
+            source_matches,
+            destination_matches,
+            observation_fresh: fresh_at(edge.observed, now),
+            path,
+        }
+    }
+
     pub fn add(&mut self, o: Observation) {
         self.observations.push(o);
         if self.observations.len() > 128 {
@@ -310,32 +380,134 @@ impl Store {
             .rev()
             .find(|o| o.target.same_endpoint(t))
     }
-    pub fn explanation(&self, e: &Edge) -> String {
-        let probe = self.probes.iter().rev().find(|p| {
-            p.edge.key() == e.key()
-                && p.edge.source.same_endpoint(&e.source)
-                && p.edge.destination.same_endpoint(&e.destination)
-        });
-        let dest = self.current(&e.destination);
-        let stopped: Vec<_> = dest
-            .filter(|o| o.fresh())
-            .into_iter()
-            .flat_map(|o| o.payload.services.iter())
-            .filter(|s| e.services.contains(&s.name) && s.state == "Stopped")
-            .map(|s| s.name.as_str())
-            .collect();
-        match probe.filter(|p|(Utc::now()-p.at).num_minutes()<15){
-            Some(p) if !p.reachable&&!stopped.is_empty()=>format!("Path is currently unreachable; services historically associated with this port are stopped: {}. The port/service mapping is from {} and must be confirmed again. This is a hypothesis, not proof of causation. Probe {}",stopped.join(", "),e.observed,p.id),
-            Some(p) if !p.reachable=>format!("Path is currently unreachable from the affected computer. Service, network, and firewall causes have not yet been distinguished. Probe {}",p.id),
-            Some(p)=>format!("TCP path is currently reachable; application functionality is not yet proven. Probe {}",p.id),
-            None=>"Historically observed connection; a targeted check is required. No confirmed cause.".into()
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn edge_for(source: &Observation, destination: &Observation, now: DateTime<Utc>) -> Edge {
+        Edge {
+            source: source.target.clone(),
+            destination: destination.target.clone(),
+            address: destination.payload.addresses[0].clone(),
+            port: 1433,
+            services: vec![],
+            evidence: vec![source.id, destination.id],
+            observed: now,
+        }
+    }
+
+    #[test]
+    fn dependency_status_separates_stale_observation_from_probe_freshness() {
+        let now = Utc::now();
+        let source = obs("app", "10.1.0.1");
+        let destination = obs("db", "10.1.0.2");
+        let edge = edge_for(&source, &destination, now - chrono::Duration::minutes(20));
+        let targets = [source.target.clone(), destination.target.clone()];
+        let mut store = Store::default();
+        assert_eq!(
+            store.dependency_status(&edge, &targets, now).path,
+            PathEvidence::NotRun
+        );
+        assert!(
+            !store
+                .dependency_status(&edge, &targets, now)
+                .observation_fresh
+        );
+
+        let id = Uuid::new_v4();
+        store.probes.push(Probe {
+            id,
+            edge: edge.clone(),
+            at: now - chrono::Duration::minutes(16),
+            reachable: true,
+        });
+        assert_eq!(
+            store.dependency_status(&edge, &targets, now).path,
+            PathEvidence::Outdated {
+                id,
+                at: now - chrono::Duration::minutes(16)
+            }
+        );
+        store.probes.push(Probe {
+            id,
+            edge: edge.clone(),
+            at: now + chrono::Duration::seconds(1),
+            reachable: true,
+        });
+        assert_eq!(
+            store.dependency_status(&edge, &targets, now).path,
+            PathEvidence::InvalidTime {
+                id,
+                at: now + chrono::Duration::seconds(1)
+            }
+        );
+    }
+
+    #[test]
+    fn dependency_status_rejects_changed_source_or_destination_profile() {
+        let now = Utc::now();
+        let source = obs("app", "10.1.0.1");
+        let destination = obs("db", "10.1.0.2");
+        let edge = edge_for(&source, &destination, now);
+        let mut store = Store::default();
+        store.probes.push(Probe {
+            id: Uuid::new_v4(),
+            edge: edge.clone(),
+            at: now,
+            reachable: true,
+        });
+        let mut source_changed = source.target.clone();
+        source_changed.host = "replacement.example".into();
+        let status =
+            store.dependency_status(&edge, &[source_changed, destination.target.clone()], now);
+        assert!(!status.can_probe());
+        assert_eq!(status.path, PathEvidence::ProfileChanged);
+        let mut destination_changed = destination.target.clone();
+        destination_changed.port += 1;
+        let status =
+            store.dependency_status(&edge, &[source.target.clone(), destination_changed], now);
+        assert!(!status.can_probe());
+        assert_eq!(status.path, PathEvidence::ProfileChanged);
+    }
+
+    #[test]
+    fn shared_destination_probe_remains_bound_to_its_source_and_address() {
+        let now = Utc::now();
+        let first = obs("app-a", "10.1.0.1");
+        let second = obs("app-b", "10.1.0.3");
+        let destination = obs("db", "10.1.0.2");
+        let first_edge = edge_for(&first, &destination, now);
+        let second_edge = edge_for(&second, &destination, now);
+        let mut store = Store::default();
+        let id = Uuid::new_v4();
+        store.probes.push(Probe {
+            id,
+            edge: first_edge.clone(),
+            at: now,
+            reachable: false,
+        });
+        let targets = [
+            first.target.clone(),
+            second.target.clone(),
+            destination.target.clone(),
+        ];
+        assert_eq!(
+            store.dependency_status(&first_edge, &targets, now).path,
+            PathEvidence::Unreachable { id, at: now }
+        );
+        assert_eq!(
+            store.dependency_status(&second_edge, &targets, now).path,
+            PathEvidence::NotRun
+        );
+        let mut other_address = first_edge.clone();
+        other_address.address = "10.1.0.9".into();
+        assert_eq!(
+            store.dependency_status(&other_address, &targets, now).path,
+            PathEvidence::NotRun
+        );
+    }
     fn obs(host: &str, address: &str) -> Observation {
         Observation {
             id: Uuid::new_v4(),

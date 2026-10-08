@@ -1,5 +1,13 @@
 # Telemetrie, Ursachenprüfung und wiederverwendbare Lösungen
 
+## Abhängigkeiten lesen
+
+Jede Zeile nennt den gespeicherten Quell- und Zielrechner sowie die tatsächlich beobachtete Ziel-IP und den Port. Die Zuordnung ist eine historische TCP-Beobachtung. Eine Beobachtung gilt höchstens 15 Minuten seit dem lokalen Eingang als frisch; danach ist sie als veraltet markiert. Eine gefundene Dienstbezeichnung stammt aus dem damaligen Listener und muss für eine aktuelle Diagnose erneut bestätigt werden.
+
+Die gezielte TCP-Pfadprüfung beginnt ausschließlich durch Klick. Die Ansicht zeigt ihren Zeitpunkt und ob der konkrete Quellrechner den gespeicherten Zielendpunkt per TCP erreichen konnte. Auch dieses Ergebnis gilt höchstens 15 Minuten; ein fehlender, abgebrochener, fehlgeschlagener oder veralteter Versuch lässt die aktuelle Erreichbarkeit unbekannt. Ein laufender oder fehlgeschlagener neuer Versuch wird getrennt von einem früher gespeicherten Ergebnis gezeigt. Ändert sich eines der beiden Profile, gilt das alte Ergebnis nur noch für die gespeicherten Endpunkte. Für die neuen Profile ist eine neue Erfassung nötig, bevor erneut geprüft werden kann. Zwei Quellen mit gemeinsamem Ziel erhalten getrennte Prüfergebnisse.
+
+Eine historische Verbindung und eine erfolgreiche TCP-Verbindung belegen weder die Funktion der Anwendung noch eine Fehlerursache. Diese bleibt ohne gesonderte fachliche Funktionsprüfung unbekannt. Die Ansicht führt keine automatischen Pfadprüfungen oder Wiederholungen aus.
+
 „Ursachen & Lösungen“ erfasst ausdrücklich ausgewählte direkte Windows-Ziele über WinRM mit der aktuellen Windows-Identität. Das unveränderliche Ziel wird beim Start an die Antwort gebunden. Erfasst werden Betriebssystemversion, lokale IP-Adressen, Dienste mit Prozess-ID, TCP-Endpunkte und Metadaten der letzten Systemfehler (Zeit, Provider, Ereignis-ID und Stufe). Keine Prozessbefehlszeilen, Event-Nachrichtentexte, Passwörter oder Paketdaten. Berechtigungs-/Erfassungsfehler erzeugen keinen vermeintlichen Befund. Jede Erfassung ist begrenzt; abgeschnittene Daten sind gekennzeichnet.
 
 Die automatische Zuordnung benötigt eine beobachtete Established-Verbindung am Quellrechner, genau einen bekannten Zielrechner mit dieser IP und einen passenden Listen-Port am Ziel. Dadurch werden angenommene Rückwärts-Abhängigkeiten zu Client-Ephemeralports vermieden. Dienstzuordnung folgt der Prozess-ID des Listeners. Gemeinsam gehostete Dienste bleiben mehrere Kandidaten; eine Verbindung beweist noch keine fachliche Abhängigkeit. IPv4-mapped IPv6 wird normalisiert, mehrdeutige IP-Zuordnungen werden ausgelassen. Beobachtungen müssen zeitlich zusammenpassen.
