@@ -355,6 +355,9 @@ impl AivanaApp {
     pub(super) fn missions_view(&mut self, ui: &mut Ui) {
         ui.heading("Mission Control");
         ui.label("Plan a job · verify on the first computer · continue with approval");
+        if ui.button("Prepare first diagnostic check …").clicked() {
+            self.view = View::Setup;
+        }
         ui.add_space(12.0);
         ui.horizontal_wrapped(|ui| {
             for (number, label) in [

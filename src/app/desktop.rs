@@ -277,6 +277,7 @@ impl AivanaApp {
                             self.commerce.ui(ui);
                         }
                     View::Missions => self.missions_view(ui),
+                    View::Setup => self.setup_view(ui),
                     View::Operations => self.operations_view(ui),
                     View::SessionWindows => self.session_layouts_ui(ui),
                     View::Integrations => self.integrations_view(ui),
@@ -364,6 +365,7 @@ impl AivanaApp {
         let recovery_notices = crate::recovery_daemon::unread_count();
         for (view, label) in [
             (View::Missions, "Mission Control"),
+            (View::Setup, "Diagnostic setup"),
             (View::Operations, "Remote-Werkzeuge"),
             (View::SessionWindows, "Sitzungsfenster"),
             (View::Integrations, "Inventar & Vault"),

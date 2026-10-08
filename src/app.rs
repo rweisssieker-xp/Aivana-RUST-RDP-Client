@@ -70,6 +70,7 @@ mod recovery_daemon_panel;
 mod recovery_extensions_panel;
 mod recovery_panel;
 mod session_windows;
+mod setup_panel;
 mod teaching_panel;
 mod team_panel;
 mod investigator_panel;
@@ -106,6 +107,7 @@ mod tw {
 enum View {
     Release,
     Missions,
+    Setup,
     Operations,
     SessionWindows,
     Integrations,
@@ -1264,6 +1266,9 @@ impl AivanaApp {
             );
             if action_button(ui, "New", 88.0, ActionTone::Neutral).clicked() {
                 self.start_new_profile();
+            }
+            if action_button(ui, "Setup checklist", 142.0, ActionTone::Neutral).clicked() {
+                self.view = View::Setup;
             }
             if action_button(ui, "Edit", 88.0, ActionTone::Neutral).clicked() {
                 self.edit_selected_profile();

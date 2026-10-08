@@ -94,6 +94,24 @@ impl Default for State {
     }
 }
 impl State {
+    pub(super) fn setup_snapshot(&self) -> super::setup_panel::Snapshot {
+        super::setup_panel::Snapshot {
+            incident: self.incident.clone(),
+            service: self.service.clone(),
+            application: self.application.clone(),
+            dependency: self.dependency.clone(),
+            mode: self.mode,
+            source: self.source.clone(),
+            selected_case: self
+                .selected
+                .and_then(|id| self.book.cases.iter().find(|case| case.id == id))
+                .cloned(),
+            store_error: self.store_error,
+            awaiting_approval: self.read_review.is_some(),
+            running: self.pending.is_some(),
+        }
+    }
+
     pub(super) fn accept_incident(&mut self, source: crate::incident::Source) {
         self.incident = source.title.clone();
         self.mode = Mode::ReadOnly;
