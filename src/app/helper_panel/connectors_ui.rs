@@ -27,7 +27,7 @@ pub(super) struct SystemInputs {
 }
 
 pub(super) struct CaptureJob {
-    case_id: Uuid,
+    pub(super) case_id: Uuid,
     scope_digest: String,
     capability_id: CapabilityId,
 }
@@ -788,12 +788,17 @@ impl HelperState {
             store.cancel_pending_capture(id)?;
             return Err(error);
         }
+        let job = CaptureJob {
+            case_id,
+            scope_digest: request.binding.scope_sha256.clone(),
+            capability_id,
+        };
         if let Err(error) = worker.submit(request) {
             store.cancel_pending_capture(id)?;
             store.save(path)?;
             return Err(error);
         }
-        self.collect_jobs.insert(id, case_id);
+        self.collect_jobs.insert(id, job);
         Ok(id)
     }
 
@@ -964,6 +969,7 @@ mod tests {
                     credential_scope_sha256: "a".repeat(64),
                     run_id: None,
                 },
+                request_intent_sha256: None,
                 capability_id: capability,
                 capability_version: 1,
                 parser_version: 1,
@@ -982,6 +988,7 @@ mod tests {
                 records: vec![],
                 metrics: vec![],
                 sql_observations: vec![],
+                sql_artifacts: vec![],
                 evidence_refs: vec![],
             };
             let attempts = HashMap::from([((digest.clone(), capability), "completed".into())]);

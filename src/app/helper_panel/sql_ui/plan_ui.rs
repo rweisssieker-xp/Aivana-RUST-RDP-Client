@@ -254,7 +254,7 @@ pub(super) fn show(
     let active: Vec<_> = state
         .collect_jobs
         .iter()
-        .filter(|(_, case_id)| **case_id == case.id())
+        .filter(|(_, job)| job.case_id == case.id())
         .map(|(request_id, _)| *request_id)
         .collect();
     for request_id in active {
@@ -429,6 +429,7 @@ fn import_plan(
             kind: RecordKind::SqlPlan,
             observation: Observation::Unknown,
             subject_sha256: report.source_sha256,
+            detail: None,
         }],
         metrics: vec![],
         sql_observations: vec![],

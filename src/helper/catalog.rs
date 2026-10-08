@@ -103,7 +103,7 @@ fn check_gaps(
                 });
                 let plan_step = case.plan().is_some_and(|p| p.steps.iter().any(|step| {
                     step.scope_sha256 == *scope_sha256
-                        && matches!(&step.params, super::manifest::ProbeParams::SqlWorkload { workload_digest } if workload_digest == workload_sha256)
+                && matches!(&step.params, super::manifest::ProbeParams::SqlWorkload { workload_digest, .. } if workload_digest == workload_sha256)
                         && matches!(step.capability_id, super::manifest::CapabilityId::SqlWorkloadBaseline | super::manifest::CapabilityId::SqlWorkloadRehearsal)
                 }));
                 if object_id != &object.object_id || !same_resource || !plan_step {

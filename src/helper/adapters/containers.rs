@@ -241,6 +241,7 @@ fn output(
         records,
         metrics,
         sql_observations: Vec::new(),
+        sql_artifacts: vec![],
         evidence_refs: Vec::new(),
         source_id: subject.as_bytes().to_vec(),
         source_observed_at: now,

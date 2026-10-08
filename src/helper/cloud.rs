@@ -38,6 +38,7 @@ fn output(request: &ProbeRequest, observation: Observation, complete: bool) -> R
         }],
         metrics: Vec::new(),
         sql_observations: Vec::new(),
+        sql_artifacts: vec![],
         evidence_refs: Vec::new(),
         source_id: format!(
             "cloud:{:?}:{}",
