@@ -2,7 +2,7 @@
 
 Date: 2026-10-08
 
-Status: architecture accepted by the user's “go on da fehlen noch Waves”; detailed implementation plan pending review. No implementation started for this expansion.
+Status: architecture and detailed 18-wave implementation plan accepted by the user; implementation started on codex/relayne-generic-helper. Completion is tracked in the plan-scoped SDD ledger.
 
 Base: `671080c`, following the completed six product improvements. Working branch: `codex/relayne-generic-helper` in the existing attached isolated worktree. Previous branch and original checkout remain intact.
 

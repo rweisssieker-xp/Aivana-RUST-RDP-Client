@@ -29,7 +29,7 @@ The prior disposable PostgreSQL sandbox has actual raw measurements in C:\tmp\Ai
 
 ## Accepted architecture and implementation plan
 
-The architecture in ../specs/2026-10-08-generic-helper-design.md was accepted by the user's request to continue and include the missing waves. The detailed plan in ../plans/2026-10-08-generic-helper.md covers 18 independently reviewable waves. It preserves existing journals, production/rehearsal separation, approval semantics and restoration paths. Product implementation has not begun; written-plan review is the remaining workflow gate.
+The architecture in ../specs/2026-10-08-generic-helper-design.md was accepted by the user's request to continue and include the missing waves. The detailed plan in ../plans/2026-10-08-generic-helper.md covers 18 independently reviewable waves. It preserves existing journals, production/rehearsal separation, approval semantics and restoration paths. The user confirmed the written plan with “go”. Implementation has begun; per-wave implementation and review status is recorded in the plan-scoped SDD ledger.
 
 ## Review and validation status
 
@@ -39,7 +39,7 @@ Independent architectural/security review initially requested six corrections: e
 
 Independent coverage review requested concrete intake/diagnosis scenarios, operation/prerequisite scopes, adapter/UI acceptance, retention and backward-compatibility gates. These were added. Focused re-review found all material gaps addressed and no new material contradiction. Its original malformed Wave 3 Markdown row finding was explicitly withdrawn after raw-source verification; it was transformed tool output, not a source defect. All six wave rows have three columns.
 
-The architecture is accepted. The detailed 18-wave implementation plan and German overview are complete. Implementation remains pending the user's review of the written plan. The user already selected waves with subagents; do not ask them to choose the execution method again.
+The architecture is accepted. The detailed 18-wave implementation plan and German overview are complete. The user has confirmed the written plan and implementation is underway. The user already selected waves with subagents; do not ask them to choose the execution method again.
 
 ## Detailed implementation-plan review
 
