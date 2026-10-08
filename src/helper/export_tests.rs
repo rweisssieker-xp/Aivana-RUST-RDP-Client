@@ -3,7 +3,7 @@ use crate::helper::{
     case::{CaseEdit, ProblemIntake},
     evidence::{
         Coverage, EVIDENCE_SCHEMA, EvidenceBinding, EvidenceEnvelope, EvidenceStatus, Origin,
-        TimeQuality, attach_evidence,
+        TimeQuality, attach_evidence, source_id_digest,
     },
     manifest::CapabilityId,
     scope::BoundScope,
@@ -51,7 +51,7 @@ fn fixture() -> (HelperStore, Uuid) {
         capability_version: 1,
         parser_version: 1,
         origin: Origin::ImportedUnverified,
-        source_id: "SENTINELSECRET123".into(),
+        source_id: source_id_digest(b"SENTINELSECRET123"),
         source_observed_at: now,
         retrieved_at: now,
         time_quality: TimeQuality::Trusted,
@@ -73,6 +73,11 @@ fn fixture() -> (HelperStore, Uuid) {
 #[test]
 fn exports_are_deterministic_bounded_and_omit_source_secret() {
     let (store, id) = fixture();
+    assert!(
+        !serde_json::to_string(&store)
+            .unwrap()
+            .contains("SENTINELSECRET123")
+    );
     let now = Utc::now();
     for format in [ExportFormat::Json, ExportFormat::Markdown] {
         let a = export_case(&store, id, format, now).unwrap();

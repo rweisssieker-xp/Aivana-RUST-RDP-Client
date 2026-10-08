@@ -6,7 +6,6 @@ use crate::helper::{
     manifest::CapabilityManifest,
 };
 use chrono::{Duration, Utc};
-use sha2::{Digest, Sha256};
 
 pub(super) fn show(ui: &mut Ui, case: &HelperCase, store: &HelperStore) {
     ui.separator();
@@ -33,10 +32,7 @@ pub(super) fn show(ui: &mut Ui, case: &HelperCase, store: &HelperStore) {
                 item.source_observed_at.format("%Y-%m-%d %H:%M:%S UTC")
             ),
             |ui| {
-                ui.label(format!(
-                    "Source SHA-256: {:x}",
-                    Sha256::digest(item.source_id.as_bytes())
-                ));
+                ui.label(format!("Source SHA-256: {}", item.source_id));
                 ui.label(format!(
                     "Observed: {} · retrieved: {}",
                     item.source_observed_at, item.retrieved_at

@@ -6,7 +6,6 @@ use super::{
 use anyhow::{Result, ensure};
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 pub const MAX_EXPORT_BYTES: usize = 5 * 1024 * 1024;
@@ -95,6 +94,8 @@ fn label<T: std::fmt::Debug>(value: T) -> &'static str {
         "ServiceStatus" => "service_status",
         "SqlRead" => "sql_read",
         "SqlPlan" => "sql_plan",
+        "SqlWorkloadBaseline" => "sql_workload_baseline",
+        "SqlWorkloadRehearsal" => "sql_workload_rehearsal",
         "ContainerStatus" => "container_status",
         "CloudInstanceStatus" => "cloud_instance_status",
         _ => "unknown",
@@ -126,7 +127,7 @@ fn line(
         run_id: e.binding.run_id,
         scope_sha256: e.binding.scope_sha256.clone(),
         credential_scope_sha256: e.binding.credential_scope_sha256.clone(),
-        source_sha256: format!("{:x}", Sha256::digest(e.source_id.as_bytes())),
+        source_sha256: e.source_id.clone(),
         source_observed_at: e.source_observed_at,
         retrieved_at: e.retrieved_at,
         coverage_observed: e.coverage.observed,

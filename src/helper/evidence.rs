@@ -3,9 +3,10 @@ use super::manifest::CapabilityId;
 use anyhow::{Result, ensure};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-pub const EVIDENCE_SCHEMA: u16 = 1;
+pub const EVIDENCE_SCHEMA: u16 = 2;
 pub const MAX_ENVELOPE_BYTES: usize = 128 * 1024;
 pub const MAX_RECORDS: usize = 100;
 pub const MAX_METRICS: usize = 64;
@@ -51,6 +52,14 @@ pub fn is_digest(value: &str) -> bool {
         && value
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Normalize a source identifier before constructing an envelope; raw input is never retained.
+pub fn source_id_digest(raw: &[u8]) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"relayne-helper-evidence-source-v1\0");
+    hash.update(raw);
+    format!("{:x}", hash.finalize())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,11 +146,99 @@ pub enum MetricKind {
     EstimatedCost,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetricUnit {
+    Milliseconds,
+    Percent,
+    Count,
+    CostUnits,
+}
+
+/// Closed counter names avoid persisting raw OS/provider counter paths or SQL text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetricSourceCounter {
+    NetworkRoundTrip,
+    OsCpu,
+    OsMemory,
+    OsDisk,
+    SqlRowCount,
+    SqlExecutionTime,
+    ErrorEvents,
+    SqlEstimatedCost,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MissingReason {
+    PermissionDenied,
+    Unavailable,
+    Unsupported,
+    NoSamples,
+    ClockUncertain,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SampleWindow {
+    pub started_at: DateTime<Utc>,
+    pub ended_at: DateTime<Utc>,
+}
+
+pub const MAX_METRIC_WINDOW_SECS: i64 = 24 * 60 * 60;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NormalizedMetric {
     pub kind: MetricKind,
-    pub value: f64,
+    pub value: Option<f64>,
+    pub unit: MetricUnit,
+    pub source_counter: MetricSourceCounter,
+    pub sample_window: SampleWindow,
+    pub missing_reason: Option<MissingReason>,
+}
+
+impl NormalizedMetric {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            matches!((self.value, self.missing_reason), (Some(v), None) if v.is_finite())
+                || matches!((self.value, self.missing_reason), (None, Some(_))),
+            "Metric needs one finite reading or an explicit missing reason"
+        );
+        ensure!(
+            self.sample_window.started_at <= self.sample_window.ended_at
+                && self
+                    .sample_window
+                    .ended_at
+                    .signed_duration_since(self.sample_window.started_at)
+                    <= Duration::seconds(MAX_METRIC_WINDOW_SECS),
+            "Invalid metric sample window"
+        );
+        let expected = match self.kind {
+            MetricKind::LatencyMs => (
+                MetricUnit::Milliseconds,
+                MetricSourceCounter::NetworkRoundTrip,
+            ),
+            MetricKind::CpuPercent => (MetricUnit::Percent, MetricSourceCounter::OsCpu),
+            MetricKind::MemoryPercent => (MetricUnit::Percent, MetricSourceCounter::OsMemory),
+            MetricKind::DiskPercent => (MetricUnit::Percent, MetricSourceCounter::OsDisk),
+            MetricKind::Rows => (MetricUnit::Count, MetricSourceCounter::SqlRowCount),
+            MetricKind::DurationMs => (
+                MetricUnit::Milliseconds,
+                MetricSourceCounter::SqlExecutionTime,
+            ),
+            MetricKind::ErrorCount => (MetricUnit::Count, MetricSourceCounter::ErrorEvents),
+            MetricKind::EstimatedCost => {
+                (MetricUnit::CostUnits, MetricSourceCounter::SqlEstimatedCost)
+            }
+        };
+        ensure!(
+            (self.unit, self.source_counter) == expected,
+            "Metric unit/counter mismatch"
+        );
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -154,7 +251,7 @@ pub struct EvidenceEnvelope {
     pub capability_version: u16,
     pub parser_version: u16,
     pub origin: Origin,
-    /// Opaque source identifier. No paths, URLs, usernames, or free provider text.
+    /// Domain-separated SHA-256 of the source identifier; never raw provider/user text.
     pub source_id: String,
     pub source_observed_at: DateTime<Utc>,
     pub retrieved_at: DateTime<Utc>,
@@ -235,13 +332,8 @@ impl EvidenceEnvelope {
         );
         self.binding.validate()?;
         ensure!(
-            self.source_id.len() <= 128
-                && !self.source_id.is_empty()
-                && self
-                    .source_id
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"-_:.".contains(&b)),
-            "Unsafe evidence source identifier"
+            is_digest(&self.source_id),
+            "Evidence source ID must be a digest"
         );
         ensure!(is_digest(&self.content_sha256), "Invalid content digest");
         ensure!(
@@ -254,10 +346,15 @@ impl EvidenceEnvelope {
             self.records.iter().all(|r| is_digest(&r.subject_sha256)),
             "Invalid record subject"
         );
-        ensure!(
-            self.metrics.iter().all(|m| m.value.is_finite()),
-            "Invalid evidence metric"
-        );
+        for metric in &self.metrics {
+            metric.validate()?;
+            ensure!(
+                (metric.sample_window.ended_at <= self.retrieved_at
+                    && metric.sample_window.ended_at <= self.source_observed_at)
+                    || self.time_quality == TimeQuality::ClockUncertain,
+                "Metric sample after observation/retrieval"
+            );
+        }
         ensure!(
             self.evidence_refs.iter().all(|id| !id.is_nil()),
             "Invalid evidence reference"
@@ -315,6 +412,7 @@ impl EvidenceEnvelope {
                 .records
                 .iter()
                 .any(|r| r.observation == Observation::Unknown)
+            || self.metrics.iter().any(|m| m.value.is_none())
         {
             return Eligibility::Incomplete;
         }

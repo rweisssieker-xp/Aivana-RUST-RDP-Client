@@ -43,7 +43,7 @@ fn envelope(binding: EvidenceBinding) -> EvidenceEnvelope {
         capability_version: 1,
         parser_version: 1,
         origin: Origin::Live,
-        source_id: "worker-1".into(),
+        source_id: source_id_digest(b"worker-1"),
         source_observed_at: now,
         retrieved_at: now,
         time_quality: TimeQuality::Trusted,
@@ -160,7 +160,14 @@ fn origin_time_coverage_and_limits_are_ineligible_or_rejected() {
     e.metrics = (0..MAX_METRICS + 1)
         .map(|_| NormalizedMetric {
             kind: MetricKind::Rows,
-            value: 1.0,
+            value: Some(1.0),
+            unit: MetricUnit::Count,
+            source_counter: MetricSourceCounter::SqlRowCount,
+            sample_window: SampleWindow {
+                started_at: e.retrieved_at,
+                ended_at: e.retrieved_at,
+            },
+            missing_reason: None,
         })
         .collect();
     assert!(e.validate_shape().is_err());
@@ -176,7 +183,7 @@ fn origin_time_coverage_and_limits_are_ineligible_or_rejected() {
     e.records.clear();
     e.source_id = "x".repeat(MAX_ENVELOPE_BYTES);
     assert!(e.validate_shape().is_err());
-    e.source_id = "worker-1".into();
+    e.source_id = source_id_digest(b"worker-1");
     e.schema += 1;
     assert!(e.validate_shape().is_err());
 }
@@ -442,4 +449,128 @@ fn import_force_downgrades_even_matching_pending_live_capture() {
     );
     attach_evidence(&mut store, id, envelope(binding)).unwrap();
     assert_eq!(store.case(id).unwrap().evidence()[1].origin, Origin::Live);
+}
+
+#[test]
+fn raw_source_sentinel_is_rejected_before_persistence_and_digest_is_retained() {
+    let (mut store, id, scope) = fixture();
+    let binding = store
+        .register_pending_capture(
+            id,
+            Uuid::new_v4(),
+            &scope,
+            None,
+            CapabilityId::NetworkReachability,
+            1,
+        )
+        .unwrap();
+    let mut raw = envelope(binding.clone());
+    raw.source_id = "SENTINELSECRET123".into();
+    assert!(attach_evidence(&mut store, id, raw).is_err());
+    assert_eq!(store.case(id).unwrap().evidence_revision(), 0);
+    let expected = source_id_digest(b"SENTINELSECRET123");
+    let mut normalized = envelope(binding);
+    normalized.source_id = expected.clone();
+    attach_evidence(&mut store, id, normalized).unwrap();
+    assert_eq!(store.case(id).unwrap().evidence()[0].source_id, expected);
+    assert!(
+        !serde_json::to_string(&store)
+            .unwrap()
+            .contains("SENTINELSECRET123")
+    );
+}
+
+#[test]
+fn manifest_declares_sql_credentials_workload_roles_and_non_sql_prerequisites() {
+    use crate::helper::manifest::{CheckRole, Prerequisite};
+    let manifest = crate::helper::manifest::CapabilityManifest::built_in();
+    let find = |id| manifest.declarations.iter().find(|d| d.id == id).unwrap();
+    let read = find(CapabilityId::SqlRead);
+    assert_eq!(read.role, CheckRole::Diagnostic);
+    assert!(read.prerequisites.contains(&Prerequisite::ReadCredential));
+    let plan = find(CapabilityId::SqlPlan);
+    assert!(plan.prerequisites.contains(&Prerequisite::ReadCredential));
+    assert!(plan.prerequisites.contains(&Prerequisite::DeclaredWorkload));
+    let baseline = find(CapabilityId::SqlWorkloadBaseline);
+    assert_eq!(baseline.role, CheckRole::Performance);
+    assert!(
+        baseline
+            .prerequisites
+            .contains(&Prerequisite::DeclaredWorkload)
+    );
+    let rehearsal = find(CapabilityId::SqlWorkloadRehearsal);
+    assert_eq!(rehearsal.role, CheckRole::Rehearsal);
+    assert!(
+        rehearsal
+            .prerequisites
+            .contains(&Prerequisite::IsolatedRehearsal)
+    );
+    assert!(
+        rehearsal
+            .prerequisites
+            .contains(&Prerequisite::ReadCredential)
+    );
+    let network = find(CapabilityId::NetworkReachability);
+    assert!(network.prerequisites.contains(&Prerequisite::NetworkAccess));
+    assert!(
+        !network
+            .prerequisites
+            .contains(&Prerequisite::ReadCredential)
+    );
+    let cloud = find(CapabilityId::CloudInstanceStatus);
+    assert!(cloud.prerequisites.contains(&Prerequisite::ReadCredential));
+    assert!(cloud.prerequisites.contains(&Prerequisite::NetworkAccess));
+}
+
+#[test]
+fn typed_metric_rejects_raw_counter_and_invalid_windows_without_defaulting_unknown_to_zero() {
+    let binding = EvidenceBinding {
+        case_id: Uuid::new_v4(),
+        case_revision: 1,
+        request_id: Uuid::new_v4(),
+        scope_sha256: "a".repeat(64),
+        credential_scope_sha256: "b".repeat(64),
+        run_id: None,
+    };
+    let mut e = envelope(binding);
+    let at = e.retrieved_at;
+    let known = NormalizedMetric {
+        kind: MetricKind::Rows,
+        value: Some(7.0),
+        unit: MetricUnit::Count,
+        source_counter: MetricSourceCounter::SqlRowCount,
+        sample_window: SampleWindow {
+            started_at: at - Duration::seconds(15),
+            ended_at: at,
+        },
+        missing_reason: None,
+    };
+    assert!(known.validate().is_ok());
+    let mut unknown = known.clone();
+    unknown.value = None;
+    unknown.missing_reason = Some(MissingReason::NoSamples);
+    assert!(unknown.validate().is_ok());
+    let encoded = serde_json::to_string(&unknown).unwrap();
+    assert!(encoded.contains("no_samples"));
+    assert!(encoded.contains("\"value\":null"));
+    assert!(!encoded.contains("\"value\":0"));
+    e.metrics = vec![unknown.clone()];
+    assert!(e.validate_shape().is_ok());
+    e.source_observed_at = at - Duration::seconds(1);
+    assert!(e.validate_shape().is_err());
+    e.source_observed_at = at;
+    assert_eq!(
+        e.eligibility(at + Duration::seconds(1), Duration::minutes(5)),
+        Eligibility::Incomplete
+    );
+    unknown.missing_reason = None;
+    assert!(unknown.validate().is_err());
+    unknown.value = Some(f64::NAN);
+    assert!(unknown.validate().is_err());
+    unknown.value = Some(7.0);
+    unknown.sample_window.started_at = at - Duration::seconds(MAX_METRIC_WINDOW_SECS + 1);
+    assert!(unknown.validate().is_err());
+    let mut raw_counter = serde_json::to_value(&known).unwrap();
+    raw_counter["source_counter"] = serde_json::json!("SENTINEL_RAW_COUNTER");
+    assert!(serde_json::from_value::<NormalizedMetric>(raw_counter).is_err());
 }

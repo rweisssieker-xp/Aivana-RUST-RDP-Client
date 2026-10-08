@@ -9,6 +9,8 @@ pub enum CapabilityId {
     ServiceStatus,
     SqlRead,
     SqlPlan,
+    SqlWorkloadBaseline,
+    SqlWorkloadRehearsal,
     ContainerStatus,
     CloudInstanceStatus,
 }
@@ -41,6 +43,7 @@ pub enum ProbeParams {
     Service { service_digest: String },
     SqlRead { query_digest: String },
     SqlPlan { query_digest: String },
+    SqlWorkload { workload_digest: String },
     Container,
     CloudInstance,
 }
@@ -63,23 +66,79 @@ pub struct CapabilityManifest {
 impl CapabilityManifest {
     pub fn built_in() -> Self {
         use CapabilityId::*;
-        let declarations = [
-            NetworkReachability,
-            SystemResources,
-            ServiceStatus,
-            SqlRead,
-            SqlPlan,
-            ContainerStatus,
-            CloudInstanceStatus,
-        ]
-        .into_iter()
-        .map(|id| CapabilityDeclaration {
+        use CheckRole::{Diagnostic, Performance, Rehearsal};
+        use Prerequisite::{
+            DeclaredWorkload, IsolatedRehearsal, NetworkAccess, ReadCredential, ReviewedScope,
+        };
+        let declaration = |id, role, prerequisites| CapabilityDeclaration {
             id,
             version: 1,
-            role: CheckRole::Diagnostic,
-            prerequisites: vec![Prerequisite::ReviewedScope],
-        })
-        .collect();
+            role,
+            prerequisites,
+        };
+        let declarations = vec![
+            declaration(
+                NetworkReachability,
+                Diagnostic,
+                vec![ReviewedScope, NetworkAccess],
+            ),
+            declaration(
+                SystemResources,
+                Diagnostic,
+                vec![ReviewedScope, ReadCredential],
+            ),
+            declaration(
+                ServiceStatus,
+                Diagnostic,
+                vec![ReviewedScope, ReadCredential],
+            ),
+            declaration(
+                SqlRead,
+                Diagnostic,
+                vec![ReviewedScope, ReadCredential, NetworkAccess],
+            ),
+            declaration(
+                SqlPlan,
+                Diagnostic,
+                vec![
+                    ReviewedScope,
+                    ReadCredential,
+                    NetworkAccess,
+                    DeclaredWorkload,
+                ],
+            ),
+            declaration(
+                SqlWorkloadBaseline,
+                Performance,
+                vec![
+                    ReviewedScope,
+                    ReadCredential,
+                    NetworkAccess,
+                    DeclaredWorkload,
+                ],
+            ),
+            declaration(
+                SqlWorkloadRehearsal,
+                Rehearsal,
+                vec![
+                    ReviewedScope,
+                    ReadCredential,
+                    NetworkAccess,
+                    DeclaredWorkload,
+                    IsolatedRehearsal,
+                ],
+            ),
+            declaration(
+                ContainerStatus,
+                Diagnostic,
+                vec![ReviewedScope, ReadCredential],
+            ),
+            declaration(
+                CloudInstanceStatus,
+                Diagnostic,
+                vec![ReviewedScope, ReadCredential, NetworkAccess],
+            ),
+        ];
         Self { declarations }
     }
 }
