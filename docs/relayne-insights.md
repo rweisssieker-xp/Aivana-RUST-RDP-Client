@@ -2,7 +2,7 @@
 
 ## Abhängigkeiten lesen
 
-Jede Zeile nennt den gespeicherten Quell- und Zielrechner sowie die tatsächlich beobachtete Ziel-IP und den Port. Die Zuordnung ist eine historische TCP-Beobachtung. Eine Beobachtung gilt höchstens 15 Minuten seit dem lokalen Eingang als frisch; danach ist sie als veraltet markiert. Eine gefundene Dienstbezeichnung stammt aus dem damaligen Listener und muss für eine aktuelle Diagnose erneut bestätigt werden.
+Jede Zeile nennt den gespeicherten Quell- und Zielrechner sowie die tatsächlich beobachtete Ziel-IP und den Port. Die Zuordnung ist eine historische TCP-Beobachtung. Sie gilt nur dann als frisch, wenn beide zugehörigen Aufnahmen innerhalb der letzten 15 Minuten lokal eingegangen sind. Fehlt eine Aufnahme oder passt sie nicht mehr zum gespeicherten Endpunkt, bleibt die Frische unbekannt. Eine gefundene Dienstbezeichnung stammt aus dem damaligen Listener und muss für eine aktuelle Diagnose erneut bestätigt werden.
 
 Die gezielte TCP-Pfadprüfung beginnt ausschließlich durch Klick. Die Ansicht zeigt ihren Zeitpunkt und ob der konkrete Quellrechner den gespeicherten Zielendpunkt per TCP erreichen konnte. Auch dieses Ergebnis gilt höchstens 15 Minuten; ein fehlender, abgebrochener, fehlgeschlagener oder veralteter Versuch lässt die aktuelle Erreichbarkeit unbekannt. Ein laufender oder fehlgeschlagener neuer Versuch wird getrennt von einem früher gespeicherten Ergebnis gezeigt. Ändert sich eines der beiden Profile, gilt das alte Ergebnis nur noch für die gespeicherten Endpunkte. Für die neuen Profile ist eine neue Erfassung nötig, bevor erneut geprüft werden kann. Zwei Quellen mit gemeinsamem Ziel erhalten getrennte Prüfergebnisse.
 

@@ -237,8 +237,15 @@ pub enum PathEvidence {
 pub struct DependencyStatus {
     pub source_matches: bool,
     pub destination_matches: bool,
-    pub observation_fresh: bool,
+    pub observation_freshness: ObservationFreshness,
     pub path: PathEvidence,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ObservationFreshness {
+    Recent,
+    Outdated,
+    Unknown,
 }
 
 impl DependencyStatus {
@@ -299,6 +306,34 @@ pub struct Store {
     pub probes: Vec<Probe>,
 }
 impl Store {
+    fn observation_freshness(&self, edge: &Edge, now: DateTime<Utc>) -> ObservationFreshness {
+        let [source_id, destination_id] = edge.evidence.as_slice() else {
+            return ObservationFreshness::Unknown;
+        };
+        let source = self
+            .observations
+            .iter()
+            .find(|o| o.id == *source_id && o.target.same_endpoint(&edge.source));
+        let destination = self.observations.iter().find(|o| {
+            o.id == *destination_id
+                && o.target.same_endpoint(&edge.destination)
+                && o.payload
+                    .addresses
+                    .iter()
+                    .any(|address| ip(address) == ip(&edge.address))
+        });
+        let (Some(source), Some(destination)) = (source, destination) else {
+            return ObservationFreshness::Unknown;
+        };
+        if source.received != edge.observed || source.received > now || destination.received > now {
+            ObservationFreshness::Unknown
+        } else if fresh_at(source.received, now) && fresh_at(destination.received, now) {
+            ObservationFreshness::Recent
+        } else {
+            ObservationFreshness::Outdated
+        }
+    }
+
     pub fn dependency_status(
         &self,
         edge: &Edge,
@@ -335,8 +370,28 @@ impl Store {
         DependencyStatus {
             source_matches,
             destination_matches,
-            observation_fresh: fresh_at(edge.observed, now),
+            observation_freshness: self.observation_freshness(edge, now),
             path,
+        }
+    }
+
+    pub fn explanation(&self, status: &DependencyStatus) -> &'static str {
+        match &status.path {
+            PathEvidence::ProfileChanged => {
+                "Profile changed or missing. Saved evidence applies only to the former endpoints; application function and cause are unknown."
+            }
+            PathEvidence::NotRun => {
+                "Only a historical TCP relationship was observed. Reachability, application function, and cause are unknown."
+            }
+            PathEvidence::Reachable { .. } => {
+                "The targeted TCP path was reachable. This does not establish application function or cause."
+            }
+            PathEvidence::Unreachable { .. } => {
+                "The targeted TCP path was unreachable. Service, network, and firewall causes have not been distinguished."
+            }
+            PathEvidence::Outdated { .. } | PathEvidence::InvalidTime { .. } => {
+                "The saved path check cannot establish current reachability. Application function and cause are unknown."
+            }
         }
     }
 
@@ -401,19 +456,23 @@ mod tests {
     #[test]
     fn dependency_status_separates_stale_observation_from_probe_freshness() {
         let now = Utc::now();
-        let source = obs("app", "10.1.0.1");
-        let destination = obs("db", "10.1.0.2");
-        let edge = edge_for(&source, &destination, now - chrono::Duration::minutes(20));
+        let mut source = obs("app", "10.1.0.1");
+        let mut destination = obs("db", "10.1.0.2");
+        source.received = now - chrono::Duration::minutes(20);
+        destination.received = now - chrono::Duration::minutes(21);
+        let edge = edge_for(&source, &destination, source.received);
         let targets = [source.target.clone(), destination.target.clone()];
         let mut store = Store::default();
+        store.observations.extend([source, destination]);
         assert_eq!(
             store.dependency_status(&edge, &targets, now).path,
             PathEvidence::NotRun
         );
-        assert!(
-            !store
+        assert_eq!(
+            store
                 .dependency_status(&edge, &targets, now)
-                .observation_fresh
+                .observation_freshness,
+            ObservationFreshness::Outdated
         );
 
         let id = Uuid::new_v4();
@@ -446,6 +505,61 @@ mod tests {
     }
 
     #[test]
+    fn dependency_freshness_uses_both_exact_capture_receipts() {
+        let now = Utc::now();
+        let mut source = obs("app", "10.1.0.1");
+        let mut destination = obs("db", "10.1.0.2");
+        source.received = now - chrono::Duration::minutes(14);
+        destination.received = now - chrono::Duration::minutes(18);
+        let edge = edge_for(&source, &destination, source.received);
+        let targets = [source.target.clone(), destination.target.clone()];
+        let mut store = Store::default();
+        store
+            .observations
+            .extend([source.clone(), destination.clone()]);
+        assert_eq!(
+            store
+                .dependency_status(&edge, &targets, now)
+                .observation_freshness,
+            ObservationFreshness::Outdated
+        );
+
+        store.observations.pop();
+        assert_eq!(
+            store
+                .dependency_status(&edge, &targets, now)
+                .observation_freshness,
+            ObservationFreshness::Unknown
+        );
+        destination.received = now + chrono::Duration::seconds(1);
+        store.observations.push(destination.clone());
+        assert_eq!(
+            store
+                .dependency_status(&edge, &targets, now)
+                .observation_freshness,
+            ObservationFreshness::Unknown
+        );
+        destination.received = now - chrono::Duration::minutes(14);
+        store.observations.pop();
+        store.observations.push(destination.clone());
+        assert_eq!(
+            store
+                .dependency_status(&edge, &targets, now)
+                .observation_freshness,
+            ObservationFreshness::Recent
+        );
+        destination.target.host = "different.example".into();
+        store.observations.pop();
+        store.observations.push(destination);
+        assert_eq!(
+            store
+                .dependency_status(&edge, &targets, now)
+                .observation_freshness,
+            ObservationFreshness::Unknown
+        );
+    }
+
+    #[test]
     fn dependency_status_rejects_changed_source_or_destination_profile() {
         let now = Utc::now();
         let source = obs("app", "10.1.0.1");
@@ -464,6 +578,7 @@ mod tests {
             store.dependency_status(&edge, &[source_changed, destination.target.clone()], now);
         assert!(!status.can_probe());
         assert_eq!(status.path, PathEvidence::ProfileChanged);
+        assert!(store.explanation(&status).contains("former endpoints"));
         let mut destination_changed = destination.target.clone();
         destination_changed.port += 1;
         let status =

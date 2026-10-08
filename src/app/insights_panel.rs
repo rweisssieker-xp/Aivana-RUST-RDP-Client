@@ -3,7 +3,7 @@ use crate::{
     mission::{Mission, Target},
     operations::{JobQueue, JobStatus},
     recommendations::{Library, Requirements},
-    telemetry::{self, Edge, Observation, PathEvidence, Store},
+    telemetry::{self, Edge, Observation, ObservationFreshness, PathEvidence, Store},
 };
 #[derive(Clone)]
 enum Work {
@@ -256,7 +256,11 @@ impl AivanaApp {
                     ui.label(format!(
                         "Historical TCP relationship · observed {} · {}. Connection alone does not establish application function or cause.",
                         edge.observed,
-                        if evidence.observation_fresh { "recent observation" } else { "outdated observation; capture again for current relationship" }
+                        match evidence.observation_freshness {
+                            ObservationFreshness::Recent => "both referenced captures recent",
+                            ObservationFreshness::Outdated => "one or both captures outdated; capture again for a current relationship",
+                            ObservationFreshness::Unknown => "referenced captures missing, mismatched, or future-dated; freshness unknown",
+                        }
                     ));
                     if !evidence.source_matches || !evidence.destination_matches {
                         ui.label(format!(
@@ -304,6 +308,7 @@ impl AivanaApp {
                             ui.label(format!("Services historically associated with this port are stopped: {}. This is a hypothesis, not proof of cause.", stopped.join(", ")));
                         }
                     }
+                    ui.label(self.insights.store.explanation(&evidence));
                     ui.small("Application function: unknown until separately verified.");
                     ui.small(format!(
                         "Observed {} · Evidence {:?}",
