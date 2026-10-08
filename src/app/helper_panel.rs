@@ -7,12 +7,14 @@ use crate::helper::{
 use std::path::PathBuf;
 
 mod intake_ui;
+mod scope_ui;
 
 pub(super) struct HelperState {
     store: Option<HelperStore>,
     path: Option<PathBuf>,
     selected: Option<Uuid>,
     editor: intake_ui::Editor,
+    scope_editor: scope_ui::Editor,
     notice: String,
 }
 
@@ -25,6 +27,7 @@ impl HelperState {
                 path: None,
                 selected: None,
                 editor: Default::default(),
+                scope_editor: Default::default(),
                 notice: format!("Helper storage unavailable: {e}"),
             },
         }
@@ -36,6 +39,7 @@ impl HelperState {
                 path: Some(path),
                 selected: None,
                 editor: Default::default(),
+                scope_editor: Default::default(),
                 notice: "Case workspace loaded".into(),
             },
             Err(e) => Self {
@@ -43,6 +47,7 @@ impl HelperState {
                 path: Some(path),
                 selected: None,
                 editor: Default::default(),
+                scope_editor: Default::default(),
                 notice: format!(
                     "Helper store could not be loaded: {e}. Repair or restore the file before editing."
                 ),
@@ -198,6 +203,13 @@ impl AivanaApp {
         }
         if let Some(case) = self.helper.current().cloned() {
             intake_ui::show(&mut self.helper, ui, &case);
+            scope_ui::show(
+                &mut self.helper,
+                ui,
+                &case,
+                &self.profiles,
+                &self.insights.store,
+            );
         } else if self.helper.store.is_some() {
             ui.label("Create or select a case to begin.");
         }
@@ -236,6 +248,33 @@ mod tests {
             app.operations.queue.jobs.is_empty(),
             "Intake/navigation must not dispatch jobs"
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn reviewed_scope_navigation_and_reload_dispatch_zero_jobs() {
+        let ctx = egui::Context::default();
+        let mut app = AivanaApp::from_context(&ctx);
+        let dir = std::env::temp_dir().join(format!("relayne-helper-scope-ui-{}", Uuid::new_v4()));
+        app.helper = HelperState::at_path(dir.join("cases.dpapi"));
+        app.helper.create();
+        let profile = ConnectionProfile::sample("scope", "host.local", "", false);
+        app.profiles.push(profile.clone());
+        app.helper.revise(CaseEdit::Profiles(vec![profile.id]));
+        let scope = crate::helper::scope::BoundScope::Windows {
+            target: crate::mission::Target::from_profile(&profile),
+            credential: None,
+        };
+        app.helper.revise(CaseEdit::Scopes(vec![scope]));
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| app.helper_view(ui));
+        });
+        app.helper.save();
+        app.view = View::Incident;
+        app.view = View::Helper;
+        app.helper.reload();
+        app.poll_helper();
+        assert_eq!(app.helper.current().unwrap().scopes().len(), 1);
+        assert!(app.operations.queue.jobs.is_empty());
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

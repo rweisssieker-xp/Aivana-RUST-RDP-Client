@@ -1,4 +1,5 @@
 //! Reviewed problem facts. Unknown is an explicit answer, distinct from unanswered.
+use super::scope::BoundScope;
 use anyhow::{Result, ensure};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -246,6 +247,8 @@ pub struct HelperCase {
     evidence_revision: u64,
     intake: ProblemIntake,
     profile_ids: Vec<Uuid>,
+    #[serde(default)]
+    scopes: Vec<BoundScope>,
     source: Option<crate::incident::Source>,
     mission_id: Option<Uuid>,
     ticket_ref: Option<TicketReference>,
@@ -267,6 +270,7 @@ pub enum CaseEdit {
     Constraint(usize, Option<String>),
     SuccessCriterion(usize, Option<SuccessCriterion>),
     Profiles(Vec<Uuid>),
+    Scopes(Vec<BoundScope>),
 }
 
 fn edit_list(list: &mut Vec<String>, index: usize, value: Option<String>) -> Result<()> {
@@ -304,6 +308,9 @@ impl HelperCase {
     pub fn profile_ids(&self) -> &[Uuid] {
         &self.profile_ids
     }
+    pub fn scopes(&self) -> &[BoundScope] {
+        &self.scopes
+    }
     pub fn source(&self) -> Option<&crate::incident::Source> {
         self.source.as_ref()
     }
@@ -332,6 +339,7 @@ impl HelperCase {
             evidence_revision: 0,
             intake,
             profile_ids: vec![],
+            scopes: vec![],
             source: None,
             mission_id: None,
             ticket_ref: None,
@@ -389,6 +397,21 @@ impl HelperCase {
             "Invalid case target IDs"
         );
         self.intake.validate()?;
+        ensure!(
+            self.scopes.len() <= MAX_PROFILES,
+            "Too many reviewed scopes"
+        );
+        let mut digests = std::collections::BTreeSet::new();
+        for scope in &self.scopes {
+            let digest = scope.digest()?;
+            ensure!(digests.insert(digest), "Duplicate reviewed scope");
+            if let Some(target) = scope.target() {
+                ensure!(
+                    self.profile_ids.contains(&target.profile_id),
+                    "Scope profile must be selected in case"
+                );
+            }
+        }
         // Task 16 will add a receipt-backed transition; intake edits cannot claim repair.
         ensure!(
             self.resolution.is_none(),
@@ -448,6 +471,7 @@ impl HelperCase {
                 }
             }
             CaseEdit::Profiles(v) => next.profile_ids = v,
+            CaseEdit::Scopes(v) => next.scopes = v,
         }
         next.intake = next.intake.sanitized()?;
         next.revision = next
