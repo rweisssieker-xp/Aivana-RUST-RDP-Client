@@ -31,14 +31,14 @@ fn known(answer: &Answer<String>) -> String {
 impl Editor {
     pub(super) fn from_case(case: &HelperCase) -> Self {
         let mut e = Self {
-            description: known(&case.intake.description),
-            scope: known(&case.intake.affected_scope),
-            impact: known(&case.intake.impact),
-            onset: known(&case.intake.onset_frequency),
-            permission: known(&case.intake.permission),
+            description: known(&case.intake().description),
+            scope: known(&case.intake().affected_scope),
+            impact: known(&case.intake().impact),
+            onset: known(&case.intake().onset_frequency),
+            permission: known(&case.intake().permission),
             ..Default::default()
         };
-        if let Some(c) = case.intake.success_criteria.first() {
+        if let Some(c) = case.intake().success_criteria.first() {
             e.use_criterion(0, c);
         }
         e
@@ -123,11 +123,11 @@ fn list_section(
 
 pub(super) fn show(state: &mut HelperState, ui: &mut Ui, case: &HelperCase) {
     ui.separator();
-    ui.strong(format!("Case {} · revision {}", case.id, case.revision));
-    if case.source.is_some() {
+    ui.strong(format!("Case {} · revision {}", case.id(), case.revision()));
+    if case.source().is_some() {
         ui.small("Reviewed incident source copied. Its record and evidence IDs are retained as context, not proof of cause.");
     }
-    if case.ticket_ref.is_some() {
+    if case.ticket_ref().is_some() {
         ui.small("Ticket text is untrusted context. Review and correct every answer.");
     }
     let mut edits = Vec::new();
@@ -135,7 +135,7 @@ pub(super) fn show(state: &mut HelperState, ui: &mut Ui, case: &HelperCase) {
         ui,
         "Problem",
         &mut state.editor.description,
-        &case.intake.description,
+        &case.intake().description,
         MAX_DESCRIPTION,
     ) {
         edits.push(CaseEdit::Description(v));
@@ -144,7 +144,7 @@ pub(super) fn show(state: &mut HelperState, ui: &mut Ui, case: &HelperCase) {
         ui,
         "Affected scope",
         &mut state.editor.scope,
-        &case.intake.affected_scope,
+        &case.intake().affected_scope,
         MAX_FIELD,
     ) {
         edits.push(CaseEdit::AffectedScope(v));
@@ -153,7 +153,7 @@ pub(super) fn show(state: &mut HelperState, ui: &mut Ui, case: &HelperCase) {
         ui,
         "Impact",
         &mut state.editor.impact,
-        &case.intake.impact,
+        &case.intake().impact,
         MAX_FIELD,
     ) {
         edits.push(CaseEdit::Impact(v));
@@ -162,7 +162,7 @@ pub(super) fn show(state: &mut HelperState, ui: &mut Ui, case: &HelperCase) {
         ui,
         "Onset / frequency",
         &mut state.editor.onset,
-        &case.intake.onset_frequency,
+        &case.intake().onset_frequency,
         MAX_FIELD,
     ) {
         edits.push(CaseEdit::OnsetFrequency(v));
@@ -171,7 +171,7 @@ pub(super) fn show(state: &mut HelperState, ui: &mut Ui, case: &HelperCase) {
         ui,
         "Reported access (not authorization)",
         &mut state.editor.permission,
-        &case.intake.permission,
+        &case.intake().permission,
         MAX_FIELD,
     ) {
         edits.push(CaseEdit::Permission(v));
@@ -183,7 +183,7 @@ pub(super) fn show(state: &mut HelperState, ui: &mut Ui, case: &HelperCase) {
             ("Sandbox", Environment::Sandbox),
         ] {
             if ui
-                .selectable_label(case.intake.environment == Answer::Known(value), label)
+                .selectable_label(case.intake().environment == Answer::Known(value), label)
                 .clicked()
             {
                 edits.push(CaseEdit::Environment(Answer::Known(value)));
@@ -197,7 +197,7 @@ pub(super) fn show(state: &mut HelperState, ui: &mut Ui, case: &HelperCase) {
         if let Some((i, v)) = list_section(
             ui,
             "Recent change",
-            &case.intake.recent_changes,
+            &case.intake().recent_changes,
             &mut state.editor.recent_change,
         ) {
             edits.push(CaseEdit::RecentChange(i, v));
@@ -205,7 +205,7 @@ pub(super) fn show(state: &mut HelperState, ui: &mut Ui, case: &HelperCase) {
         if let Some((i, v)) = list_section(
             ui,
             "Attempted remedy",
-            &case.intake.attempted_remedies,
+            &case.intake().attempted_remedies,
             &mut state.editor.attempted_remedy,
         ) {
             edits.push(CaseEdit::AttemptedRemedy(i, v));
@@ -213,7 +213,7 @@ pub(super) fn show(state: &mut HelperState, ui: &mut Ui, case: &HelperCase) {
         if let Some((i, v)) = list_section(
             ui,
             "Constraint",
-            &case.intake.constraints,
+            &case.intake().constraints,
             &mut state.editor.constraint,
         ) {
             edits.push(CaseEdit::Constraint(i, v));
@@ -221,7 +221,7 @@ pub(super) fn show(state: &mut HelperState, ui: &mut Ui, case: &HelperCase) {
     });
     ui.separator();
     ui.strong("Measurable success");
-    for (i, c) in case.intake.success_criteria.iter().enumerate() {
+    for (i, c) in case.intake().success_criteria.iter().enumerate() {
         ui.horizontal(|ui| {
             ui.label(format!(
                 "{} {:?} {} {} over {} · {}",
@@ -292,7 +292,7 @@ pub(super) fn show(state: &mut HelperState, ui: &mut Ui, case: &HelperCase) {
                         state
                             .editor
                             .criterion_index
-                            .unwrap_or(case.intake.success_criteria.len()),
+                            .unwrap_or(case.intake().success_criteria.len()),
                         Some(criterion),
                     ));
                 }
@@ -311,7 +311,7 @@ pub(super) fn show(state: &mut HelperState, ui: &mut Ui, case: &HelperCase) {
         state.revise(edit);
     }
     ui.separator();
-    let readiness = crate::helper::case::validate_intake(&case.intake, false);
+    let readiness = crate::helper::case::validate_intake(case.intake(), false);
     if readiness.missing.is_empty() {
         ui.label("Intake facts complete. Review and bind an exact target before preparing action.");
     } else {

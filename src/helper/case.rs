@@ -240,18 +240,18 @@ pub enum CaseResolution {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HelperCase {
-    pub schema: u16,
-    pub id: Uuid,
-    pub revision: u64,
-    pub evidence_revision: u64,
-    pub intake: ProblemIntake,
-    pub profile_ids: Vec<Uuid>,
-    pub source: Option<crate::incident::Source>,
-    pub mission_id: Option<Uuid>,
-    pub ticket_ref: Option<TicketReference>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    pub resolution: Option<CaseResolution>,
+    schema: u16,
+    id: Uuid,
+    revision: u64,
+    evidence_revision: u64,
+    intake: ProblemIntake,
+    profile_ids: Vec<Uuid>,
+    source: Option<crate::incident::Source>,
+    mission_id: Option<Uuid>,
+    ticket_ref: Option<TicketReference>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    resolution: Option<CaseResolution>,
 }
 
 #[derive(Clone, Debug)]
@@ -286,6 +286,42 @@ fn edit_list(list: &mut Vec<String>, index: usize, value: Option<String>) -> Res
 }
 
 impl HelperCase {
+    pub fn schema(&self) -> u16 {
+        self.schema
+    }
+    pub fn id(&self) -> Uuid {
+        self.id
+    }
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+    pub fn evidence_revision(&self) -> u64 {
+        self.evidence_revision
+    }
+    pub fn intake(&self) -> &ProblemIntake {
+        &self.intake
+    }
+    pub fn profile_ids(&self) -> &[Uuid] {
+        &self.profile_ids
+    }
+    pub fn source(&self) -> Option<&crate::incident::Source> {
+        self.source.as_ref()
+    }
+    pub fn mission_id(&self) -> Option<Uuid> {
+        self.mission_id
+    }
+    pub fn ticket_ref(&self) -> Option<&TicketReference> {
+        self.ticket_ref.as_ref()
+    }
+    pub fn created_at(&self) -> DateTime<Utc> {
+        self.created_at
+    }
+    pub fn updated_at(&self) -> DateTime<Utc> {
+        self.updated_at
+    }
+    pub fn resolution(&self) -> Option<CaseResolution> {
+        self.resolution
+    }
     pub fn new(intake: ProblemIntake) -> Result<Self> {
         let intake = intake.sanitized()?;
         let now = Utc::now();
@@ -353,6 +389,11 @@ impl HelperCase {
             "Invalid case target IDs"
         );
         self.intake.validate()?;
+        // Task 16 will add a receipt-backed transition; intake edits cannot claim repair.
+        ensure!(
+            self.resolution.is_none(),
+            "Case resolution requires a verified result"
+        );
         if let Some(t) = &self.ticket_ref {
             validate_text(&t.origin, MAX_FIELD)?;
             validate_text(&t.source_id, MAX_FIELD)?;

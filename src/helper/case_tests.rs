@@ -41,11 +41,11 @@ fn correction_changes_only_one_fact() {
         ..Default::default()
     })
     .unwrap();
-    let before = c.intake.impact.clone();
+    let before = c.intake().impact.clone();
     c.revise(1, CaseEdit::Description(Answer::Known("Very slow".into())))
         .unwrap();
-    assert_eq!(c.intake.impact, before);
-    assert_eq!(c.revision, 2);
+    assert_eq!(c.intake().impact, before);
+    assert_eq!(c.revision(), 2);
 }
 
 #[test]
@@ -59,11 +59,18 @@ fn reviewed_ticket_copy_is_bounded_and_inert() {
         &"x".repeat(MAX_DESCRIPTION * 2),
     )
     .unwrap();
-    assert_eq!(case.ticket_ref.as_ref().unwrap().source_id, "INC-42");
+    assert_eq!(case.ticket_ref().unwrap().source_id, "INC-42");
     assert!(
-        matches!(&case.intake.description, Answer::Known(text) if text.chars().count() == MAX_DESCRIPTION)
+        matches!(&case.intake().description, Answer::Known(text) if text.chars().count() == MAX_DESCRIPTION)
     );
-    assert_eq!(case.revision, 1);
-    assert_eq!(case.evidence_revision, 0);
-    assert!(!validate_intake(&case.intake, false).ready_for_action);
+    assert_eq!(case.revision(), 1);
+    assert_eq!(case.evidence_revision(), 0);
+    assert!(!validate_intake(case.intake(), false).ready_for_action);
+}
+
+#[test]
+fn manual_verified_resolution_cannot_be_saved_as_an_intake_case() {
+    let mut case = HelperCase::new(ProblemIntake::default()).unwrap();
+    case.resolution = Some(CaseResolution::VerifiedRelayneRepair);
+    assert!(case.validate().is_err());
 }

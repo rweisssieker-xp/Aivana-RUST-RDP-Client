@@ -14,9 +14,12 @@ pub const MAX_STORE_BYTES: usize = 64 * 1024 * 1024;
 #[serde(deny_unknown_fields)]
 pub struct HelperStore {
     schema: u16,
-    pub cases: Vec<HelperCase>,
+    cases: Vec<HelperCase>,
     #[serde(skip)]
     source_digest: Option<[u8; 32]>,
+    // Deserializing a value is not the same as loading it under the store's CAS discipline.
+    #[serde(skip)]
+    opened: bool,
 }
 
 impl Default for HelperStore {
@@ -25,6 +28,7 @@ impl Default for HelperStore {
             schema: STORE_SCHEMA,
             cases: vec![],
             source_digest: None,
+            opened: true,
         }
     }
 }
@@ -62,6 +66,12 @@ fn lock(path: &Path) -> Result<std::fs::File> {
 }
 
 impl HelperStore {
+    pub fn cases(&self) -> &[HelperCase] {
+        &self.cases
+    }
+    pub fn case(&self, id: Uuid) -> Option<&HelperCase> {
+        self.cases.iter().find(|case| case.id() == id)
+    }
     pub fn path() -> Result<std::path::PathBuf> {
         crate::security::app_data_file("relayne-helper-cases.dpapi")
     }
@@ -77,6 +87,7 @@ impl HelperStore {
         let mut store: Self = serde_json::from_slice(&raw)?;
         store.validate()?;
         store.source_digest = Some(digest(&bytes));
+        store.opened = true;
         Ok(store)
     }
     pub fn validate(&self) -> Result<()> {
@@ -91,7 +102,7 @@ impl HelperStore {
         let mut ids = std::collections::BTreeSet::new();
         for case in &self.cases {
             case.validate()?;
-            ensure!(ids.insert(case.id), "Duplicate helper case ID");
+            ensure!(ids.insert(case.id()), "Duplicate helper case ID");
         }
         Ok(())
     }
@@ -101,7 +112,7 @@ impl HelperStore {
             "Helper case capacity reached; archive or export cases"
         );
         let case = HelperCase::new(intake)?;
-        let id = case.id;
+        let id = case.id();
         self.cases.push(case);
         Ok(id)
     }
@@ -111,7 +122,7 @@ impl HelperStore {
             "Helper case capacity reached; archive or export cases"
         );
         let case = HelperCase::from_incident(source)?;
-        let id = case.id;
+        let id = case.id();
         self.cases.push(case);
         Ok(id)
     }
@@ -126,7 +137,7 @@ impl HelperStore {
             "Helper case capacity reached; archive or export cases"
         );
         let case = HelperCase::from_ticket(reference, title, description)?;
-        let id = case.id;
+        let id = case.id();
         self.cases.push(case);
         Ok(id)
     }
@@ -134,11 +145,12 @@ impl HelperStore {
         let case = self
             .cases
             .iter_mut()
-            .find(|case| case.id == id)
+            .find(|case| case.id() == id)
             .ok_or_else(|| anyhow::anyhow!("Helper case missing"))?;
         case.revise(expected_revision, edit)
     }
     pub fn save(&mut self, path: &Path) -> Result<()> {
+        ensure!(self.opened, "Load or create a helper store before saving");
         self.validate()?;
         let raw = serde_json::to_vec(self)?;
         ensure!(

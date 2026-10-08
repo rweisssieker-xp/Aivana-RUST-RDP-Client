@@ -51,7 +51,7 @@ impl HelperState {
     }
     fn current(&self) -> Option<&HelperCase> {
         let id = self.selected?;
-        self.store.as_ref()?.cases.iter().find(|c| c.id == id)
+        self.store.as_ref()?.case(id)
     }
     fn select(&mut self, id: Uuid) {
         self.selected = Some(id);
@@ -77,7 +77,7 @@ impl HelperState {
     fn revise(&mut self, edit: CaseEdit) {
         let result = self
             .current()
-            .map(|c| (c.id, c.revision))
+            .map(|c| (c.id(), c.revision()))
             .ok_or_else(|| anyhow::anyhow!("Select a case"))
             .and_then(|(id, rev)| self.store.as_mut().unwrap().revise(id, rev, edit));
         self.notice = match result {
@@ -166,9 +166,9 @@ impl AivanaApp {
             .store
             .as_ref()
             .map(|s| {
-                s.cases
+                s.cases()
                     .iter()
-                    .map(|c| (c.id, c.intake.description.clone()))
+                    .map(|c| (c.id(), c.intake().description.clone()))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
@@ -177,7 +177,7 @@ impl AivanaApp {
                 .selected_text(
                     self.helper
                         .current()
-                        .map(|c| format!("Case {} · revision {}", c.id, c.revision))
+                        .map(|c| format!("Case {} · revision {}", c.id(), c.revision()))
                         .unwrap_or_else(|| "Select case".into()),
                 )
                 .show_ui(ui, |ui| {
@@ -227,9 +227,9 @@ mod tests {
         app.view = View::Helper;
         app.helper.reload();
         app.poll_helper();
-        assert_eq!(app.helper.current().unwrap().revision, 3);
+        assert_eq!(app.helper.current().unwrap().revision(), 3);
         assert!(matches!(
-            app.helper.current().unwrap().intake.onset_frequency,
+            app.helper.current().unwrap().intake().onset_frequency,
             Answer::Unknown
         ));
         assert!(
