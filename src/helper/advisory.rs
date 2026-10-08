@@ -2,9 +2,12 @@
 
 use super::{
     case::{Answer, HelperCase},
-    evidence::{Eligibility, MAX_FRESHNESS_SECS},
+    evidence::{
+        Coverage, Eligibility, EvidenceStatus, MAX_FRESHNESS_SECS, NormalizedMetric,
+        NormalizedRecord, Observation, Origin, RecordKind, TimeQuality,
+    },
     manifest::CapabilityManifest,
-    planner::{HelperPlan, HelperPlanStep, Hypothesis, params_match, safe_text},
+    planner::{HelperPlan, HelperPlanStep, Hypothesis, HypothesisKind, params_match, safe_text},
 };
 use anyhow::{Result, ensure};
 use chrono::{DateTime, Utc};
@@ -21,6 +24,9 @@ use uuid::Uuid;
 
 const MAX_RESPONSE: usize = 256 * 1024;
 const DEADLINE: Duration = Duration::from_secs(30);
+const MAX_PREVIEW_EVIDENCE: usize = 16;
+const MAX_PREVIEW_RECORDS: usize = 16;
+const MAX_PREVIEW_METRICS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -34,7 +40,25 @@ pub enum PreviewField {
     EvidenceIds,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdvisoryEvidenceSummary {
+    pub id: Uuid,
+    pub scope_sha256: String,
+    pub credential_scope_sha256: String,
+    pub origin: Origin,
+    pub time_quality: TimeQuality,
+    pub status: EvidenceStatus,
+    pub coverage: Coverage,
+    pub source_observed_at: DateTime<Utc>,
+    pub retrieved_at: DateTime<Utc>,
+    pub records: Vec<NormalizedRecord>,
+    pub metrics: Vec<NormalizedMetric>,
+    pub omitted_records: usize,
+    pub omitted_metrics: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdvisoryPreview {
     pub case_id: Uuid,
@@ -48,6 +72,7 @@ pub struct AdvisoryPreview {
     pub environment: Option<String>,
     pub recent_changes: Vec<String>,
     pub evidence_ids: Vec<Uuid>,
+    pub evidence_summaries: Vec<AdvisoryEvidenceSummary>,
 }
 
 impl AdvisoryPreview {
@@ -67,6 +92,47 @@ impl AdvisoryPreview {
                 Answer::Unanswered => None,
             }
         };
+        let evidence_summaries: Vec<_> = if selected.contains(&PreviewField::EvidenceIds) {
+            let now = Utc::now();
+            case.evidence()
+                .iter()
+                .rev()
+                .filter(|e| {
+                    e.binding.case_revision == case.revision()
+                        && e.eligibility(now, chrono::Duration::seconds(MAX_FRESHNESS_SECS))
+                            == Eligibility::Eligible
+                })
+                .take(MAX_PREVIEW_EVIDENCE)
+                .map(|e| AdvisoryEvidenceSummary {
+                    id: e.id,
+                    scope_sha256: e.binding.scope_sha256.clone(),
+                    credential_scope_sha256: e.binding.credential_scope_sha256.clone(),
+                    origin: e.origin,
+                    time_quality: e.time_quality,
+                    status: e.status,
+                    coverage: e.coverage,
+                    source_observed_at: e.source_observed_at,
+                    retrieved_at: e.retrieved_at,
+                    records: e
+                        .records
+                        .iter()
+                        .take(MAX_PREVIEW_RECORDS)
+                        .cloned()
+                        .collect(),
+                    metrics: e
+                        .metrics
+                        .iter()
+                        .take(MAX_PREVIEW_METRICS)
+                        .cloned()
+                        .collect(),
+                    omitted_records: e.records.len().saturating_sub(MAX_PREVIEW_RECORDS),
+                    omitted_metrics: e.metrics.len().saturating_sub(MAX_PREVIEW_METRICS),
+                })
+                .collect()
+        } else {
+            vec![]
+        };
+        let evidence_ids = evidence_summaries.iter().map(|e| e.id).collect();
         let preview = Self {
             case_id: case.id(),
             case_revision: case.revision(),
@@ -90,21 +156,8 @@ impl AdvisoryPreview {
             } else {
                 vec![]
             },
-            evidence_ids: if selected.contains(&PreviewField::EvidenceIds) {
-                case.evidence()
-                    .iter()
-                    .filter(|e| {
-                        e.binding.case_revision == case.revision()
-                            && e.eligibility(
-                                Utc::now(),
-                                chrono::Duration::seconds(MAX_FRESHNESS_SECS),
-                            ) == Eligibility::Eligible
-                    })
-                    .map(|e| e.id)
-                    .collect()
-            } else {
-                vec![]
-            },
+            evidence_ids,
+            evidence_summaries,
         };
         preview.validate()?;
         Ok(preview)
@@ -145,11 +198,18 @@ impl AdvisoryPreview {
             "Invalid preview changes"
         );
         ensure!(
-            selected.contains(&PreviewField::EvidenceIds) || self.evidence_ids.is_empty(),
+            selected.contains(&PreviewField::EvidenceIds)
+                || (self.evidence_ids.is_empty() && self.evidence_summaries.is_empty()),
             "Unreviewed evidence in preview"
         );
         ensure!(
-            self.evidence_ids.len() <= 1000
+            self.evidence_ids.len() <= MAX_PREVIEW_EVIDENCE
+                && self.evidence_ids.len() == self.evidence_summaries.len()
+                && self
+                    .evidence_ids
+                    .iter()
+                    .zip(&self.evidence_summaries)
+                    .all(|(id, summary)| *id == summary.id)
                 && self
                     .evidence_ids
                     .iter()
@@ -158,6 +218,39 @@ impl AdvisoryPreview {
                     .len()
                     == self.evidence_ids.len(),
             "Invalid preview evidence IDs"
+        );
+        for summary in &self.evidence_summaries {
+            ensure!(
+                summary.origin == Origin::Live
+                    && summary.time_quality == TimeQuality::Trusted
+                    && summary.status == EvidenceStatus::Complete
+                    && summary.coverage.complete(),
+                "Preview evidence is not complete live evidence"
+            );
+            ensure!(
+                super::evidence::is_digest(&summary.scope_sha256)
+                    && super::evidence::is_digest(&summary.credential_scope_sha256)
+                    && summary.records.len() <= MAX_PREVIEW_RECORDS
+                    && summary.metrics.len() <= MAX_PREVIEW_METRICS
+                    && summary.omitted_records <= super::evidence::MAX_RECORDS
+                    && summary.omitted_metrics <= super::evidence::MAX_METRICS,
+                "Invalid preview evidence summary"
+            );
+            ensure!(
+                summary
+                    .records
+                    .iter()
+                    .all(|r| super::evidence::is_digest(&r.subject_sha256)
+                        && r.observation != Observation::Unknown),
+                "Invalid preview observation"
+            );
+            for metric in &summary.metrics {
+                metric.validate()?;
+            }
+        }
+        ensure!(
+            serde_json::to_vec(self)?.len() <= 128 * 1024,
+            "Advisory preview too large"
         );
         Ok(())
     }
@@ -244,6 +337,62 @@ pub struct AdvisoryProposal {
     pub steps: Vec<HelperPlanStep>,
 }
 
+fn validate_citation_directions(
+    preview: &AdvisoryPreview,
+    proposal: &AdvisoryProposal,
+) -> Result<()> {
+    for hypothesis in &proposal.hypotheses {
+        let matches_layer = |record: &NormalizedRecord| match hypothesis.kind {
+            HypothesisKind::NetworkTransport => record.kind == RecordKind::Network,
+            HypothesisKind::ServiceHealth => record.kind == RecordKind::Service,
+            HypothesisKind::ResourcePressure => record.kind == RecordKind::System,
+            HypothesisKind::SqlHealth => {
+                matches!(record.kind, RecordKind::SqlRead | RecordKind::SqlPlan)
+            }
+        };
+        for (refs, support) in [
+            (&hypothesis.support, true),
+            (&hypothesis.counterevidence, false),
+        ] {
+            ensure!(
+                refs.iter().all(
+                    |id| preview
+                        .evidence_summaries
+                        .iter()
+                        .any(|summary| summary.id == *id
+                            && summary.records.iter().any(|record| matches_layer(record)
+                                && if support {
+                                    matches!(
+                                        record.observation,
+                                        Observation::Degraded | Observation::Unavailable
+                                    )
+                                } else {
+                                    record.observation == Observation::Healthy
+                                }))
+                ),
+                "Advisory citation does not support claimed direction"
+            );
+        }
+        ensure!(
+            !hypothesis.support.is_empty()
+                || !hypothesis.counterevidence.is_empty()
+                || !hypothesis.gaps.is_empty(),
+            "Unsupported advisory hypothesis needs an explicit gap"
+        );
+    }
+    ensure!(
+        proposal
+            .steps
+            .iter()
+            .all(|step| step.evidence_refs.iter().all(|id| preview
+                .evidence_summaries
+                .iter()
+                .any(|summary| summary.id == *id && summary.scope_sha256 == step.scope_sha256))),
+        "Advisory check cites evidence from another scope"
+    );
+    Ok(())
+}
+
 pub fn validate_advisory(
     case: &HelperCase,
     manifest: &CapabilityManifest,
@@ -273,6 +422,7 @@ pub fn validate_advisory(
         "Provider cannot confirm cause"
     );
     let allowed: BTreeSet<_> = preview.evidence_ids.iter().copied().collect();
+    validate_citation_directions(&preview, &proposal)?;
     ensure!(
         proposal.hypotheses.iter().all(|h| h
             .support
@@ -442,6 +592,7 @@ pub fn request_advisory_with_transport<T: AdvisoryTransport>(
                     "Advisory response binding changed"
                 );
                 let supplied: BTreeSet<_> = expected.evidence_ids.iter().copied().collect();
+                validate_citation_directions(&expected, &proposal)?;
                 ensure!(
                     proposal.hypotheses.iter().all(|h| h
                         .support

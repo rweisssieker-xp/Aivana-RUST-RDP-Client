@@ -3,12 +3,17 @@ use crate::helper::{case::CaseEdit, evidence::*, scope::BoundScope, store::Helpe
 use crate::helper::{case::ProblemIntake, manifest::CapabilityManifest};
 use crate::mission::Target;
 
-fn observed_case() -> (HelperStore, HelperCase, EvidenceEnvelope) {
+pub(crate) fn observed_case() -> (HelperStore, HelperCase, EvidenceEnvelope) {
     let mut store = HelperStore::default();
     let id = store.create(ProblemIntake::default()).unwrap();
     let profile_id = Uuid::new_v4();
+    let other_profile_id = Uuid::new_v4();
     store
-        .revise(id, 1, CaseEdit::Profiles(vec![profile_id]))
+        .revise(
+            id,
+            1,
+            CaseEdit::Profiles(vec![profile_id, other_profile_id]),
+        )
         .unwrap();
     let scope = BoundScope::Http {
         target: Target {
@@ -26,7 +31,24 @@ fn observed_case() -> (HelperStore, HelperCase, EvidenceEnvelope) {
         path: "/health".into(),
     };
     let scope_digest = scope.digest().unwrap();
-    store.revise(id, 2, CaseEdit::Scopes(vec![scope])).unwrap();
+    let other_scope = BoundScope::Http {
+        target: Target {
+            profile_id: other_profile_id,
+            name: "other".into(),
+            host: "other.test".into(),
+            port: 443,
+            protocol: "RDP".into(),
+            username: "operator".into(),
+            domain: "other".into(),
+            route: "gateway:443".into(),
+        },
+        port: 443,
+        tls: true,
+        path: "/health".into(),
+    };
+    store
+        .revise(id, 2, CaseEdit::Scopes(vec![scope, other_scope]))
+        .unwrap();
     let binding = store
         .register_pending_capture(
             id,
@@ -309,4 +331,146 @@ fn plan_artifact_expires_at_ninety_days_without_erasing_case_evidence() {
     assert!(store.prune_expired_plan(case.id(), Utc::now()).unwrap());
     assert!(store.case(case.id()).unwrap().plan().is_none());
     assert_eq!(store.case(case.id()).unwrap().evidence().len(), 1);
+}
+
+#[test]
+fn backdated_future_and_stale_confirmation_times_are_rejected() {
+    let (mut store, case, envelope) = observed_case();
+    let scope = case.scopes()[0].digest().unwrap();
+    let binding = store
+        .register_pending_capture(
+            case.id(),
+            Uuid::new_v4(),
+            &scope,
+            None,
+            CapabilityId::NetworkReachability,
+            1,
+        )
+        .unwrap();
+    let mut stale = envelope.clone();
+    stale.id = Uuid::new_v4();
+    stale.binding = binding;
+    stale.source_observed_at = Utc::now() - Duration::minutes(6);
+    stale.retrieved_at = Utc::now();
+    store.attach_evidence(case.id(), stale.clone()).unwrap();
+    let current = store.case(case.id()).unwrap().clone();
+    let mut plan = plan_local(
+        &current,
+        current.evidence(),
+        &CapabilityManifest::built_in(),
+        Utc::now(),
+    )
+    .unwrap();
+    plan.hypotheses
+        .iter_mut()
+        .find(|h| h.kind == HypothesisKind::ServiceHealth)
+        .unwrap()
+        .support
+        .push(stale.id);
+    store.refresh_derived_plan(case.id(), plan).unwrap();
+    let decision = |at| HumanConfirmation {
+        actor: "operator-1".into(),
+        confirmed_at: at,
+        rationale: "Reviewed observation".into(),
+        evidence_refs: vec![stale.id],
+        case_revision: case.revision(),
+    };
+    assert!(
+        store
+            .confirm_hypothesis(
+                case.id(),
+                case.revision(),
+                HypothesisKind::ServiceHealth,
+                decision(stale.source_observed_at)
+            )
+            .is_err()
+    );
+    assert!(
+        store
+            .confirm_hypothesis(
+                case.id(),
+                case.revision(),
+                HypothesisKind::ServiceHealth,
+                decision(Utc::now() + Duration::seconds(10))
+            )
+            .is_err()
+    );
+    assert!(
+        store
+            .confirm_hypothesis(
+                case.id(),
+                case.revision(),
+                HypothesisKind::ServiceHealth,
+                decision(Utc::now())
+            )
+            .is_err()
+    );
+    assert_eq!(store.case(case.id()).unwrap().revision(), case.revision());
+}
+
+#[test]
+fn mixed_scope_next_check_cites_only_its_exact_scope_and_credential() {
+    let (mut store, case, first) = observed_case();
+    let other_digest = case.scopes()[1].digest().unwrap();
+    let binding = store
+        .register_pending_capture(
+            case.id(),
+            Uuid::new_v4(),
+            &other_digest,
+            None,
+            CapabilityId::NetworkReachability,
+            1,
+        )
+        .unwrap();
+    let mut other = first.clone();
+    other.id = Uuid::new_v4();
+    other.binding = binding;
+    other.content_sha256 = "c".repeat(64);
+    store.attach_evidence(case.id(), other.clone()).unwrap();
+    let current = store.case(case.id()).unwrap();
+    let plan = plan_local(
+        current,
+        current.evidence(),
+        &CapabilityManifest::built_in(),
+        Utc::now(),
+    )
+    .unwrap();
+    let step = plan
+        .steps
+        .iter()
+        .find(|s| s.capability_id == CapabilityId::ServiceStatus)
+        .unwrap();
+    assert_eq!(step.evidence_refs.len(), 1);
+    let cited = current
+        .evidence()
+        .iter()
+        .find(|e| e.id == step.evidence_refs[0])
+        .unwrap();
+    assert_eq!(cited.binding.scope_sha256, step.scope_sha256);
+    assert_eq!(
+        cited.binding.credential_scope_sha256,
+        current
+            .scopes()
+            .iter()
+            .find(|s| s.digest().unwrap() == step.scope_sha256)
+            .unwrap()
+            .credential_scope_digest()
+            .unwrap()
+    );
+    let mut forged = plan.clone();
+    forged
+        .steps
+        .iter_mut()
+        .find(|s| s.capability_id == CapabilityId::ServiceStatus)
+        .unwrap()
+        .evidence_refs = vec![if cited.id == first.id {
+        other.id
+    } else {
+        first.id
+    }];
+    assert!(
+        forged
+            .validate(current, &CapabilityManifest::built_in())
+            .is_err()
+    );
 }

@@ -675,8 +675,10 @@ impl HelperCase {
             self.revision == expected_revision && confirmation.case_revision == expected_revision,
             "Stale confirmation context"
         );
+        let decision_now = Utc::now();
         ensure!(
-            confirmation.confirmed_at <= Utc::now() + chrono::Duration::seconds(5),
+            confirmation.confirmed_at >= decision_now - chrono::Duration::seconds(30)
+                && confirmation.confirmed_at <= decision_now + chrono::Duration::seconds(5),
             "Invalid confirmation time"
         );
         ensure!(
@@ -687,7 +689,7 @@ impl HelperCase {
                     .all(|id| self.evidence.iter().any(|e| e.id == *id
                         && e.binding.case_revision == expected_revision
                         && e.eligibility(
-                            confirmation.confirmed_at,
+                            decision_now,
                             chrono::Duration::seconds(super::evidence::MAX_FRESHNESS_SECS)
                         ) == super::evidence::Eligibility::Eligible)),
             "Confirmation requires current live evidence"

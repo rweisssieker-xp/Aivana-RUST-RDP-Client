@@ -137,16 +137,19 @@ impl HelperPlan {
                 params_match(step.capability_id, &step.params),
                 "Capability parameters mismatch"
             );
-            ensure!(
-                case.scopes()
-                    .iter()
-                    .any(|s| s.digest().ok().as_deref() == Some(step.scope_sha256.as_str())),
-                "Step scope no longer reviewed"
-            );
+            let scope = case
+                .scopes()
+                .iter()
+                .find(|s| s.digest().ok().as_deref() == Some(step.scope_sha256.as_str()))
+                .ok_or_else(|| anyhow::anyhow!("Step scope no longer reviewed"))?;
+            let credential_digest = scope.credential_scope_digest()?;
             ensure!(
                 step.evidence_refs.len() <= 16
-                    && step.evidence_refs.iter().all(|id| supplied.contains(id)),
-                "Unknown step citation"
+                    && step.evidence_refs.iter().all(|id| supplied.contains(id)
+                        && case.evidence().iter().any(|e| e.id == *id
+                            && e.binding.scope_sha256 == step.scope_sha256
+                            && e.binding.credential_scope_sha256 == credential_digest)),
+                "Step citation scope/credential mismatch"
             );
         }
         Ok(())
@@ -309,12 +312,24 @@ pub fn plan_local(
                     .iter()
                     .find(|d| d.id == id && d.role == CheckRole::Diagnostic)
                 {
+                    let scoped_refs = refs
+                        .iter()
+                        .copied()
+                        .filter(|id| {
+                            case.evidence().iter().any(|candidate| {
+                                candidate.id == *id
+                                    && candidate.binding.scope_sha256 == e.binding.scope_sha256
+                                    && candidate.binding.credential_scope_sha256
+                                        == e.binding.credential_scope_sha256
+                            })
+                        })
+                        .collect();
                     steps.push(HelperPlanStep {
                         capability_id: id,
                         version: d.version,
                         params,
                         scope_sha256: e.binding.scope_sha256.clone(),
-                        evidence_refs: refs,
+                        evidence_refs: scoped_refs,
                         prerequisites: d.prerequisites.clone(),
                         role: d.role,
                     });
@@ -354,4 +369,4 @@ pub fn mission_checkpoint(plan: &HelperPlan) -> Result<crate::mission::Step> {
 
 #[cfg(test)]
 #[path = "planner_tests.rs"]
-mod tests;
+pub(crate) mod tests;

@@ -160,3 +160,122 @@ fn provider_format_is_strict_and_has_no_free_command_or_sql_field() {
                 && v["properties"].get("sql").is_none())
     );
 }
+
+#[test]
+fn preview_contains_bounded_typed_observations_and_digest_binds_them() {
+    let (_, case, envelope) = crate::helper::planner::tests::observed_case();
+    let preview = AdvisoryPreview::from_case(&case, &[PreviewField::EvidenceIds]).unwrap();
+    assert_eq!(preview.evidence_ids, vec![envelope.id]);
+    let summary = &preview.evidence_summaries[0];
+    assert_eq!(summary.id, envelope.id);
+    assert_eq!(summary.status, EvidenceStatus::Complete);
+    assert_eq!(summary.origin, Origin::Live);
+    assert!(summary.coverage.complete());
+    assert!(
+        summary
+            .records
+            .iter()
+            .any(|r| r.kind == RecordKind::Network && r.observation == Observation::Healthy)
+    );
+    assert!(
+        summary
+            .records
+            .iter()
+            .any(|r| r.kind == RecordKind::Service && r.observation == Observation::Unavailable)
+    );
+    assert_eq!(summary.source_observed_at, envelope.source_observed_at);
+    let consent = AdvisoryConsent::grant(&preview, "openai", "gpt-6-luna", Utc::now()).unwrap();
+    let mut changed = preview.clone();
+    changed.evidence_summaries[0].records[0].observation = Observation::Degraded;
+    assert_ne!(changed.digest().unwrap(), preview.digest().unwrap());
+    assert!(consent.validate(&changed).is_err());
+}
+
+#[test]
+fn advice_citation_direction_and_cross_scope_steps_are_rejected() {
+    use crate::helper::{
+        case::HelperCase,
+        evidence::*,
+        manifest::{CapabilityId, CheckRole, ProbeParams},
+    };
+    let (mut store, case, first) = crate::helper::planner::tests::observed_case();
+    let other_digest = case.scopes()[1].digest().unwrap();
+    let binding = store
+        .register_pending_capture(
+            case.id(),
+            Uuid::new_v4(),
+            &other_digest,
+            None,
+            CapabilityId::NetworkReachability,
+            1,
+        )
+        .unwrap();
+    let mut other = first.clone();
+    other.id = Uuid::new_v4();
+    other.binding = binding;
+    other.content_sha256 = "c".repeat(64);
+    store.attach_evidence(case.id(), other.clone()).unwrap();
+    let current: &HelperCase = store.case(case.id()).unwrap();
+    let preview = AdvisoryPreview::from_case(current, &[PreviewField::EvidenceIds]).unwrap();
+    let proposal = |hypotheses, steps| AdvisoryProposal {
+        case_id: current.id(),
+        case_revision: current.revision(),
+        evidence_revision: current.evidence_revision(),
+        preview_digest: preview.digest().unwrap(),
+        preview_fields: preview.fields.clone(),
+        questions: vec![],
+        hypotheses,
+        steps,
+    };
+    let network = Hypothesis {
+        kind: HypothesisKind::NetworkTransport,
+        explanation: "Transport unavailable?".into(),
+        support: vec![first.id],
+        counterevidence: vec![],
+        gaps: vec![],
+        confirmation: None,
+    };
+    assert!(
+        validate_advisory(
+            current,
+            &CapabilityManifest::built_in(),
+            proposal(vec![network.clone()], vec![])
+        )
+        .is_err()
+    );
+    let mut counter = network;
+    counter.support.clear();
+    counter.counterevidence = vec![first.id];
+    assert!(
+        validate_advisory(
+            current,
+            &CapabilityManifest::built_in(),
+            proposal(vec![counter], vec![])
+        )
+        .is_ok()
+    );
+    let declaration = CapabilityManifest::built_in()
+        .declarations
+        .into_iter()
+        .find(|d| d.id == CapabilityId::ServiceStatus && d.role == CheckRole::Diagnostic)
+        .unwrap();
+    let wrong_step = HelperPlanStep {
+        capability_id: CapabilityId::ServiceStatus,
+        version: declaration.version,
+        params: ProbeParams::Service {
+            service_digest: "b".repeat(64),
+        },
+        scope_sha256: case.scopes()[0].digest().unwrap(),
+        evidence_refs: vec![other.id],
+        prerequisites: declaration.prerequisites,
+        role: declaration.role,
+    };
+    assert!(
+        validate_advisory(
+            current,
+            &CapabilityManifest::built_in(),
+            proposal(vec![], vec![wrong_step])
+        )
+        .is_err()
+    );
+}
