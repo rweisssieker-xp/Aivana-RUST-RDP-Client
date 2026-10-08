@@ -324,6 +324,7 @@ mod tests {
                 kind: RecordKind::SqlRead,
                 observation: Observation::Healthy,
                 subject_sha256: "e".repeat(64),
+                detail: None,
             }],
             metrics: vec![],
             sql_observations: vec![],

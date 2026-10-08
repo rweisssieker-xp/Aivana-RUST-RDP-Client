@@ -371,6 +371,7 @@ fn sql_projection_is_persisted_and_unbounded_metadata_rejected() {
             kind: RecordKind::SqlRead,
             observation: Observation::Healthy,
             subject_sha256: "b".repeat(64),
+                detail: None,
         }],
         metrics: vec![],
         sql_observations: vec![observation.clone()],

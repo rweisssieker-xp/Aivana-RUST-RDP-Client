@@ -34,6 +34,7 @@ fn output(request: &ProbeRequest, observation: Observation, complete: bool) -> R
             kind: RecordKind::CloudInstance,
             observation,
             subject_sha256: request.scope.resource_digest()?,
+            detail: None,
         }],
         metrics: Vec::new(),
         sql_observations: Vec::new(),

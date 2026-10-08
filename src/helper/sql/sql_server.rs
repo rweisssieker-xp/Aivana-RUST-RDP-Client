@@ -784,6 +784,7 @@ async fn collect_with(
                 ReadState::Unknown => Observation::Unknown,
             },
             subject_sha256: probe_subject_digest(&digest, probe),
+            detail: None,
         })
         .collect();
     Ok(ProbeOutput {

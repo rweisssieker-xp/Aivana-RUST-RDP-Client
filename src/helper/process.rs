@@ -1213,6 +1213,7 @@ mod tests {
             CancellationToken::new(),
             Duration::from_secs(30),
             1,
+            None,
         )
         .await
         .err()
@@ -1226,6 +1227,7 @@ mod tests {
             CancellationToken::new(),
             Duration::from_millis(1),
             MAX_TOOL_STDOUT,
+            None,
         )
         .await
         .err()
@@ -1348,6 +1350,7 @@ mod tests {
                 CancellationToken::new(),
                 Duration::from_secs(5),
                 1,
+                None,
             )
             .await;
             assert!(matches!(result, Err(ProcessFailure::OutputLimit)));
