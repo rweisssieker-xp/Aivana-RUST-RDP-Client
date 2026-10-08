@@ -4,7 +4,7 @@ use crate::{
     helper::{
         capability::ProbeRequest,
         credentials::{PersistentSecretResolver, SecretResolver},
-        evidence::{EvidenceBinding, Origin},
+        evidence::{EvidenceBinding, EvidenceEnvelope, Origin},
         manifest::{CapabilityId, ProbeParams},
         scope::{BoundScope, CredentialPurpose},
         worker::{self, WorkerOutcome},
@@ -14,7 +14,7 @@ use crate::{
 use anyhow::{Result, ensure};
 use chrono::Utc;
 use eframe::egui;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 use uuid::Uuid;
 
 #[derive(Default)]
@@ -94,6 +94,48 @@ fn supported(scope: &BoundScope) -> Option<(CapabilityId, ProbeParams)> {
         } => Some((CapabilityId::AwsEc2Status, ProbeParams::CloudInstance)),
         _ => None,
     }
+}
+
+fn displayed_capabilities(scope: &BoundScope) -> &'static [CapabilityId] {
+    match scope {
+        BoundScope::WindowsWinRm { .. } | BoundScope::Linux { .. } => {
+            &[CapabilityId::SystemResources, CapabilityId::ServiceStatus]
+        }
+        BoundScope::Http { tls: true, .. } => &[
+            CapabilityId::NetworkDns,
+            CapabilityId::NetworkTls,
+            CapabilityId::HttpHealth,
+        ],
+        BoundScope::Http { .. } => &[CapabilityId::NetworkDns, CapabilityId::HttpHealth],
+        BoundScope::Database { .. } => &[CapabilityId::SqlRead],
+        BoundScope::AzureVm { .. } => &[CapabilityId::AzureVmResourceHealth],
+        BoundScope::AwsEc2 { .. } => &[CapabilityId::AwsEc2Status],
+        _ => &[CapabilityId::NetworkReachability],
+    }
+}
+
+fn capture_status_line(
+    scope_digest: &str,
+    capability: CapabilityId,
+    evidence: &[EvidenceEnvelope],
+    last_capture: &HashMap<(String, CapabilityId), String>,
+) -> String {
+    let live = evidence.iter().rev().find(|item| {
+        item.binding.scope_sha256 == scope_digest
+            && item.capability_id == capability
+            && item.origin == Origin::Live
+    });
+    let last = last_capture.get(&(scope_digest.to_owned(), capability));
+    format!(
+        "{:?}: {} · last attempt: {}",
+        capability,
+        live.map(|item| format!(
+            "live {:?} ({}/{})",
+            item.status, item.coverage.observed, item.coverage.expected
+        ))
+        .unwrap_or_else(|| "no live evidence; fixture is not live".into()),
+        last.map(String::as_str).unwrap_or("none")
+    )
 }
 
 pub(super) fn cloud_credential_ready(
@@ -218,35 +260,13 @@ pub(super) fn show(
         ui.label(format!(
             "Local tool/auth: {tool_status}; remote permission: unknown until live capture"
         ));
-        let capability_ids: &[CapabilityId] = match scope {
-            BoundScope::WindowsWinRm { .. } | BoundScope::Linux { .. } => {
-                &[CapabilityId::SystemResources, CapabilityId::ServiceStatus]
-            }
-            BoundScope::Http { tls: true, .. } => &[
-                CapabilityId::NetworkDns,
-                CapabilityId::NetworkTls,
-                CapabilityId::HttpHealth,
-            ],
-            BoundScope::Http { .. } => &[CapabilityId::NetworkDns, CapabilityId::HttpHealth],
-            _ => &[CapabilityId::NetworkReachability],
-        };
         if let Ok(digest) = scope.digest() {
-            for capability in capability_ids {
-                let live = case.evidence().iter().rev().find(|item| {
-                    item.binding.scope_sha256 == digest
-                        && item.capability_id == *capability
-                        && item.origin == Origin::Live
-                });
-                let last = state.last_capture.get(&(digest.clone(), *capability));
-                ui.label(format!(
-                    "{:?}: {} · last attempt: {}",
-                    capability,
-                    live.map(|item| format!(
-                        "live {:?} ({}/{})",
-                        item.status, item.coverage.observed, item.coverage.expected
-                    ))
-                    .unwrap_or_else(|| "no live evidence; fixture is not live".into()),
-                    last.map(String::as_str).unwrap_or("none")
+            for capability in displayed_capabilities(scope) {
+                ui.label(capture_status_line(
+                    &digest,
+                    *capability,
+                    case.evidence(),
+                    &state.last_capture,
                 ));
             }
         }
@@ -609,11 +629,106 @@ mod tests {
     use crate::{
         helper::{
             case::{CaseEdit, ProblemIntake},
+            evidence::{Coverage, EVIDENCE_SCHEMA, EvidenceStatus, TimeQuality},
             store::HelperStore,
         },
         mission::Target,
     };
     use std::{net::TcpListener, time::Duration};
+
+    #[test]
+    fn sql_and_cloud_status_rows_use_the_collected_capability_and_attempt() {
+        let profile = ConnectionProfile::sample("db", "db.example", "Default", false);
+        let target = Target::from_profile(&profile);
+        let tenant = Uuid::new_v4().to_string();
+        let subscription = Uuid::new_v4().to_string();
+        let scopes = [
+            (
+                BoundScope::Database {
+                    target: target.clone(),
+                    engine: crate::helper::scope::DatabaseEngine::Postgres,
+                    port: 5432,
+                    database: "app".into(),
+                    schema: None,
+                    object: None,
+                    credential: None,
+                },
+                CapabilityId::SqlRead,
+            ),
+            (
+                BoundScope::Database {
+                    target,
+                    engine: crate::helper::scope::DatabaseEngine::SqlServer,
+                    port: 1433,
+                    database: "app".into(),
+                    schema: None,
+                    object: None,
+                    credential: None,
+                },
+                CapabilityId::SqlRead,
+            ),
+            (
+                BoundScope::AzureVm {
+                    tenant,
+                    subscription: subscription.clone(),
+                    resource_id: format!(
+                        "/subscriptions/{subscription}/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm"
+                    ),
+                    credential: None,
+                },
+                CapabilityId::AzureVmResourceHealth,
+            ),
+            (
+                BoundScope::AwsEc2 {
+                    account: "123456789012".into(),
+                    region: "eu-central-1".into(),
+                    instance_id: "i-0123456789abcdef0".into(),
+                    credential: None,
+                },
+                CapabilityId::AwsEc2Status,
+            ),
+        ];
+        for (scope, capability) in scopes {
+            assert_eq!(displayed_capabilities(&scope), &[capability]);
+            let digest = scope.digest().unwrap();
+            let now = Utc::now();
+            let envelope = EvidenceEnvelope {
+                schema: EVIDENCE_SCHEMA,
+                id: Uuid::new_v4(),
+                binding: EvidenceBinding {
+                    case_id: Uuid::new_v4(),
+                    case_revision: 1,
+                    request_id: Uuid::new_v4(),
+                    scope_sha256: digest.clone(),
+                    credential_scope_sha256: "a".repeat(64),
+                    run_id: None,
+                },
+                capability_id: capability,
+                capability_version: 1,
+                parser_version: 1,
+                origin: Origin::Live,
+                source_id: "b".repeat(64),
+                source_observed_at: now,
+                retrieved_at: now,
+                time_quality: TimeQuality::Trusted,
+                status: EvidenceStatus::Complete,
+                coverage: Coverage {
+                    observed: 1,
+                    expected: 1,
+                    truncated: false,
+                },
+                content_sha256: "c".repeat(64),
+                records: vec![],
+                metrics: vec![],
+                sql_observations: vec![],
+                evidence_refs: vec![],
+            };
+            let attempts = HashMap::from([((digest.clone(), capability), "completed".into())]);
+            let line = capture_status_line(&digest, capability, &[envelope], &attempts);
+            assert!(line.contains("live Complete (1/1)"), "{line}");
+            assert!(line.contains("last attempt: completed"), "{line}");
+        }
+    }
 
     #[test]
     fn selection_keeps_launched_capture_bound_to_original_case() {
