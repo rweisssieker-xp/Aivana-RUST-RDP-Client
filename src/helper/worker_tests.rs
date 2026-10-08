@@ -210,6 +210,7 @@ impl ProbeAdapter for SlowProbe {
                 kind: RecordKind::Network,
                 observation: Observation::Healthy,
                 subject_sha256: request.scope.resource_digest()?,
+                detail: None,
             };
             Ok(ProbeOutput {
                 status: EvidenceStatus::Complete,
@@ -259,6 +260,62 @@ fn setup(port: u16, http: bool) -> (HelperCase, BoundScope) {
     case.revise(2, CaseEdit::Scopes(vec![scope.clone()]))
         .unwrap();
     (case, scope)
+}
+
+#[tokio::test]
+async fn malformed_http_authority_causes_zero_dns_tls_and_http_dispatch() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (case, scope) = setup(port, true);
+    let mut probe = request(&case, &scope, true);
+    if let BoundScope::Http { target, .. } = &mut probe.scope {
+        target.host = "good.example@127.0.0.1".into();
+    }
+    assert!(
+        HttpProbe
+            .collect(&probe, &NoSecrets, CancellationToken::new())
+            .await
+            .is_err()
+    );
+    probe.capability_id = CapabilityId::NetworkDns;
+    probe.params = ProbeParams::Dns;
+    assert!(
+        crate::helper::adapters::NetworkAdapter
+            .collect(&probe, &NoSecrets, CancellationToken::new())
+            .await
+            .is_err()
+    );
+    probe.capability_id = CapabilityId::NetworkTls;
+    probe.params = ProbeParams::Tls;
+    if let BoundScope::Http { tls, .. } = &mut probe.scope {
+        *tls = true;
+    }
+    assert!(
+        crate::helper::adapters::NetworkAdapter
+            .collect(&probe, &NoSecrets, CancellationToken::new())
+            .await
+            .is_err()
+    );
+    if let BoundScope::Http { target, .. } = &mut probe.scope {
+        target.host = "127.0.0.1".into();
+        target.route = "proxy:443".into();
+    }
+    assert!(
+        crate::helper::adapters::NetworkAdapter
+            .collect(&probe, &NoSecrets, CancellationToken::new())
+            .await
+            .is_err()
+    );
+    probe.capability_id = CapabilityId::HttpHealth;
+    probe.params = ProbeParams::Http;
+    assert!(
+        HttpProbe
+            .collect(&probe, &NoSecrets, CancellationToken::new())
+            .await
+            .is_err()
+    );
+    assert!(listener.accept().is_err());
 }
 fn request(case: &HelperCase, scope: &BoundScope, http: bool) -> ProbeRequest {
     let id = Uuid::new_v4();

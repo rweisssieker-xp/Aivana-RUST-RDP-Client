@@ -10,6 +10,130 @@ use tokio_util::sync::CancellationToken;
 const MAX_TOOL_STDOUT: usize = 128 * 1024;
 const MAX_TOOL_STDERR: usize = 4 * 1024;
 
+#[cfg(windows)]
+fn windows_system_directory() -> Result<std::path::PathBuf, ProcessFailure> {
+    use std::os::windows::ffi::OsStringExt;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
+    }
+    let mut buffer = [0u16; 32768];
+    let len = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) } as usize;
+    if len == 0 || len >= buffer.len() {
+        return Err(ProcessFailure::Spawn);
+    }
+    Ok(std::path::PathBuf::from(OsString::from_wide(
+        &buffer[..len],
+    )))
+}
+
+#[cfg(windows)]
+fn process_token_profile() -> Result<std::path::PathBuf, ProcessFailure> {
+    use std::os::windows::{
+        ffi::OsStringExt,
+        io::{AsRawHandle, FromRawHandle, OwnedHandle},
+    };
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentProcess() -> *mut std::ffi::c_void;
+    }
+    #[link(name = "advapi32")]
+    unsafe extern "system" {
+        fn OpenProcessToken(
+            process: *mut std::ffi::c_void,
+            access: u32,
+            token: *mut *mut std::ffi::c_void,
+        ) -> i32;
+    }
+    #[link(name = "userenv")]
+    unsafe extern "system" {
+        fn GetUserProfileDirectoryW(
+            token: *mut std::ffi::c_void,
+            buffer: *mut u16,
+            size: *mut u32,
+        ) -> i32;
+    }
+    let mut raw = std::ptr::null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), 0x0008, &mut raw) } == 0 || raw.is_null() {
+        return Err(ProcessFailure::Spawn);
+    }
+    let token = unsafe { OwnedHandle::from_raw_handle(raw) };
+    let mut buffer = [0u16; 32768];
+    let mut len = buffer.len() as u32;
+    if unsafe { GetUserProfileDirectoryW(token.as_raw_handle(), buffer.as_mut_ptr(), &mut len) }
+        == 0
+        || len == 0
+        || len as usize >= buffer.len()
+    {
+        return Err(ProcessFailure::Spawn);
+    }
+    let copied = len as usize;
+    let copied = if buffer[copied - 1] == 0 {
+        copied - 1
+    } else {
+        copied
+    };
+    let path = std::path::PathBuf::from(OsString::from_wide(&buffer[..copied]));
+    if !path.is_absolute() {
+        return Err(ProcessFailure::Spawn);
+    }
+    Ok(path)
+}
+
+pub(crate) fn system_collector_readiness(
+    scope: &crate::helper::scope::BoundScope,
+) -> (bool, &'static str) {
+    #[cfg(windows)]
+    {
+        let Ok(system) = windows_system_directory() else {
+            return (false, "OS system directory unavailable");
+        };
+        match scope {
+            crate::helper::scope::BoundScope::WindowsWinRm { .. } => {
+                if system
+                    .join("WindowsPowerShell/v1.0/powershell.exe")
+                    .is_file()
+                {
+                    (
+                        true,
+                        "OS PowerShell present; remote WinRM rights checked on capture",
+                    )
+                } else {
+                    (false, "OS PowerShell unavailable")
+                }
+            }
+            crate::helper::scope::BoundScope::Linux { .. } => {
+                if !system.join("OpenSSH/ssh.exe").is_file() {
+                    return (false, "OS OpenSSH unavailable");
+                }
+                let Ok(profile) = process_token_profile() else {
+                    return (false, "Windows token profile unavailable");
+                };
+                let ssh = profile.join(".ssh");
+                if !ssh.join("known_hosts").is_file() {
+                    return (false, "Current account known_hosts unavailable");
+                }
+                if !["id_ed25519", "id_ecdsa", "id_rsa"]
+                    .iter()
+                    .any(|name| ssh.join(name).is_file())
+                {
+                    return (false, "Current account default SSH key unavailable");
+                }
+                (
+                    true,
+                    "OS OpenSSH and current-account key/host trust present; remote SSH rights checked on capture",
+                )
+            }
+            _ => (false, "No system collector for scope"),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = scope;
+        (false, "System collectors require Windows host")
+    }
+}
+
 pub(crate) enum FixedToolOperation {
     WindowsCollector {
         host: String,
@@ -68,6 +192,14 @@ pub(crate) enum FixedToolOperation {
     #[cfg(test)]
     TestPipeParent {
         pid_file: std::path::PathBuf,
+    },
+    #[cfg(test)]
+    TestLocalLinuxScript {
+        shell: std::path::PathBuf,
+    },
+    #[cfg(test)]
+    TestLocalWindowsScript {
+        denied: bool,
     },
 }
 
@@ -193,6 +325,14 @@ impl FixedToolOperation {
                     .concat(),
                 ))
             }
+            #[cfg(test)]
+            Self::TestLocalLinuxScript { .. } => Ok(Some(
+                [
+                    b"PATH=/usr/bin:/bin\nservice=''\nmount='/'\ninterface=''\n".as_slice(),
+                    include_str!("adapters/linux.sh").as_bytes(),
+                ]
+                .concat(),
+            )),
             _ => Ok(None),
         }
     }
@@ -214,12 +354,35 @@ impl FixedToolOperation {
             Self::TestWhereSecret => "where.exe",
             #[cfg(test)]
             Self::TestPipeParent { .. } => "",
+            #[cfg(test)]
+            Self::TestLocalLinuxScript { .. } => "",
+            #[cfg(test)]
+            Self::TestLocalWindowsScript { .. } => "",
+        };
+        #[cfg(windows)]
+        let program = match &self {
+            Self::WindowsCollector { .. } => windows_system_directory()?
+                .join("WindowsPowerShell")
+                .join("v1.0")
+                .join("powershell.exe")
+                .into_os_string(),
+            Self::LinuxCollector { .. } => windows_system_directory()?
+                .join("OpenSSH")
+                .join("ssh.exe")
+                .into_os_string(),
+            #[cfg(test)]
+            Self::TestLocalWindowsScript { .. } => windows_system_directory()?
+                .join("WindowsPowerShell/v1.0/powershell.exe")
+                .into_os_string(),
+            _ => OsString::from(program),
         };
         #[cfg(test)]
         let program = if matches!(&self, Self::TestPipeParent { .. }) {
             std::env::current_exe()
                 .map_err(|_| ProcessFailure::Spawn)?
                 .into_os_string()
+        } else if let Self::TestLocalLinuxScript { shell } = &self {
+            shell.as_os_str().to_os_string()
         } else {
             OsString::from(program)
         };
@@ -270,7 +433,12 @@ impl FixedToolOperation {
                 if port == 0 {
                     return Err(ProcessFailure::InvalidInvocation);
                 }
-                vec![
+                #[cfg(windows)]
+                let ssh_dir = process_token_profile()?.join(".ssh");
+                #[cfg(not(windows))]
+                return Err(ProcessFailure::Spawn);
+                #[cfg(windows)]
+                let mut args: Vec<OsString> = vec![
                     "-F".into(),
                     "none".into(),
                     "-o".into(),
@@ -278,16 +446,40 @@ impl FixedToolOperation {
                     "-o".into(),
                     "StrictHostKeyChecking=yes".into(),
                     "-o".into(),
+                    "IdentitiesOnly=yes".into(),
+                    "-o".into(),
+                    "IdentityAgent=none".into(),
+                    "-o".into(),
+                    "PreferredAuthentications=publickey".into(),
+                    "-o".into(),
+                    format!(
+                        "UserKnownHostsFile={}",
+                        ssh_dir.join("known_hosts").display()
+                    )
+                    .into(),
+                    "-o".into(),
+                    "GlobalKnownHostsFile=none".into(),
+                    "-o".into(),
                     "ConnectTimeout=10".into(),
                     "-o".into(),
                     "ConnectionAttempts=1".into(),
+                ];
+                #[cfg(windows)]
+                for name in ["id_ed25519", "id_ecdsa", "id_rsa"] {
+                    args.push("-i".into());
+                    args.push(ssh_dir.join(name).into_os_string());
+                }
+                #[cfg(windows)]
+                args.extend([
                     "-p".into(),
                     port.to_string().into(),
                     "--".into(),
                     format!("{user}@{host}").into(),
                     "sh".into(),
                     "-s".into(),
-                ]
+                ]);
+                #[cfg(windows)]
+                args
             }
             Self::DockerContainerInspect { container_id } => {
                 vec!["container".into(), "inspect".into(), value(&container_id)?]
@@ -391,6 +583,33 @@ impl FixedToolOperation {
                 "helper::process::tests::pipe_parent_fixture".into(),
                 "--nocapture".into(),
             ],
+            #[cfg(test)]
+            Self::TestLocalLinuxScript { .. } => vec!["-s".into()],
+            #[cfg(test)]
+            Self::TestLocalWindowsScript { denied } => {
+                use base64::Engine as _;
+                let script = format!(
+                    "$script:denyFixture = ${}\n{}\n{}",
+                    if denied { "true" } else { "false" },
+                    include_str!("adapters/windows-fixture.ps1"),
+                    include_str!("adapters/windows.ps1")
+                        .replace("__HOST__", "fixture.invalid")
+                        .replace("__PORT__", "5985")
+                        .replace("__SERVICE__", "FixtureService")
+                        .replace("__MOUNT__", "C:")
+                        .replace("__INTERFACE__", "FixtureInterface")
+                );
+                let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+                vec![
+                    "-NoLogo".into(),
+                    "-NoProfile".into(),
+                    "-NonInteractive".into(),
+                    "-EncodedCommand".into(),
+                    base64::engine::general_purpose::STANDARD
+                        .encode(utf16)
+                        .into(),
+                ]
+            }
         };
         Ok((program, args))
     }
@@ -578,9 +797,30 @@ async fn run_with_limit(
         FixedToolOperation::TestPipeParent { pid_file } => Some(pid_file.clone()),
         _ => None,
     };
-    let ssh_profile = matches!(&operation, FixedToolOperation::LinuxCollector { .. })
-        .then(|| std::env::var_os("USERPROFILE"))
-        .flatten();
+    #[cfg(test)]
+    let local_shell_path = match &operation {
+        FixedToolOperation::TestLocalLinuxScript { shell } => {
+            shell.parent().map(std::path::Path::to_path_buf)
+        }
+        _ => None,
+    };
+    #[cfg(windows)]
+    let ssh_profile = if matches!(&operation, FixedToolOperation::LinuxCollector { .. }) {
+        Some(process_token_profile()?.into_os_string())
+    } else {
+        None
+    };
+    #[cfg(windows)]
+    let system_collector = matches!(
+        &operation,
+        FixedToolOperation::WindowsCollector { .. } | FixedToolOperation::LinuxCollector { .. }
+    );
+    #[cfg(test)]
+    let system_collector = system_collector
+        || matches!(
+            &operation,
+            FixedToolOperation::TestLocalWindowsScript { .. }
+        );
     let script_input = operation.script_input()?;
     let (program, args) = operation.argv()?;
     let mut command = Command::new(program);
@@ -612,6 +852,7 @@ async fn run_with_limit(
             command.env("AWS_SESSION_TOKEN", session_token);
         }
     }
+    #[cfg(windows)]
     if let Some(profile) = ssh_profile.filter(|p| std::path::Path::new(p).is_absolute()) {
         command.env("USERPROFILE", profile);
     }
@@ -621,11 +862,19 @@ async fn run_with_limit(
             .env("RELAYNE_PIPE_FIXTURE", "1")
             .env("RELAYNE_PIPE_PID_FILE", path);
     }
+    #[cfg(test)]
+    if let Some(path) = local_shell_path {
+        command.env("PATH", path);
+    }
     #[cfg(windows)]
     {
         command
             .creation_flags(0x08000000 | windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
-        if let Some(system_root) = std::env::var_os("SystemRoot") {
+        if system_collector {
+            let system = windows_system_directory()?;
+            let root = system.parent().ok_or(ProcessFailure::Spawn)?;
+            command.current_dir(&system).env("SystemRoot", root);
+        } else if let Some(system_root) = std::env::var_os("SystemRoot") {
             command.env("SystemRoot", system_root);
         }
     }
@@ -698,7 +947,12 @@ mod tests {
             interface: Some("Ethernet_1".into()),
         };
         let (program, args) = windows.argv().unwrap();
-        assert_eq!(program, "powershell.exe");
+        assert_eq!(
+            std::path::Path::new(&program),
+            windows_system_directory()
+                .unwrap()
+                .join("WindowsPowerShell/v1.0/powershell.exe")
+        );
         use base64::Engine as _;
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(args.last().unwrap().to_str().unwrap())
@@ -746,7 +1000,19 @@ mod tests {
         let input = linux.script_input().unwrap().unwrap();
         let script = std::str::from_utf8(&input).unwrap();
         assert!(script.starts_with("service='sshd'\nmount='/var/lib/data'\ninterface='eth0'\n"));
-        let (_, args) = linux.argv().unwrap();
+        let (ssh_program, args) = linux.argv().unwrap();
+        assert_eq!(
+            std::path::Path::new(&ssh_program),
+            windows_system_directory().unwrap().join("OpenSSH/ssh.exe")
+        );
+        let profile = process_token_profile().unwrap();
+        assert!(args.iter().any(|arg| arg
+            == &OsString::from(format!(
+                "UserKnownHostsFile={}",
+                profile.join(".ssh").join("known_hosts").display()
+            ))));
+        assert!(args.iter().any(|arg| arg == "IdentitiesOnly=yes"));
+        assert!(args.iter().any(|arg| arg == "IdentityAgent=none"));
         assert_eq!(&args[..2], &[OsString::from("-F"), OsString::from("none")]);
         assert!(args.iter().any(|arg| arg == "StrictHostKeyChecking=yes"));
         assert!(args.iter().any(|arg| arg == "deploy@linux.example"));
@@ -861,16 +1127,114 @@ mod tests {
     }
 
     #[test]
+    fn profile_and_executable_shadows_do_not_change_collector_identity() {
+        if std::env::var_os("RELAYNE_SHADOW_FIXTURE").is_some() {
+            let token_profile = process_token_profile().unwrap();
+            assert_ne!(
+                std::env::var_os("USERPROFILE"),
+                Some(token_profile.clone().into_os_string())
+            );
+            let (ssh, args) = FixedToolOperation::LinuxCollector {
+                host: "host.example".into(),
+                user: "operator".into(),
+                port: 22,
+                service: None,
+                mount: None,
+                interface: None,
+            }
+            .argv()
+            .unwrap();
+            assert_eq!(
+                std::path::Path::new(&ssh),
+                windows_system_directory().unwrap().join("OpenSSH/ssh.exe")
+            );
+            assert!(args.iter().any(|arg| arg
+                == &OsString::from(format!(
+                    "UserKnownHostsFile={}",
+                    token_profile.join(".ssh").join("known_hosts").display()
+                ))));
+            let (powershell, _) = FixedToolOperation::WindowsCollector {
+                host: "host.example".into(),
+                port: 5985,
+                service: None,
+                mount: None,
+                interface: None,
+            }
+            .argv()
+            .unwrap();
+            assert_eq!(
+                std::path::Path::new(&powershell),
+                windows_system_directory()
+                    .unwrap()
+                    .join("WindowsPowerShell/v1.0/powershell.exe")
+            );
+            return;
+        }
+        let shadow =
+            std::env::temp_dir().join(format!("relayne-tool-shadow-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&shadow).unwrap();
+        for file in ["ssh.exe", "powershell.exe"] {
+            std::fs::write(shadow.join(file), b"shadow").unwrap();
+        }
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "helper::process::tests::profile_and_executable_shadows_do_not_change_collector_identity", "--nocapture"])
+            .env("RELAYNE_SHADOW_FIXTURE", "1")
+            .env("USERPROFILE", &shadow)
+            .env("PATH", format!("{};{}", shadow.display(), std::env::var("PATH").unwrap_or_default()))
+            .current_dir(&shadow).output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        for file in ["ssh.exe", "powershell.exe"] {
+            std::fs::remove_file(shadow.join(file)).unwrap();
+        }
+        std::fs::remove_dir(&shadow).unwrap();
+    }
+
+    #[tokio::test]
+    async fn guarded_local_script_obeys_output_cap_and_deadline() {
+        let shell = std::path::PathBuf::from(r"C:\Program Files\Git\usr\bin\sh.exe");
+        if !shell.is_file() {
+            return;
+        }
+        let failure = run_with_limit(
+            FixedToolOperation::TestLocalLinuxScript {
+                shell: shell.clone(),
+            },
+            CancellationToken::new(),
+            Duration::from_secs(30),
+            1,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(failure, ProcessFailure::OutputLimit);
+        let failure = run_with_limit(
+            FixedToolOperation::TestLocalLinuxScript { shell },
+            CancellationToken::new(),
+            Duration::from_millis(1),
+            MAX_TOOL_STDOUT,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(failure, ProcessFailure::TimedOut);
+    }
+
+    #[test]
     fn pipe_parent_fixture() {
         if std::env::var_os("RELAYNE_PIPE_FIXTURE").is_none() {
             return;
         }
-        let child = std::process::Command::new("ping.exe")
-            .args(["-n", "30", "127.0.0.1"])
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap();
+        let child =
+            std::process::Command::new(windows_system_directory().unwrap().join("ping.exe"))
+                .args(["-n", "30", "127.0.0.1"])
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap();
         let path = std::env::var_os("RELAYNE_PIPE_PID_FILE").unwrap();
         std::fs::write(path, child.id().to_string()).unwrap();
     }

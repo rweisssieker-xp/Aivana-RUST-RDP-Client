@@ -477,6 +477,7 @@ impl ProbeAdapter for TcpProbe {
                         Observation::Unavailable
                     },
                     subject_sha256: digest,
+                    detail: None,
                 }],
                 metrics: vec![NormalizedMetric {
                     kind: MetricKind::LatencyMs,
@@ -525,18 +526,11 @@ impl ProbeAdapter for HttpProbe {
             else {
                 anyhow::bail!("Unsupported HTTP scope");
             };
-            let host = if target.host.contains(':') {
-                format!("[{}]", target.host)
-            } else {
-                target.host.clone()
-            };
-            let url = format!(
-                "{}://{}:{}{}",
-                if *tls { "https" } else { "http" },
-                host,
-                port,
-                path
+            anyhow::ensure!(
+                target.route.is_empty(),
+                "HTTP probe requires a direct route"
             );
+            let url = crate::helper::scope::reviewed_http_url(target, *port, *tls, path)?;
             let client = reqwest::Client::builder()
                 .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())
@@ -544,7 +538,7 @@ impl ProbeAdapter for HttpProbe {
                 .build()?;
             let response = tokio::select! {
                 _ = cancel.cancelled() => anyhow::bail!("Canceled"),
-                response = client.get(&url).send() => response?,
+                response = client.get(url.clone()).send() => response?,
             };
             let actual_status = response.status();
             let mut response = response;
@@ -583,11 +577,12 @@ impl ProbeAdapter for HttpProbe {
                         Observation::Degraded
                     },
                     subject_sha256: request.scope.resource_digest()?,
+                    detail: None,
                 }],
                 metrics: Vec::new(),
                 sql_observations: Vec::new(),
                 evidence_refs: Vec::new(),
-                source_id: url.into_bytes(),
+                source_id: url.as_str().as_bytes().to_vec(),
                 source_observed_at: end,
                 parser_version: 1,
             })

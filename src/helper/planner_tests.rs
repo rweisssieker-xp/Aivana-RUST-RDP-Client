@@ -91,6 +91,7 @@ pub(crate) fn observed_case() -> (HelperStore, HelperCase, EvidenceEnvelope) {
             kind,
             observation,
             subject_sha256: "b".repeat(64),
+            detail: None,
         })
         .collect(),
         metrics: vec![],

@@ -1,4 +1,42 @@
 use super::*;
+
+#[test]
+fn http_scope_rejects_reinterpreted_authority_and_preserves_ipv6_idna() {
+    let mut endpoint = target("RDP");
+    endpoint.route.clear();
+    for host in [
+        "good.example@bad.example",
+        "good.example:81",
+        "good.example/path",
+        "good.example#evil",
+        "0x7f000001",
+    ] {
+        endpoint.host = host.into();
+        let scope = BoundScope::Http {
+            target: endpoint.clone(),
+            port: 8443,
+            tls: true,
+            path: "/health".into(),
+        };
+        assert!(scope.validate().is_err(), "accepted {host}");
+    }
+    endpoint.host = "::1".into();
+    let ipv6 = reviewed_http_url(&endpoint, 8443, true, "/health").unwrap();
+    assert_eq!(ipv6.host_str().unwrap().trim_matches(['[', ']']), "::1");
+    assert_eq!(ipv6.port_or_known_default(), Some(8443));
+    endpoint.host = "bücher.example".into();
+    let idna = reviewed_http_url(&endpoint, 8443, true, "/health").unwrap();
+    assert_eq!(idna.host_str(), Some("xn--bcher-kva.example"));
+    endpoint.route = "proxy:443".into();
+    assert!(reviewed_http_url(&endpoint, 8443, true, "/health").is_ok());
+    endpoint.route.clear();
+    let with_query = reviewed_http_url(&endpoint, 8443, true, "/health?next=ok%20value").unwrap();
+    assert_eq!(with_query.path(), "/health");
+    assert_eq!(with_query.query(), Some("next=ok%20value"));
+    for path in ["/health#fragment", "/foo/../bar"] {
+        assert!(reviewed_http_url(&endpoint, 8443, true, path).is_err());
+    }
+}
 use crate::helper::case::{CaseEdit, HelperCase, ProblemIntake};
 
 fn target(protocol: &str) -> Target {

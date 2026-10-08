@@ -2,6 +2,7 @@
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+use std::net::IpAddr;
 use uuid::Uuid;
 
 use super::case::{CaseEdit, HelperCase};
@@ -139,6 +140,87 @@ fn target(t: &Target, protocol: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Build the only URL that a reviewed HTTP scope may contact. Parsing both the
+/// isolated authority and the final URL prevents userinfo or path syntax from
+/// silently changing the destination.
+pub(crate) fn reviewed_http_url(
+    target: &Target,
+    port: u16,
+    tls: bool,
+    path: &str,
+) -> Result<reqwest::Url> {
+    ensure!(
+        port > 0 && !target.host.is_empty(),
+        "Invalid HTTP authority"
+    );
+    ensure!(
+        path.starts_with('/')
+            && path.len() <= 512
+            && path
+                .bytes()
+                .all(|b| b.is_ascii_graphic() && b != b'\\' && b != b'#'),
+        "Invalid HTTP path"
+    );
+    let host = target.host.as_str();
+    ensure!(
+        !host.chars().any(|c| c.is_control() || c.is_whitespace())
+            && !host
+                .chars()
+                .any(|c| matches!(c, '@' | '/' | '?' | '#' | '\\' | '%')),
+        "Invalid HTTP host"
+    );
+    let authority = if let Ok(ip) = host.trim_matches(['[', ']']).parse::<IpAddr>() {
+        match ip {
+            IpAddr::V4(_) => ip.to_string(),
+            IpAddr::V6(_) => format!("[{ip}]"),
+        }
+    } else {
+        ensure!(
+            !host.chars().any(|c| matches!(c, '[' | ']' | ':')),
+            "Invalid HTTP host"
+        );
+        host.to_owned()
+    };
+    let scheme = if tls { "https" } else { "http" };
+    let isolated = reqwest::Url::parse(&format!("{scheme}://{authority}/"))?;
+    let canonical = isolated
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing HTTP host"))?;
+    if host.is_ascii() && !host.contains(':') {
+        ensure!(
+            canonical.eq_ignore_ascii_case(host),
+            "HTTP host was reinterpreted"
+        );
+    }
+    ensure!(
+        canonical.split('.').all(|label| !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+            || canonical.trim_matches(['[', ']']).parse::<IpAddr>().is_ok(),
+        "Invalid DNS name or IP"
+    );
+    let url = reqwest::Url::parse(&format!("{scheme}://{authority}:{port}{path}"))?;
+    let parsed_path = match url.query() {
+        Some(query) => format!("{}?{query}", url.path()),
+        None => url.path().to_owned(),
+    };
+    ensure!(
+        url.scheme() == scheme
+            && url.host_str() == Some(canonical)
+            && url.port_or_known_default() == Some(port)
+            && parsed_path == path
+            && url.fragment().is_none()
+            && url.username().is_empty()
+            && url.password().is_none(),
+        "HTTP URL differs from reviewed endpoint"
+    );
+    Ok(url)
+}
+
 fn valid_aws_region(region: &str) -> bool {
     let parts: Vec<_> = region.split('-').collect();
     let number =
@@ -240,8 +322,8 @@ impl BoundScope {
             Self::Http {
                 target: t,
                 port,
+                tls,
                 path,
-                ..
             } => {
                 target(t, None)?;
                 ensure!(
@@ -255,6 +337,7 @@ impl BoundScope {
                         && !path.chars().any(char::is_control),
                     "Invalid HTTP port/path"
                 );
+                reviewed_http_url(t, *port, *tls, path)?;
             }
             Self::Docker {
                 daemon_context,

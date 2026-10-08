@@ -4,7 +4,8 @@ use super::{
     credentials::SecretResolver,
     evidence::{
         Coverage, EvidenceStatus, MetricKind, MetricSourceCounter, MetricUnit, MissingReason,
-        NormalizedMetric, NormalizedRecord, Observation, RecordKind, SampleWindow,
+        NormalizedMetric, NormalizedRecord, Observation, OsFamily, RecordKind, SampleWindow,
+        SystemDetail,
     },
     manifest::ProbeParams,
     process::ProcessFailure,
@@ -143,6 +144,23 @@ pub fn counter_delta(before: &CounterSample, after: &CounterSample) -> MetricRea
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RawProcess {
+    name: String,
+    memory_bytes: Option<f64>,
+    cpu_seconds: Option<f64>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawEvent {
+    id: u32,
+    level: u8,
+    provider: String,
+    at_ms: i64,
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawSnapshot {
     schema: u8,
     start_ms: i64,
@@ -157,8 +175,34 @@ struct RawSnapshot {
     error_count: Option<f64>,
     #[serde(default)]
     events_truncated: bool,
+    #[serde(default)]
+    events_metadata_truncated: bool,
     process_count: Option<f64>,
     service_state: Option<String>,
+    #[serde(default)]
+    os_version: Option<String>,
+    #[serde(default)]
+    os_name: Option<String>,
+    #[serde(default)]
+    uptime_seconds: Option<f64>,
+    #[serde(default)]
+    load_one: Option<f64>,
+    #[serde(default)]
+    processes: Option<Vec<RawProcess>>,
+    #[serde(default)]
+    service_dependencies: Option<Vec<String>>,
+    #[serde(default)]
+    service_dependencies_truncated: bool,
+    #[serde(default)]
+    events: Option<Vec<RawEvent>>,
+    #[serde(default)]
+    interface_extra: Option<Vec<f64>>,
+    #[serde(default)]
+    tcp_before: Option<Vec<f64>>,
+    #[serde(default)]
+    tcp_after: Option<Vec<f64>>,
+    #[serde(default)]
+    listening_tcp: Option<f64>,
 }
 
 fn pair(values: Option<&Vec<f64>>) -> Option<(f64, f64)> {
@@ -199,6 +243,257 @@ fn percentage(values: Option<&Vec<f64>>) -> Option<f64> {
 fn commit_percentage(values: Option<&Vec<f64>>) -> Option<f64> {
     let (used, total) = pair(values)?;
     (total > 0.0).then_some(used / total * 100.0)
+}
+
+fn bounded_integer(value: Option<f64>) -> Option<u64> {
+    value
+        .filter(|v| v.is_finite() && *v >= 0.0 && *v < u64::MAX as f64)
+        .map(|v| v as u64)
+}
+
+fn system_details(
+    raw: &RawSnapshot,
+    request: &ProbeRequest,
+    service: Option<&str>,
+    interface: Option<&str>,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Result<Vec<NormalizedRecord>> {
+    let subject = request.scope.resource_digest()?;
+    let mut records = Vec::new();
+    let family = if matches!(request.scope, BoundScope::Linux { .. }) {
+        OsFamily::Linux
+    } else {
+        OsFamily::Windows
+    };
+    let version = raw
+        .os_version
+        .as_ref()
+        .filter(|v| {
+            v.len() <= 48
+                && v.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+        })
+        .cloned();
+    let reported_host_sha256 = raw
+        .os_name
+        .as_ref()
+        .filter(|v| !v.is_empty() && v.len() <= 255 && !v.chars().any(char::is_control))
+        .map(|v| super::evidence::source_id_digest(v.as_bytes()));
+    let uptime = bounded_integer(raw.uptime_seconds);
+    let load = raw
+        .load_one
+        .filter(|v| v.is_finite() && *v >= 0.0 && *v <= 1_000_000.0);
+    let os_known = version.is_some() && uptime.is_some();
+    records.push(NormalizedRecord {
+        kind: RecordKind::OsIdentity,
+        observation: if os_known {
+            Observation::Healthy
+        } else {
+            Observation::Unknown
+        },
+        subject_sha256: subject.clone(),
+        detail: Some(SystemDetail::Os {
+            family,
+            reported_host_sha256,
+            version,
+            uptime_seconds: uptime,
+            load_one: load,
+            reason: (!os_known).then_some(MissingReason::Unavailable),
+        }),
+    });
+    let processes = raw.processes.as_deref().unwrap_or_default();
+    ensure!(processes.len() <= 5, "Too many process summaries");
+    if processes.is_empty() {
+        records.push(NormalizedRecord {
+            kind: RecordKind::Process,
+            observation: Observation::Unknown,
+            subject_sha256: subject.clone(),
+            detail: Some(SystemDetail::Process {
+                memory_bytes: None,
+                cpu_seconds: None,
+                reason: Some(MissingReason::Unavailable),
+            }),
+        });
+    }
+    for process in processes {
+        ensure!(
+            !process.name.is_empty()
+                && process.name.len() <= 80
+                && !process.name.chars().any(char::is_control),
+            "Invalid process name"
+        );
+        let memory = bounded_integer(process.memory_bytes);
+        let cpu = process.cpu_seconds.filter(|v| v.is_finite() && *v >= 0.0);
+        let known = memory.is_some() || cpu.is_some();
+        records.push(NormalizedRecord {
+            kind: RecordKind::Process,
+            observation: if known {
+                Observation::Healthy
+            } else {
+                Observation::Unknown
+            },
+            subject_sha256: super::evidence::source_id_digest(process.name.as_bytes()),
+            detail: Some(SystemDetail::Process {
+                memory_bytes: memory,
+                cpu_seconds: cpu,
+                reason: (!known).then_some(MissingReason::Unavailable),
+            }),
+        });
+    }
+    if let Some(service) = service {
+        let dependencies = raw.service_dependencies.as_deref();
+        ensure!(
+            dependencies.is_none_or(|values| values.len() <= 16),
+            "Too many dependencies"
+        );
+        records.push(NormalizedRecord {
+            kind: RecordKind::ServiceDependency,
+            observation: if dependencies.is_some() {
+                Observation::Healthy
+            } else {
+                Observation::Unknown
+            },
+            subject_sha256: super::evidence::source_id_digest(service.as_bytes()),
+            detail: Some(SystemDetail::ServiceDependencies {
+                count: dependencies.map(|v| v.len() as u8),
+                truncated: raw.service_dependencies_truncated,
+                reason: dependencies.is_none().then_some(MissingReason::Unavailable),
+            }),
+        });
+        for name in dependencies.unwrap_or_default() {
+            ensure!(
+                !name.is_empty() && name.len() <= 80 && !name.chars().any(char::is_control),
+                "Invalid dependency name"
+            );
+            records.push(NormalizedRecord {
+                kind: RecordKind::ServiceDependency,
+                observation: Observation::Healthy,
+                subject_sha256: super::evidence::source_id_digest(name.as_bytes()),
+                detail: Some(SystemDetail::ServiceDependency),
+            });
+        }
+    }
+    let events = raw.events.as_deref();
+    ensure!(
+        events.is_none_or(|values| values.len() <= 20),
+        "Too many event summaries"
+    );
+    if matches!(request.scope, BoundScope::WindowsWinRm { .. }) {
+        if let Some(events) = events {
+            for event in events {
+                ensure!(
+                    !event.provider.is_empty()
+                        && event.provider.len() <= 80
+                        && !event.provider.chars().any(char::is_control),
+                    "Invalid event provider"
+                );
+                let at = instant(event.at_ms)?;
+                ensure!(
+                    at <= end && at >= end - chrono::Duration::minutes(5),
+                    "Event outside window"
+                );
+                records.push(NormalizedRecord {
+                    kind: RecordKind::Event,
+                    observation: Observation::Degraded,
+                    subject_sha256: super::evidence::source_id_digest(event.provider.as_bytes()),
+                    detail: Some(SystemDetail::Event {
+                        id: event.id,
+                        level: event.level,
+                        observed_at: at,
+                    }),
+                });
+            }
+        } else {
+            records.push(NormalizedRecord {
+                kind: RecordKind::Event,
+                observation: Observation::Unknown,
+                subject_sha256: subject.clone(),
+                detail: None,
+            });
+        }
+    }
+    let extra = raw.interface_extra.as_deref();
+    ensure!(
+        extra.is_none_or(|v| v.len() == 4),
+        "Invalid interface counters"
+    );
+    let counters = extra.map(|v| {
+        v.iter()
+            .map(|v| bounded_integer(Some(*v)))
+            .collect::<Vec<_>>()
+    });
+    let known = interface.is_some()
+        && counters
+            .as_ref()
+            .is_some_and(|v| v.iter().all(Option::is_some));
+    records.push(NormalizedRecord {
+        kind: RecordKind::Interface,
+        observation: if known {
+            Observation::Healthy
+        } else {
+            Observation::Unknown
+        },
+        subject_sha256: interface
+            .map(|s| super::evidence::source_id_digest(s.as_bytes()))
+            .unwrap_or(subject.clone()),
+        detail: Some(SystemDetail::Interface {
+            rx_errors: counters.as_ref().and_then(|v| v[0]),
+            tx_errors: counters.as_ref().and_then(|v| v[1]),
+            rx_discards: counters.as_ref().and_then(|v| v[2]),
+            tx_discards: counters.as_ref().and_then(|v| v[3]),
+            reason: (!known).then_some(if interface.is_none() {
+                MissingReason::Unsupported
+            } else {
+                MissingReason::Unavailable
+            }),
+        }),
+    });
+    let tcp_after = pair(raw.tcp_after.as_ref());
+    let retrans = counter_delta(
+        &CounterSample {
+            value: pair(raw.tcp_before.as_ref()).map(|v| v.1),
+            at: start,
+            missing_reason: None,
+        },
+        &CounterSample {
+            value: tcp_after.map(|v| v.1),
+            at: end,
+            missing_reason: None,
+        },
+    );
+    let established = bounded_integer(tcp_after.map(|v| v.0));
+    let tcp_known = established.is_some() && retrans.value.is_some();
+    records.push(NormalizedRecord {
+        kind: RecordKind::Transport,
+        observation: if tcp_known {
+            Observation::Healthy
+        } else {
+            Observation::Unknown
+        },
+        subject_sha256: subject.clone(),
+        detail: Some(SystemDetail::Tcp {
+            established,
+            retransmits_per_second: retrans.value,
+            reason: (!tcp_known)
+                .then_some(retrans.missing_reason.unwrap_or(MissingReason::Unavailable)),
+        }),
+    });
+    let listening = bounded_integer(raw.listening_tcp);
+    records.push(NormalizedRecord {
+        kind: RecordKind::Transport,
+        observation: if listening.is_some() {
+            Observation::Healthy
+        } else {
+            Observation::Unknown
+        },
+        subject_sha256: subject,
+        detail: Some(SystemDetail::Sockets {
+            listening_tcp: listening,
+            reason: listening.is_none().then_some(MissingReason::Unavailable),
+        }),
+    });
+    Ok(records)
 }
 
 fn normalize_snapshot(
@@ -350,7 +645,15 @@ fn normalize_snapshot(
             Observation::Unknown
         },
         subject_sha256: request.scope.resource_digest()?,
+        detail: None,
     }];
+    let details = system_details(&raw, request, service, interface, start, end)?;
+    let detail_expected = details.len() as u32;
+    let detail_observed = details
+        .iter()
+        .filter(|r| r.observation != Observation::Unknown)
+        .count() as u32;
+    records.extend(details);
     if let Some(service) = service {
         let observation = match raw.service_state.as_deref() {
             Some("Running" | "active") => Observation::Healthy,
@@ -362,23 +665,32 @@ fn normalize_snapshot(
             kind: RecordKind::Service,
             observation,
             subject_sha256: digest,
+            detail: None,
         });
         if request.capability_id == super::manifest::CapabilityId::ServiceStatus {
+            let service_records: Vec<_> = records
+                .into_iter()
+                .filter(|r| matches!(r.kind, RecordKind::Service | RecordKind::ServiceDependency))
+                .collect();
+            let service_observed = service_records
+                .iter()
+                .filter(|r| r.observation != Observation::Unknown)
+                .count() as u32;
+            let service_expected = service_records.len() as u32;
             return Ok(ProbeOutput {
-                status: if observation == Observation::Unknown {
+                status: if raw.service_dependencies_truncated {
+                    EvidenceStatus::Truncated
+                } else if service_observed < service_expected {
                     EvidenceStatus::Partial
                 } else {
                     EvidenceStatus::Complete
                 },
                 coverage: Coverage {
-                    observed: u32::from(observation != Observation::Unknown),
-                    expected: 1,
-                    truncated: false,
+                    observed: service_observed,
+                    expected: service_expected,
+                    truncated: raw.service_dependencies_truncated,
                 },
-                records: records
-                    .into_iter()
-                    .filter(|r| r.kind == RecordKind::Service)
-                    .collect(),
+                records: service_records,
                 metrics: vec![],
                 evidence_refs: vec![],
                 source_id: format!("service:{}", request.binding.scope_sha256).into_bytes(),
@@ -388,11 +700,22 @@ fn normalize_snapshot(
         }
     }
     Ok(ProbeOutput {
-        status,
+        status: if raw.events_truncated
+            || raw.events_metadata_truncated
+            || raw.service_dependencies_truncated
+        {
+            EvidenceStatus::Truncated
+        } else if observed + detail_observed == expected + detail_expected {
+            EvidenceStatus::Complete
+        } else {
+            EvidenceStatus::Partial
+        },
         coverage: Coverage {
-            observed,
-            expected,
-            truncated: raw.events_truncated,
+            observed: observed + detail_observed,
+            expected: expected + detail_expected,
+            truncated: raw.events_truncated
+                || raw.events_metadata_truncated
+                || raw.service_dependencies_truncated,
         },
         records,
         metrics,
@@ -438,6 +761,7 @@ fn tool_gap(request: &ProbeRequest, failure: ProcessFailure) -> Result<ProbeOutp
             kind: RecordKind::System,
             observation: Observation::Unknown,
             subject_sha256: request.scope.resource_digest()?,
+            detail: None,
         }],
         metrics: vec![],
         evidence_refs: vec![],
@@ -459,6 +783,7 @@ fn permission_gap(request: &ProbeRequest) -> Result<ProbeOutput> {
             kind: RecordKind::System,
             observation: Observation::Unknown,
             subject_sha256: request.scope.resource_digest()?,
+            detail: None,
         }],
         metrics: vec![],
         evidence_refs: vec![],

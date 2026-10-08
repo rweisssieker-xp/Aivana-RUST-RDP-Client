@@ -65,7 +65,10 @@ pub(super) fn show(ui: &mut Ui, case: &HelperCase, store: &HelperStore) {
                     ));
                 }
                 for record in &item.records {
-                    ui.label(format!("{:?}: {:?}", record.kind, record.observation));
+                    ui.label(format!(
+                        "{:?}: {:?} · {:?}",
+                        record.kind, record.observation, record.detail
+                    ));
                 }
                 if item.origin != Origin::Live {
                     ui.label("Unverified import/fixture; cannot establish live proof.");

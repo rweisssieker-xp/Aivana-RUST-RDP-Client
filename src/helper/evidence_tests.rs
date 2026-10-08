@@ -58,6 +58,7 @@ fn envelope(binding: EvidenceBinding) -> EvidenceEnvelope {
             kind: RecordKind::Network,
             observation: Observation::Healthy,
             subject_sha256: "b".repeat(64),
+            detail: None,
         }],
         metrics: vec![],
         sql_observations: vec![],
@@ -196,6 +197,7 @@ fn origin_time_coverage_and_limits_are_ineligible_or_rejected() {
             kind: RecordKind::Network,
             observation: Observation::Healthy,
             subject_sha256: "a".repeat(64),
+            detail: None,
         })
         .collect();
     assert!(e.validate_shape().is_err());

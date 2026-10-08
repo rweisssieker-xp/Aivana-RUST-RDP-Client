@@ -4,7 +4,7 @@ use crate::{
     helper::{
         capability::ProbeRequest,
         credentials::{PersistentSecretResolver, SecretResolver},
-        evidence::EvidenceBinding,
+        evidence::{EvidenceBinding, Origin},
         manifest::{CapabilityId, ProbeParams},
         scope::{BoundScope, CredentialPurpose},
         worker::{self, WorkerOutcome},
@@ -24,6 +24,12 @@ pub(super) struct SystemInputs {
     service: String,
     http_status: String,
     http_body_sha256: String,
+}
+
+pub(super) struct CaptureJob {
+    case_id: Uuid,
+    scope_digest: String,
+    capability_id: CapabilityId,
 }
 
 fn current_profile_matches(scope: &BoundScope, profiles: &[ConnectionProfile]) -> bool {
@@ -149,6 +155,17 @@ pub(super) fn show(
                 .as_ref()
                 .map(|resolver| resolver as &dyn SecretResolver),
         );
+        let (tool_ready, tool_status) = if matches!(
+            scope,
+            BoundScope::WindowsWinRm { .. } | BoundScope::Linux { .. }
+        ) {
+            crate::helper::process::system_collector_readiness(scope)
+        } else {
+            (
+                true,
+                "Local client available; remote access checked on capture",
+            )
+        };
         let name = match scope {
             BoundScope::Http { .. } => "HTTP health",
             BoundScope::Database {
@@ -190,7 +207,7 @@ pub(super) fn show(
                         credential_resolver
                             .as_ref()
                             .map(|resolver| resolver as &dyn SecretResolver),
-                    ),
+                    ) && tool_ready,
                     egui::Button::new("Collect"),
                 )
                 .clicked()
@@ -198,6 +215,41 @@ pub(super) fn show(
                 state.collect(case.id(), index, profiles);
             }
         });
+        ui.label(format!(
+            "Local tool/auth: {tool_status}; remote permission: unknown until live capture"
+        ));
+        let capability_ids: &[CapabilityId] = match scope {
+            BoundScope::WindowsWinRm { .. } | BoundScope::Linux { .. } => {
+                &[CapabilityId::SystemResources, CapabilityId::ServiceStatus]
+            }
+            BoundScope::Http { tls: true, .. } => &[
+                CapabilityId::NetworkDns,
+                CapabilityId::NetworkTls,
+                CapabilityId::HttpHealth,
+            ],
+            BoundScope::Http { .. } => &[CapabilityId::NetworkDns, CapabilityId::HttpHealth],
+            _ => &[CapabilityId::NetworkReachability],
+        };
+        if let Ok(digest) = scope.digest() {
+            for capability in capability_ids {
+                let live = case.evidence().iter().rev().find(|item| {
+                    item.binding.scope_sha256 == digest
+                        && item.capability_id == *capability
+                        && item.origin == Origin::Live
+                });
+                let last = state.last_capture.get(&(digest.clone(), *capability));
+                ui.label(format!(
+                    "{:?}: {} · last attempt: {}",
+                    capability,
+                    live.map(|item| format!(
+                        "live {:?} ({}/{})",
+                        item.status, item.coverage.observed, item.coverage.expected
+                    ))
+                    .unwrap_or_else(|| "no live evidence; fixture is not live".into()),
+                    last.map(String::as_str).unwrap_or("none")
+                ));
+            }
+        }
         if matches!(
             scope,
             BoundScope::WindowsWinRm { .. }
@@ -206,8 +258,11 @@ pub(super) fn show(
                     ..
                 }
         ) {
-            ui.label("Supported: CPU two samples, memory, selected disk, process count, selected interface RX/TX rates, selected service. Missing counters stay unknown. Remote permission and live coverage are measured only after capture.");
-            ui.label("WinRM uses current Windows identity; Linux uses the current default OpenSSH identity. Saved passwords are not sent.");
+            ui.label("Supported: two-sample CPU/interface rates, memory/commit, selected disk, bounded process resources, OS/uptime/load, service dependencies, transport counters, and Windows event metadata. Missing fields remain unknown.");
+            ui.label("WinRM uses the current Windows identity; SSH uses current-account keys and known_hosts. Saved passwords are not sent.");
+            if matches!(scope, BoundScope::Linux { .. }) {
+                ui.label("Unsupported on Linux: Windows System event count and metadata. Missing permissions and tools show unknown live coverage.");
+            }
             ui.horizontal(|ui| {
                 ui.label("Mount/volume");
                 ui.text_edit_singleline(&mut state.system_inputs.mount);
@@ -219,7 +274,7 @@ pub(super) fn show(
                 ui.text_edit_singleline(&mut state.system_inputs.service);
                 if ui
                     .add_enabled(
-                        profile_current,
+                        profile_current && tool_ready,
                         egui::Button::new("Collect selected system metrics"),
                     )
                     .clicked()
@@ -238,7 +293,7 @@ pub(super) fn show(
                 }
                 if ui
                     .add_enabled(
-                        profile_current && !state.system_inputs.service.is_empty(),
+                        profile_current && tool_ready && !state.system_inputs.service.is_empty(),
                         egui::Button::new("Check service"),
                     )
                     .clicked()
@@ -322,7 +377,7 @@ pub(super) fn show(
     let jobs: Vec<_> = state
         .collect_jobs
         .iter()
-        .filter(|(_, case_id)| **case_id == case.id())
+        .filter(|(_, job)| job.case_id == case.id())
         .map(|(request_id, _)| *request_id)
         .collect();
     for request_id in jobs {
@@ -459,12 +514,17 @@ impl HelperState {
             store.cancel_pending_capture(id)?;
             anyhow::bail!("Capture intent could not be persisted");
         }
+        let job = CaptureJob {
+            case_id,
+            scope_digest: request.binding.scope_sha256.clone(),
+            capability_id,
+        };
         if let Err(error) = worker.submit(request) {
             store.cancel_pending_capture(id)?;
             let _ = store.save(path);
             return Err(error);
         }
-        self.collect_jobs.insert(id, case_id);
+        self.collect_jobs.insert(id, job);
         Ok(id)
     }
 
@@ -482,9 +542,10 @@ impl HelperState {
             .map(worker::HelperWorker::poll)
             .unwrap_or_default();
         for event in events {
-            let Some(case_id) = self.collect_jobs.remove(&event.request_id) else {
+            let Some(job) = self.collect_jobs.remove(&event.request_id) else {
                 continue;
             };
+            let case_id = job.case_id;
             let Some(store) = self.store.as_mut() else {
                 continue;
             };
@@ -527,6 +588,8 @@ impl HelperState {
                     }
                 }
             };
+            self.last_capture
+                .insert((job.scope_digest, job.capability_id), status.to_owned());
             self.notice = if let Some(path) = self.path.as_ref() {
                 if store.save(path).is_ok() {
                     status.into()

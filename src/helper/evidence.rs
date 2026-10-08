@@ -109,6 +109,12 @@ pub enum RecordKind {
     Network,
     Service,
     System,
+    Process,
+    ServiceDependency,
+    Event,
+    Interface,
+    Transport,
+    OsIdentity,
     SqlRead,
     SqlPlan,
     Container,
@@ -131,6 +137,93 @@ pub struct NormalizedRecord {
     pub observation: Observation,
     /// Stable opaque identity digest; no hostnames, provider payloads or query literals.
     pub subject_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<SystemDetail>,
+}
+
+/// Closed, capped system facts. Names are represented only by the record's
+/// subject digest; command lines, event bodies and provider objects never enter evidence.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SystemDetail {
+    Os {
+        family: OsFamily,
+        reported_host_sha256: Option<String>,
+        version: Option<String>,
+        uptime_seconds: Option<u64>,
+        load_one: Option<f64>,
+        reason: Option<MissingReason>,
+    },
+    Process {
+        memory_bytes: Option<u64>,
+        cpu_seconds: Option<f64>,
+        reason: Option<MissingReason>,
+    },
+    ServiceDependencies {
+        count: Option<u8>,
+        truncated: bool,
+        reason: Option<MissingReason>,
+    },
+    ServiceDependency,
+    Event {
+        id: u32,
+        level: u8,
+        observed_at: DateTime<Utc>,
+    },
+    Interface {
+        rx_errors: Option<u64>,
+        tx_errors: Option<u64>,
+        rx_discards: Option<u64>,
+        tx_discards: Option<u64>,
+        reason: Option<MissingReason>,
+    },
+    Tcp {
+        established: Option<u64>,
+        retransmits_per_second: Option<f64>,
+        reason: Option<MissingReason>,
+    },
+    Sockets {
+        listening_tcp: Option<u64>,
+        reason: Option<MissingReason>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OsFamily {
+    Windows,
+    Linux,
+}
+
+impl SystemDetail {
+    fn validate(&self) -> bool {
+        let finite = |value: &Option<f64>| value.is_none_or(|v| v.is_finite() && v >= 0.0);
+        match self {
+            Self::Os {
+                reported_host_sha256,
+                version,
+                load_one,
+                ..
+            } => {
+                reported_host_sha256.as_ref().is_none_or(|v| is_digest(v))
+                    && version.as_ref().is_none_or(|v| {
+                        v.len() <= 48
+                            && v.bytes().all(|b| {
+                                b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_')
+                            })
+                    })
+                    && finite(load_one)
+            }
+            Self::Process { cpu_seconds, .. } => finite(cpu_seconds),
+            Self::ServiceDependencies { count, .. } => count.is_none_or(|n| n <= 16),
+            Self::Event { id, level, .. } => *id <= 65535 && *level <= 5,
+            Self::Tcp {
+                retransmits_per_second,
+                ..
+            } => finite(retransmits_per_second),
+            Self::ServiceDependency | Self::Interface { .. } | Self::Sockets { .. } => true,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -364,7 +457,8 @@ impl EvidenceEnvelope {
             "Evidence item limit exceeded"
         );
         ensure!(
-            self.records.iter().all(|r| is_digest(&r.subject_sha256)),
+            self.records.iter().all(|r| is_digest(&r.subject_sha256)
+                && r.detail.as_ref().is_none_or(SystemDetail::validate)),
             "Invalid record subject"
         );
         ensure!(
