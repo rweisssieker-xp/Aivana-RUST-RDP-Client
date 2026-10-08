@@ -627,9 +627,10 @@ impl AivanaApp {
                 let Some(binding) = worker.binding else {
                     return;
                 };
-                let matches = self
-                    .repair_binding(i)
-                    .is_ok_and(|current| current == binding)
+                let matches = self.execution.reviewed
+                    && self
+                        .repair_binding(i)
+                        .is_ok_and(|current| current == binding)
                     && receipt.consume_id != Uuid::nil()
                     && binding
                         .fingerprint()
@@ -642,6 +643,7 @@ impl AivanaApp {
                 if !matches {
                     self.execution.repair_message = "Approval consumed, but local evidence changed; Apply blocked. Recapture and request again".into();
                     self.execution.repair_approval = None;
+                    self.execution.repair_receipt = None;
                     return;
                 }
                 self.execution.repair_receipt = Some(RepairReceipt {
@@ -662,19 +664,62 @@ impl AivanaApp {
                 self.execution_drive();
             }
             Ok(RepairWorkerResult::Outcome(event_id)) => {
-                for run in &mut self.execution.book.runs {
-                    for target in &mut run.targets {
+                self.record_repair_outcome_ack(event_id);
+            }
+        }
+    }
+
+    fn prepare_repair_outcome_delivery(
+        &mut self,
+        origin: &str,
+        event: &RepairOutcomeEvent,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.execution.book.runs.iter().any(|run| {
+                matches!(&run.approval_mode, ApprovalMode::TeamControlled { server_origin } if server_origin == origin)
+                    && run.targets.iter().any(|target| {
+                        target.outcome.as_ref().is_some_and(|marker| {
+                            !marker.delivered && marker.event == *event
+                        })
+                    })
+            }),
+            "Pending repair outcome changed"
+        );
+        anyhow::ensure!(
+            self.execution_save(),
+            "Save the repair outcome journal before sending it"
+        );
+        Ok(())
+    }
+
+    fn record_repair_outcome_ack(&mut self, event_id: Uuid) {
+        let marker = self
+            .execution
+            .book
+            .runs
+            .iter_mut()
+            .flat_map(|run| &mut run.targets)
+            .filter_map(|target| target.outcome.as_mut())
+            .find(|marker| marker.event.event_id == event_id);
+        let Some(marker) = marker else {
+            self.execution.repair_message = "Outcome acknowledgement has no pending event".into();
+            return;
+        };
+        marker.delivered = true;
+        if self.execution_save() {
+            self.execution.repair_message = "Outcome recorded centrally".into();
+        } else {
+            for run in &mut self.execution.book.runs {
+                for target in &mut run.targets {
                     if let Some(marker) = &mut target.outcome
                         && marker.event.event_id == event_id
                     {
-                        marker.delivered = true;
-                        }
+                        marker.delivered = false;
                     }
                 }
-                if self.execution_save() {
-                    self.execution.repair_message = "Outcome recorded centrally".into();
-                }
             }
+            self.execution.repair_message =
+                "Team acknowledged outcome, but journal save failed; retry the same event after recovery".into();
         }
     }
 
@@ -712,8 +757,9 @@ impl AivanaApp {
                 changed = true;
             }
         }
-        if changed {
-            let _ = self.execution_save();
+        if changed && !self.execution_save() {
+            self.execution.repair_message =
+                "Outcome pending locally; journal unavailable; central delivery blocked".into();
         }
     }
     pub(super) fn execution_incident_records(&self) -> Vec<crate::incident::Record> {
@@ -1082,7 +1128,8 @@ impl AivanaApp {
             let receipt = self.execution.repair_receipt.as_ref();
             match (binding, receipt) {
                 (Ok(binding), Some(receipt))
-                    if receipt.generation == self.team.repair_generation()
+                        if self.execution.reviewed
+                            && receipt.generation == self.team.repair_generation()
                         && receipt.run_id == r.id
                         && receipt.target_index == r.current
                         && receipt.binding == binding =>
@@ -1158,7 +1205,12 @@ impl AivanaApp {
                 #[cfg(not(test))]
                 let enqueued = self.execution.queue.enqueue(spec);
                 match enqueued {
-                    Ok(id) => self.execution.remote = Some(id),
+                    Ok(id) => {
+                        self.execution.remote = Some(id);
+                        if phase == Phase::Apply {
+                            self.execution.reviewed = false;
+                        }
+                    }
                     Err(e) => self.execution_fail(e),
                 }
             }
@@ -1605,12 +1657,15 @@ impl AivanaApp {
                         ));
                         if ui
                             .add_enabled(
-                                self.execution.repair_worker.is_none(),
+                                    self.execution.repair_worker.is_none()
+                                        && self.execution.error.is_none(),
                                 egui::Button::new(format!("Send outcome##{}", event.event_id)),
                             )
                             .clicked()
                         {
-                            match self.team.repair_client().and_then(|(_, _, connected)| {
+                            match self.prepare_repair_outcome_delivery(&origin, &event)
+                                .and_then(|()| self.team.repair_client())
+                                .and_then(|(_, _, connected)| {
                                 anyhow::ensure!(
                                     connected == origin,
                                     "Connect to the original team server to send this outcome"
@@ -1820,11 +1875,134 @@ mod repair_execution_tests {
             },
         };
         app.execution.selected = Some(1);
+        app.execution.reviewed = true;
         app.execution.fake_enqueue_count = Some(0);
         let path =
             std::env::temp_dir().join(format!("relayne-repair-gate-{}.dpapi", Uuid::new_v4()));
         app.execution.journal_path_override = Some(path.clone());
         (app, path)
+    }
+
+    fn finish_with_pending_outcome(app: &mut AivanaApp) -> RepairOutcomeEvent {
+        let target = &mut app.execution.book.runs[1].targets[0];
+        target.apply_attempted = true;
+        target.approval_id = Some(Uuid::new_v4());
+        target.phase = Phase::Unknown;
+        app.sync_repair_outcomes();
+        app.execution.book.runs[1].targets[0]
+            .outcome
+            .as_ref()
+            .unwrap()
+            .event
+            .clone()
+    }
+
+    #[test]
+    fn withdrawn_review_during_consume_and_at_final_dispatch_never_enqueues() {
+        let (mut app, path) = app_with_reviewed_run();
+        app.execution.book.runs[1].targets[0].phase = Phase::Review;
+        let binding = app.repair_binding(1).unwrap();
+        let fingerprint = binding.fingerprint().unwrap();
+        let approval_id = Uuid::new_v4();
+        app.execution.repair_approval = Some(RepairApproval {
+            id: approval_id,
+            request_id: Uuid::new_v4(),
+            binding: binding.clone(),
+            fingerprint: fingerprint.clone(),
+            requester: "alice".into(),
+            approver: Some("bob".into()),
+            state: repair_approval::RepairState::Approved,
+            expires_at: Utc::now() + chrono::Duration::minutes(2),
+        });
+        let (tx, receiver) = mpsc::channel();
+        tx.send(Ok(RepairWorkerResult::Consumed(
+            crate::repair_approval::ConsumeReceipt {
+                approval_id,
+                consume_id: Uuid::new_v4(),
+                fingerprint,
+            },
+        )))
+        .unwrap();
+        app.execution.repair_worker = Some(RepairWorker {
+            generation: app.team.repair_generation(),
+            run_id: Some(binding.run_id),
+            target_index: Some(0),
+            binding: Some(binding.clone()),
+            receiver,
+        });
+        app.execution.reviewed = false;
+        app.poll_repair_worker();
+        assert_eq!(app.execution.book.runs[1].targets[0].phase, Phase::Review);
+        assert_eq!(app.execution.fake_enqueue_count, Some(0));
+        assert!(app.execution.repair_receipt.is_none());
+
+        app.execution.book.runs[1].targets[0].phase = Phase::Apply;
+        app.execution.repair_receipt = Some(RepairReceipt {
+            generation: app.team.repair_generation(),
+            run_id: binding.run_id,
+            target_index: 0,
+            binding,
+            approval_id,
+        });
+        app.execution_drive();
+        assert_eq!(app.execution.book.runs[1].targets[0].phase, Phase::Review);
+        assert_eq!(app.execution.fake_enqueue_count, Some(0));
+        assert!(app.execution.repair_receipt.is_none());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn outcome_save_failure_before_first_send_blocks_delivery() {
+        let (mut app, path) = app_with_reviewed_run();
+        app.execution.journal_path_override = Some(path.join("missing-parent"));
+        let event = finish_with_pending_outcome(&mut app);
+        assert!(app.execution.error.is_some());
+        assert!(
+            app.prepare_repair_outcome_delivery("http://127.0.0.1:47831", &event)
+                .is_err()
+        );
+        assert!(app.execution.repair_worker.is_none());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn failed_ack_save_keeps_exact_pending_event_for_restart_and_idempotent_retry() {
+        let (mut app, path) = app_with_reviewed_run();
+        let event = finish_with_pending_outcome(&mut app);
+        assert!(
+            app.prepare_repair_outcome_delivery("http://127.0.0.1:47831", &event)
+                .is_ok()
+        );
+        app.execution.journal_path_override = Some(path.join("missing-parent"));
+        app.record_repair_outcome_ack(event.event_id);
+        assert!(app.execution.error.is_some());
+        assert!(
+            !app.execution.book.runs[1].targets[0]
+                .outcome
+                .as_ref()
+                .unwrap()
+                .delivered
+        );
+
+        app.execution.book = Journal::load(&path).unwrap();
+        app.execution.error = None;
+        app.execution.journal_path_override = Some(path.clone());
+        let restored = app.execution.book.runs[1].targets[0]
+            .outcome
+            .as_ref()
+            .unwrap();
+        assert_eq!(restored.event, event);
+        assert!(!restored.delivered);
+        assert!(
+            app.prepare_repair_outcome_delivery("http://127.0.0.1:47831", &event)
+                .is_ok()
+        );
+        app.record_repair_outcome_ack(event.event_id);
+        let persisted = Journal::load(&path).unwrap();
+        let persisted = persisted.runs[1].targets[0].outcome.as_ref().unwrap();
+        assert_eq!(persisted.event, event);
+        assert!(persisted.delivered);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -1922,11 +2100,12 @@ mod repair_execution_tests {
             generation: app.team.repair_generation(),
             run_id: binding.run_id,
             target_index: 0,
-            binding,
+            binding: binding.clone(),
             approval_id,
         });
         app.execution_drive();
         assert_eq!(app.execution.fake_enqueue_count, Some(1));
+        assert!(!app.execution.reviewed);
         assert!(app.execution.repair_receipt.is_none());
         assert!(app.execution.book.runs[1].targets[0].apply_attempted);
         assert_eq!(
@@ -1934,6 +2113,17 @@ mod repair_execution_tests {
             Some(approval_id)
         );
         app.execution.remote = None;
+        app.execution.book.runs[1].targets[0].phase = Phase::Apply;
+        app.execution.repair_receipt = Some(RepairReceipt {
+            generation: app.team.repair_generation(),
+            run_id: binding.run_id,
+            target_index: 0,
+            binding,
+            approval_id,
+        });
+        app.execution_drive();
+        assert_eq!(app.execution.fake_enqueue_count, Some(1));
+        assert_eq!(app.execution.book.runs[1].targets[0].phase, Phase::Review);
         app.team = crate::app::team_panel::TeamState::default(); // no token or server session
         app.execution.book.runs[1].targets[0].phase = Phase::Restore;
         app.execution_drive();
