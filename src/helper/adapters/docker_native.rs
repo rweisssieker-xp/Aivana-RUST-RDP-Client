@@ -201,6 +201,7 @@ impl PipeHttp {
             reviewed_image_sha256,
             cancel,
             deadline,
+            PEER_VERIFICATIONS.clone(),
             super::docker_peer::verify_pipe_peer,
         )
         .await
@@ -211,6 +212,7 @@ impl PipeHttp {
         reviewed_image_sha256: &str,
         cancel: &CancellationToken,
         deadline: Instant,
+        semaphore: Arc<Semaphore>,
         verifier: F,
     ) -> Result<Self>
     where
@@ -234,7 +236,7 @@ impl PipeHttp {
             biased;
             _ = cancel.cancelled() => anyhow::bail!("Canceled"),
             _ = tokio::time::sleep_until(deadline.into()) => anyhow::bail!("Docker capture expired"),
-            permit = PEER_VERIFICATIONS.clone().acquire_owned() => permit?,
+            permit = semaphore.acquire_owned() => permit?,
         };
         ensure!(
             !cancel.is_cancelled() && Instant::now() < deadline,
@@ -592,6 +594,7 @@ mod peer_verification_tests {
                     &reviewed_hash,
                     &cancel,
                     deadline,
+                    Arc::new(Semaphore::new(2)),
                     move |handle, _, _, _, _| {
                         started_in_verifier.store(true, Ordering::SeqCst);
                         std::thread::sleep(std::time::Duration::from_millis(220));
@@ -630,6 +633,7 @@ mod peer_verification_tests {
             .unwrap();
         runtime.block_on(async {
             let active = Arc::new(AtomicUsize::new(0));
+            let semaphore = Arc::new(Semaphore::new(2));
             let (release_tx, release_rx) = mpsc::channel::<()>();
             let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
             let mut tasks = Vec::new();
@@ -642,12 +646,14 @@ mod peer_verification_tests {
                 tokens.push(cancel.clone());
                 let active = active.clone();
                 let release_rx = release_rx.clone();
+                let semaphore = semaphore.clone();
                 tasks.push(tokio::spawn(async move {
                     PipeHttp::open_with(
                         &path,
                         &"a".repeat(64),
                         &cancel,
                         Instant::now() + std::time::Duration::from_secs(2),
+                        semaphore,
                         move |_, _, _, _, _| {
                             active.fetch_add(1, Ordering::SeqCst);
                             release_rx.lock().unwrap().recv().unwrap();
@@ -682,6 +688,7 @@ mod peer_verification_tests {
                 &"a".repeat(64),
                 &CancellationToken::new(),
                 Instant::now() + std::time::Duration::from_millis(60),
+                semaphore,
                 move |_, _, _, _, _| {
                     entered_verifier.fetch_add(1, Ordering::SeqCst);
                     anyhow::bail!("Unexpected verifier entry")
