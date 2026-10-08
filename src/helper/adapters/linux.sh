@@ -35,7 +35,7 @@ process_count=$(ps -e -o pid= 2>/dev/null | awk 'NF {count++} END {if(NR>0) prin
 processes=$(ps -eo comm=,rss=,time= --sort=-rss 2>/dev/null | awk '
     NR<=5 && $2 ~ /^[0-9]+$/ {
         name=$1; gsub(/[^A-Za-z0-9_.-]/,"_",name); name=substr(name,1,64);
-        split($3,t,":"); seconds=0; for(i=1;i<=length(t);i++) seconds=seconds*60+t[i];
+        parts=split($3,t,":"); seconds=0; for(i=1;i<=parts;i++) seconds=seconds*60+t[i];
         printf "%s,%d,%d;",name,$2*1024,seconds
     }' || true)
 os_version=$(awk -F= '$1=="VERSION_ID" {gsub(/"/,"",$2); gsub(/[^A-Za-z0-9._-]/,"",$2); print substr($2,1,48); exit}' /etc/os-release 2>/dev/null || true)

@@ -312,6 +312,7 @@ async fn fixed_linux_script_executes_through_bounded_child_and_closed_parser() {
     let output = crate::helper::process::run_fixed_tool(
         crate::helper::process::FixedToolOperation::TestLocalLinuxScript {
             shell: shell.clone(),
+            fixture_processes: false,
         },
         tokio_util::sync::CancellationToken::new(),
         std::time::Duration::from_secs(8),
@@ -326,7 +327,10 @@ async fn fixed_linux_script_executes_through_bounded_child_and_closed_parser() {
     canceled.cancel();
     assert_eq!(
         crate::helper::process::run_fixed_tool(
-            crate::helper::process::FixedToolOperation::TestLocalLinuxScript { shell },
+            crate::helper::process::FixedToolOperation::TestLocalLinuxScript {
+                shell,
+                fixture_processes: false,
+            },
             canceled,
             std::time::Duration::from_secs(8),
         )
@@ -335,6 +339,36 @@ async fn fixed_linux_script_executes_through_bounded_child_and_closed_parser() {
         .unwrap(),
         ProcessFailure::Canceled
     );
+}
+
+#[tokio::test]
+async fn linux_process_fixture_emits_top_processes_with_system_awk() {
+    #[cfg(windows)]
+    let shell = std::path::PathBuf::from(r"C:\Program Files\Git\usr\bin\sh.exe");
+    #[cfg(not(windows))]
+    let shell = std::path::PathBuf::from("/bin/sh");
+    if !shell.is_file() {
+        return;
+    }
+    let output = crate::helper::process::run_fixed_tool(
+        crate::helper::process::FixedToolOperation::TestLocalLinuxScript {
+            shell,
+            fixture_processes: true,
+        },
+        tokio_util::sync::CancellationToken::new(),
+        std::time::Duration::from_secs(30),
+    )
+    .await
+    .unwrap();
+    let parsed = linux::parse_snapshot(&output.stdout).unwrap();
+    assert_eq!(parsed.process_count, Some(2.0));
+    let processes = parsed.processes.unwrap();
+    assert_eq!(processes.len(), 2);
+    assert_eq!(processes[0].name, "alpha");
+    assert_eq!(processes[0].memory_bytes, Some(125_952.0));
+    assert_eq!(processes[0].cpu_seconds, Some(3_723.0));
+    assert_eq!(processes[1].name, "beta");
+    assert_eq!(processes[1].cpu_seconds, Some(245.0));
 }
 
 #[cfg(windows)]

@@ -196,6 +196,7 @@ pub(crate) enum FixedToolOperation {
     #[cfg(test)]
     TestLocalLinuxScript {
         shell: std::path::PathBuf,
+        fixture_processes: bool,
     },
     #[cfg(test)]
     TestLocalWindowsScript {
@@ -326,13 +327,18 @@ impl FixedToolOperation {
                 ))
             }
             #[cfg(test)]
-            Self::TestLocalLinuxScript { .. } => Ok(Some(
-                [
-                    b"PATH=/usr/bin:/bin\nservice=''\nmount='/'\ninterface=''\n".as_slice(),
-                    include_str!("adapters/linux.sh").as_bytes(),
-                ]
-                .concat(),
-            )),
+            Self::TestLocalLinuxScript {
+                fixture_processes, ..
+            } => {
+                let prelude = if *fixture_processes {
+                    b"PATH=/usr/bin:/bin\nservice=''\nmount='/'\ninterface=''\nps() { case \"$1\" in -eo) printf 'alpha 123 01:02:03\\nbeta 20 00:04:05\\n' ;; -e) printf '1\\n2\\n' ;; esac; }\n".as_slice()
+                } else {
+                    b"PATH=/usr/bin:/bin\nservice=''\nmount='/'\ninterface=''\n".as_slice()
+                };
+                Ok(Some(
+                    [prelude, include_str!("adapters/linux.sh").as_bytes()].concat(),
+                ))
+            }
             _ => Ok(None),
         }
     }
@@ -381,7 +387,7 @@ impl FixedToolOperation {
             std::env::current_exe()
                 .map_err(|_| ProcessFailure::Spawn)?
                 .into_os_string()
-        } else if let Self::TestLocalLinuxScript { shell } = &self {
+        } else if let Self::TestLocalLinuxScript { shell, .. } = &self {
             shell.as_os_str().to_os_string()
         } else {
             OsString::from(program)
@@ -799,7 +805,7 @@ async fn run_with_limit(
     };
     #[cfg(test)]
     let local_shell_path = match &operation {
-        FixedToolOperation::TestLocalLinuxScript { shell } => {
+        FixedToolOperation::TestLocalLinuxScript { shell, .. } => {
             shell.parent().map(std::path::Path::to_path_buf)
         }
         _ => None,
@@ -1202,6 +1208,7 @@ mod tests {
         let failure = run_with_limit(
             FixedToolOperation::TestLocalLinuxScript {
                 shell: shell.clone(),
+                fixture_processes: false,
             },
             CancellationToken::new(),
             Duration::from_secs(30),
@@ -1212,7 +1219,10 @@ mod tests {
         .unwrap();
         assert_eq!(failure, ProcessFailure::OutputLimit);
         let failure = run_with_limit(
-            FixedToolOperation::TestLocalLinuxScript { shell },
+            FixedToolOperation::TestLocalLinuxScript {
+                shell,
+                fixture_processes: false,
+            },
             CancellationToken::new(),
             Duration::from_millis(1),
             MAX_TOOL_STDOUT,
