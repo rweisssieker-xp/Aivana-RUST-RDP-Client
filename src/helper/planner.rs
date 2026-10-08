@@ -198,7 +198,9 @@ pub fn params_match(id: CapabilityId, params: &ProbeParams) -> bool {
         ProbeParams::SqlRead { query_digest } | ProbeParams::SqlPlan { query_digest } => {
             Some(query_digest.as_str())
         }
-        ProbeParams::SqlWorkload { workload_digest } => Some(workload_digest.as_str()),
+        ProbeParams::SqlWorkload {
+            workload_digest, ..
+        } => Some(workload_digest.as_str()),
         _ => None,
     };
     shape && digest.is_none_or(super::evidence::is_digest)

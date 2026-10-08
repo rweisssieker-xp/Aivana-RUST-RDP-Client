@@ -39,6 +39,7 @@ fn envelope(binding: EvidenceBinding) -> EvidenceEnvelope {
         schema: EVIDENCE_SCHEMA,
         id: Uuid::new_v4(),
         binding,
+        request_intent_sha256: None,
         capability_id: CapabilityId::NetworkReachability,
         capability_version: 1,
         parser_version: 1,
@@ -62,6 +63,7 @@ fn envelope(binding: EvidenceBinding) -> EvidenceEnvelope {
         }],
         metrics: vec![],
         sql_observations: vec![],
+        sql_artifacts: vec![],
         evidence_refs: vec![],
     }
 }
@@ -82,6 +84,125 @@ fn legacy_evidence_without_sql_projection_round_trips() {
     let loaded: EvidenceEnvelope = serde_json::from_value(value.clone()).unwrap();
     assert!(loaded.sql_observations.is_empty());
     assert_eq!(serde_json::to_value(loaded).unwrap(), value);
+}
+
+#[test]
+fn imported_plan_artifact_round_trips_exports_and_expires_separately() {
+    use crate::helper::{
+        export::{ExportFormat, export_case},
+        sql::artifacts::{PlanArtifact, PlanOperator, SqlArtifact, SqlPlanFormat},
+    };
+    let (mut store, case_id, scope_sha256) = fixture();
+    let credential_scope_sha256 = store.case(case_id).unwrap().scopes()[0]
+        .credential_scope_digest()
+        .unwrap();
+    let mut item = envelope(EvidenceBinding {
+        case_id,
+        case_revision: store.case(case_id).unwrap().revision(),
+        request_id: Uuid::new_v4(),
+        scope_sha256,
+        credential_scope_sha256,
+        run_id: None,
+    });
+    item.capability_id = CapabilityId::SqlPlan;
+    item.origin = Origin::Live;
+    item.records.clear();
+    item.sql_artifacts = vec![SqlArtifact::Plan(PlanArtifact {
+        format: SqlPlanFormat::PostgresJson,
+        source_sha256: "b".repeat(64),
+        metadata_sha256: None,
+        template_sha256: "c".repeat(64),
+        operator_count: 1,
+        operators_truncated: false,
+        operators: vec![PlanOperator {
+            depth: 0,
+            name: "Sort".into(),
+            estimated_rows: Some(12.0),
+            estimated_cost: Some(1.0),
+            actual_rows: Some(11.0),
+            spill: false,
+            temp_io: false,
+        }],
+        has_spill_evidence: false,
+        has_temp_io: false,
+    })];
+    let evidence_id = item.id;
+    import_evidence(&mut store, case_id, item).unwrap();
+    let saved = store.case(case_id).unwrap().evidence().last().unwrap();
+    assert_eq!(saved.origin, Origin::ImportedUnverified);
+    assert_eq!(
+        saved.eligibility(Utc::now(), Duration::minutes(5)),
+        Eligibility::Imported
+    );
+    let dir = std::env::temp_dir().join(format!("relayne-sql-artifact-{}", Uuid::new_v4()));
+    let path = dir.join("cases.dpapi");
+    store.save(&path).unwrap();
+    let mut loaded = HelperStore::load(&path).unwrap();
+    let export = export_case(&loaded, case_id, ExportFormat::Json, Utc::now()).unwrap();
+    assert!(export.body.contains("\"sql_artifacts\""));
+    assert!(export.body.contains("\"actual_rows\""));
+    assert!(
+        loaded
+            .case(case_id)
+            .unwrap()
+            .evidence()
+            .last()
+            .unwrap()
+            .sql_artifacts
+            .len()
+            == 1
+    );
+    let later = Utc::now() + Duration::days(91);
+    assert_eq!(
+        loaded.prune_expired_sql_artifacts(case_id, later).unwrap(),
+        1
+    );
+    let saved = loaded
+        .case(case_id)
+        .unwrap()
+        .evidence()
+        .iter()
+        .find(|item| item.id == evidence_id)
+        .unwrap();
+    assert!(saved.sql_artifacts.is_empty());
+    assert_eq!(saved.content_sha256.len(), 64);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn accepted_capture_requires_exact_request_intent() {
+    use crate::helper::{
+        capability::ProbeRequest, manifest::ProbeParams, worker::built_in_registry,
+    };
+    let (mut store, case_id, _) = fixture();
+    let case = store.case(case_id).unwrap();
+    let scope = case.scopes()[0].clone();
+    let binding = EvidenceBinding {
+        case_id,
+        case_revision: case.revision(),
+        request_id: Uuid::new_v4(),
+        scope_sha256: scope.digest().unwrap(),
+        credential_scope_sha256: scope.credential_scope_digest().unwrap(),
+        run_id: None,
+    };
+    let request = ProbeRequest {
+        binding: binding.clone(),
+        scope,
+        capability_id: CapabilityId::NetworkReachability,
+        capability_version: 1,
+        params: ProbeParams::Network { port: 443 },
+        requested_at: Utc::now(),
+        deadline_secs: Some(15),
+    };
+    let registry = built_in_registry().unwrap();
+    store
+        .register_accepted_capture(&registry, &request)
+        .unwrap();
+    let mut item = envelope(binding);
+    item.request_intent_sha256 = Some("f".repeat(64));
+    assert!(store.attach_evidence(case_id, item.clone()).is_err());
+    item.request_intent_sha256 = Some(request.intent_sha256().unwrap());
+    store.attach_evidence(case_id, item).unwrap();
 }
 
 #[test]

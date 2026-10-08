@@ -45,11 +45,13 @@ struct EvidenceLine {
     status: &'static str,
     eligibility: &'static str,
     retention: &'static str,
+    sql_artifact_retention: Option<&'static str>,
     capability: &'static str,
     capability_version: u16,
     parser_version: u16,
     case_revision: u64,
     request_id: Uuid,
+    request_intent_sha256: Option<String>,
     run_id: Option<Uuid>,
     scope_sha256: String,
     credential_scope_sha256: String,
@@ -62,6 +64,8 @@ struct EvidenceLine {
     record_count: usize,
     metric_count: usize,
     evidence_ref_count: usize,
+    evidence_refs: Vec<Uuid>,
+    sql_artifacts: Vec<super::sql::artifacts::SqlArtifact>,
     content_sha256: String,
 }
 
@@ -115,6 +119,7 @@ fn line(
     now: DateTime<Utc>,
     current_revision: u64,
     retention: RetentionState,
+    sql_artifact_retention: Option<RetentionState>,
 ) -> EvidenceLine {
     let eligibility = if e.binding.case_revision != current_revision {
         Eligibility::Stale
@@ -127,11 +132,13 @@ fn line(
         status: label(e.status),
         eligibility: label(eligibility),
         retention: label(retention),
+        sql_artifact_retention: sql_artifact_retention.map(label),
         capability: label(e.capability_id),
         capability_version: e.capability_version,
         parser_version: e.parser_version,
         case_revision: e.binding.case_revision,
         request_id: e.binding.request_id,
+        request_intent_sha256: e.request_intent_sha256.clone(),
         run_id: e.binding.run_id,
         scope_sha256: e.binding.scope_sha256.clone(),
         credential_scope_sha256: e.binding.credential_scope_sha256.clone(),
@@ -144,6 +151,8 @@ fn line(
         record_count: e.records.len(),
         metric_count: e.metrics.len(),
         evidence_ref_count: e.evidence_refs.len(),
+        evidence_refs: e.evidence_refs.clone(),
+        sql_artifacts: e.sql_artifacts.clone(),
         content_sha256: e.content_sha256.clone(),
     }
 }
@@ -167,6 +176,7 @@ pub fn export_case(
                 now,
                 case.revision(),
                 case.evidence_retention(e.id, now).unwrap(),
+                case.sql_artifact_retention(e.id, now),
             )
         })
         .collect();
@@ -248,6 +258,22 @@ fn markdown(report: &Report<'_>) -> String {
             e.evidence_ref_count,
             e.content_sha256
         );
+        if !e.evidence_refs.is_empty() {
+            let _ = writeln!(out, "Source evidence IDs: {:?}\n", e.evidence_refs);
+        }
+        if let Some(intent) = &e.request_intent_sha256 {
+            let _ = writeln!(out, "Accepted request intent SHA-256: `{intent}`\n");
+        }
+        if !e.sql_artifacts.is_empty() {
+            let _ = writeln!(
+                out,
+                "SQL artifact retention: {:?}\n",
+                e.sql_artifact_retention
+            );
+            if let Ok(json) = serde_json::to_string_pretty(&e.sql_artifacts) {
+                let _ = writeln!(out, "Normalized SQL artifacts:\n```json\n{json}\n```\n");
+            }
+        }
     }
     out
 }

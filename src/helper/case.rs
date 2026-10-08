@@ -362,6 +362,58 @@ impl HelperCase {
             Some(RetentionState::ExpiredUnheld)
         }
     }
+
+    pub fn sql_artifact_retention(&self, id: Uuid, now: DateTime<Utc>) -> Option<RetentionState> {
+        let item = self
+            .evidence
+            .iter()
+            .find(|e| e.id == id && !e.sql_artifacts.is_empty())?;
+        if now.signed_duration_since(item.retrieved_at)
+            <= chrono::Duration::days(super::evidence::PLAN_ARTIFACT_RETENTION_DAYS)
+        {
+            return Some(RetentionState::WithinWindow);
+        }
+        if self
+            .evidence_holds
+            .iter()
+            .any(|h| h.evidence_ids.contains(&id))
+        {
+            Some(RetentionState::ExpiredHeld)
+        } else if self.evidence.iter().any(|e| e.evidence_refs.contains(&id)) {
+            Some(RetentionState::ExpiredReferenced)
+        } else {
+            Some(RetentionState::ExpiredUnheld)
+        }
+    }
+
+    pub(super) fn prune_expired_sql_artifacts(&mut self, now: DateTime<Utc>) -> Result<usize> {
+        ensure!(now >= self.created_at, "Retention time predates case");
+        let expired: std::collections::BTreeSet<_> = self
+            .evidence
+            .iter()
+            .filter(|e| {
+                self.sql_artifact_retention(e.id, now) == Some(RetentionState::ExpiredUnheld)
+            })
+            .map(|e| e.id)
+            .collect();
+        if expired.is_empty() {
+            return Ok(0);
+        }
+        let mut next = self.clone();
+        for item in &mut next.evidence {
+            if expired.contains(&item.id) {
+                item.sql_artifacts.clear();
+            }
+        }
+        next.evidence_revision = next
+            .evidence_revision
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("Evidence revision exhausted"))?;
+        next.updated_at = now;
+        next.validate()?;
+        *self = next;
+        Ok(expired.len())
+    }
     /// Explicit maintenance only. Collection/save never evicts evidence to make room.
     pub(super) fn prune_expired_evidence_metadata(&mut self, now: DateTime<Utc>) -> Result<usize> {
         ensure!(now >= self.created_at, "Retention time predates case");

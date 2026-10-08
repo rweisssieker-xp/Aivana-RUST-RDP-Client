@@ -241,7 +241,65 @@ impl PgSession for NativeSession {
             if rows.len() > MAX_ROWS + 1 {
                 return Err(PgFailure::InvalidProjection);
             }
-            rows.iter().map(|r| project(probe, r)).collect()
+            let mut projected: Vec<SqlObservation> = rows
+                .iter()
+                .map(|r| project(probe, r))
+                .collect::<std::result::Result<_, _>>()?;
+            if probe == PgReadProbe::Objects && !projected.is_empty() {
+                // Exact object/column identity is observed in this read transaction.
+                // A name and column count alone cannot attest a later SQL action.
+                let columns = self.client.query(
+                    "SELECT c.oid::bigint, a.attnum::integer, a.attname::text, a.attgenerated::text FROM pg_class AS c JOIN pg_namespace AS n ON n.oid = c.relnamespace JOIN pg_attribute AS a ON a.attrelid = c.oid WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind = 'r' AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum LIMIT 21",
+                    &[&schema, &object],
+                ).await.map_err(pg_error)?;
+                if columns.is_empty() || columns.len() > MAX_ROWS {
+                    return Err(PgFailure::InvalidProjection);
+                }
+                if !matches!(projected.first(), Some(SqlObservation::Object { columns: count, .. }) if *count == columns.len() as i32)
+                {
+                    return Err(PgFailure::InvalidProjection);
+                }
+                let object_id: i64 = columns[0]
+                    .try_get(0)
+                    .map_err(|_| PgFailure::InvalidProjection)?;
+                if object_id <= 0 {
+                    return Err(PgFailure::InvalidProjection);
+                }
+                projected.push(SqlObservation::PostgresObject {
+                    schema: schema.to_owned(),
+                    name: object.to_owned(),
+                    object_id: object_id as u64,
+                    column_count: columns.len() as u32,
+                });
+                for column in &columns {
+                    let oid: i64 = column
+                        .try_get(0)
+                        .map_err(|_| PgFailure::InvalidProjection)?;
+                    let attnum: i32 = column
+                        .try_get(1)
+                        .map_err(|_| PgFailure::InvalidProjection)?;
+                    let name: String = column
+                        .try_get(2)
+                        .map_err(|_| PgFailure::InvalidProjection)?;
+                    let generated: String = column
+                        .try_get(3)
+                        .map_err(|_| PgFailure::InvalidProjection)?;
+                    if oid != object_id || attnum <= 0 {
+                        return Err(PgFailure::InvalidProjection);
+                    }
+                    let observation = SqlObservation::PostgresColumn {
+                        object_id: object_id as u64,
+                        column_id: attnum as u32,
+                        name,
+                        plain: generated.is_empty(),
+                    };
+                    if !observation.bounded() {
+                        return Err(PgFailure::InvalidProjection);
+                    }
+                    projected.push(observation);
+                }
+            }
+            Ok(projected)
         })
     }
     fn rollback<'a>(&'a mut self) -> PgFuture<'a, ()> {
@@ -542,9 +600,17 @@ async fn collect_with(
                         break;
                     }
                 }
-                let count = rows.len().min(MAX_ROWS) as u32;
-                observations.extend(rows.iter().take(MAX_ROWS).cloned());
-                let state = if rows.len() > MAX_ROWS {
+                let projection_limit = if probe == PgReadProbe::Objects {
+                    MAX_ROWS + 2
+                } else {
+                    MAX_ROWS
+                };
+                let remaining =
+                    super::types::MAX_SQL_OBSERVATIONS.saturating_sub(observations.len());
+                let kept = rows.len().min(projection_limit).min(remaining);
+                let count = kept as u32;
+                observations.extend(rows.iter().take(kept).cloned());
+                let state = if rows.len() > projection_limit || rows.len() > remaining {
                     truncated = true;
                     ReadState::Truncated
                 } else {
@@ -607,6 +673,7 @@ async fn collect_with(
         records,
         metrics: Vec::new(),
         sql_observations: observations,
+        sql_artifacts: Vec::new(),
         evidence_refs: Vec::new(),
         source_id: format!("postgres:{}:{}:{}", target.host, port, database).into_bytes(),
         source_observed_at: Utc::now(),

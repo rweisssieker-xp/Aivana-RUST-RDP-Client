@@ -121,6 +121,13 @@ impl HelperStore {
         for pending in &self.pending_captures {
             pending.binding.validate()?;
             ensure!(
+                pending
+                    .request_intent_sha256
+                    .as_deref()
+                    .is_none_or(super::evidence::is_digest),
+                "Invalid pending request intent digest"
+            );
+            ensure!(
                 pending.capability_version > 0,
                 "Invalid pending capture version"
             );
@@ -268,6 +275,7 @@ impl HelperStore {
         binding.validate()?;
         self.pending_captures.push(PendingCapture {
             binding: binding.clone(),
+            request_intent_sha256: None,
             capability_id,
             capability_version,
             registered_at: chrono::Utc::now(),
@@ -297,6 +305,10 @@ impl HelperStore {
             binding == request.binding,
             "Accepted request binding changed"
         );
+        self.pending_captures
+            .last_mut()
+            .expect("capture registered")
+            .request_intent_sha256 = Some(request.intent_sha256()?);
         Ok(binding)
     }
 
@@ -362,12 +374,37 @@ impl HelperStore {
         };
         envelope.validate_ingest(&authoritative)?;
         if envelope.origin == Origin::Live {
+            for artifact in &envelope.sql_artifacts {
+                if let super::sql::artifacts::SqlArtifact::Workload(workload) = artifact {
+                    let reviewed = case
+                        .evidence()
+                        .iter()
+                        .find(|item| item.id == workload.review_evidence_id)
+                        .ok_or_else(|| anyhow::anyhow!("Workload review evidence missing"))?;
+                    ensure!(
+                        reviewed.capability_id == CapabilityId::SqlRead
+                            && reviewed.origin == Origin::Live
+                            && reviewed.binding.case_revision == case.revision()
+                            && reviewed.binding.scope_sha256 == envelope.binding.scope_sha256
+                            && reviewed.binding.credential_scope_sha256
+                                == envelope.binding.credential_scope_sha256
+                            && reviewed.content_sha256 == workload.review_content_sha256,
+                        "Workload review evidence changed"
+                    );
+                }
+            }
+        }
+        if envelope.origin == Origin::Live {
             let pending = self
                 .pending_captures
                 .iter()
                 .find(|p| p.binding.request_id == envelope.binding.request_id)
                 .ok_or_else(|| anyhow::anyhow!("No trusted pending live capture"))?;
             envelope.validate_ingest(&pending.binding)?;
+            ensure!(
+                pending.request_intent_sha256 == envelope.request_intent_sha256,
+                "Capture request intent mismatch"
+            );
             ensure!(
                 pending.capability_id == envelope.capability_id
                     && pending.capability_version == envelope.capability_version,
@@ -440,6 +477,25 @@ impl HelperStore {
             .find(|c| c.id() == case_id)
             .ok_or_else(|| anyhow::anyhow!("Helper case missing"))?
             .prune_expired_evidence_metadata(now)?;
+        next.validate()?;
+        *self = next;
+        Ok(removed)
+    }
+    /// Explicit retention maintenance keeps the envelope and source digest after clearing
+    /// expired SQL projections. Holds and evidence references protect referenced artifacts.
+    pub fn prune_expired_sql_artifacts(
+        &mut self,
+        case_id: Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<usize> {
+        ensure!(self.opened, "Store not opened");
+        let mut next = self.clone();
+        let case = next
+            .cases
+            .iter_mut()
+            .find(|case| case.id() == case_id)
+            .ok_or_else(|| anyhow::anyhow!("Helper case missing"))?;
+        let removed = case.prune_expired_sql_artifacts(now)?;
         next.validate()?;
         *self = next;
         Ok(removed)

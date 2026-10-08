@@ -12,7 +12,7 @@ pub const MAX_RECORDS: usize = 100;
 pub const MAX_METRICS: usize = 64;
 pub const MAX_EVIDENCE_REFS: usize = 16;
 pub const MAX_ENVELOPES_PER_CASE: usize = 1000;
-/// Future plan artifacts use this shorter window; Task 4 owns their stored form.
+/// Normalized SQL plan and workload projections use this shorter window.
 pub const PLAN_ARTIFACT_RETENTION_DAYS: i64 = 90;
 /// Normalized evidence is redacted metadata, retained for the metadata window.
 pub const METADATA_RETENTION_DAYS: i64 = 365;
@@ -117,6 +117,7 @@ pub enum RecordKind {
     OsIdentity,
     SqlRead,
     SqlPlan,
+    SqlWorkload,
     Container,
     CloudInstance,
 }
@@ -373,6 +374,8 @@ pub struct EvidenceEnvelope {
     pub schema: u16,
     pub id: Uuid,
     pub binding: EvidenceBinding,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_intent_sha256: Option<String>,
     pub capability_id: CapabilityId,
     pub capability_version: u16,
     pub parser_version: u16,
@@ -389,6 +392,8 @@ pub struct EvidenceEnvelope {
     pub metrics: Vec<NormalizedMetric>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sql_observations: Vec<super::sql::types::SqlObservation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sql_artifacts: Vec<super::sql::artifacts::SqlArtifact>,
     pub evidence_refs: Vec<Uuid>,
 }
 
@@ -443,6 +448,8 @@ impl EvidenceHold {
 #[serde(deny_unknown_fields)]
 pub(crate) struct PendingCapture {
     pub binding: EvidenceBinding,
+    #[serde(default)]
+    pub request_intent_sha256: Option<String>,
     pub capability_id: CapabilityId,
     pub capability_version: u16,
     pub registered_at: DateTime<Utc>,
@@ -459,6 +466,10 @@ impl EvidenceEnvelope {
             "Invalid evidence identity/version"
         );
         self.binding.validate()?;
+        ensure!(
+            self.request_intent_sha256.as_deref().is_none_or(is_digest),
+            "Invalid request intent digest"
+        );
         ensure!(
             is_digest(&self.source_id),
             "Evidence source ID must be a digest"
@@ -487,6 +498,43 @@ impl EvidenceEnvelope {
             self.sql_observations.is_empty() || self.capability_id == CapabilityId::SqlRead,
             "SQL observations require SQL read capability"
         );
+        ensure!(self.sql_artifacts.len() <= 1, "SQL artifact limit exceeded");
+        for artifact in &self.sql_artifacts {
+            artifact.validate()?;
+            ensure!(
+                matches!(
+                    (self.capability_id, artifact),
+                    (
+                        CapabilityId::SqlPlan,
+                        super::sql::artifacts::SqlArtifact::Plan(_)
+                    ) | (
+                        CapabilityId::SqlWorkloadBaseline | CapabilityId::SqlWorkloadRehearsal,
+                        super::sql::artifacts::SqlArtifact::Workload(_)
+                    )
+                ),
+                "SQL artifact capability mismatch"
+            );
+            if let super::sql::artifacts::SqlArtifact::Plan(plan) = artifact {
+                ensure!(
+                    self.origin == Origin::ImportedUnverified
+                        || plan
+                            .operators
+                            .iter()
+                            .all(|operator| operator.actual_rows.is_none()),
+                    "live plan contains imported execution counters"
+                );
+                ensure!(
+                    self.origin != Origin::Live || plan.metadata_sha256.is_some(),
+                    "live plan metadata identity missing"
+                );
+            }
+            if let super::sql::artifacts::SqlArtifact::Workload(workload) = artifact {
+                ensure!(
+                    self.evidence_refs.contains(&workload.review_evidence_id),
+                    "Workload review source reference missing"
+                );
+            }
+        }
         for metric in &self.metrics {
             metric.validate()?;
             ensure!(

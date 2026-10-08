@@ -211,6 +211,7 @@ dependencies = [
  "native-tls",
  "portable-pty",
  "postgres-native-tls",
+ "quick-xml",
  "raw-window-handle",
  "reqwest",
  "ring",

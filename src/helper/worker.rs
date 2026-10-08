@@ -364,16 +364,20 @@ fn normalize(request: &ProbeRequest, output: ProbeOutput) -> Result<EvidenceEnve
                 .all(super::sql::types::SqlObservation::bounded),
         "SQL observation capacity reached"
     );
-    let content = if output.sql_observations.is_empty() {
-        serde_json::to_vec(&(&output.records, &output.metrics, &output.evidence_refs))?
-    } else {
-        serde_json::to_vec(&(
-            &output.records,
-            &output.metrics,
-            &output.evidence_refs,
-            &output.sql_observations,
-        ))?
-    };
+    ensure!(
+        output.sql_artifacts.len() <= 1,
+        "SQL artifact limit exceeded"
+    );
+    for artifact in &output.sql_artifacts {
+        artifact.validate()?;
+    }
+    let content = serde_json::to_vec(&(
+        &output.records,
+        &output.metrics,
+        &output.evidence_refs,
+        &output.sql_observations,
+        &output.sql_artifacts,
+    ))?;
     ensure!(
         content.len() <= evidence::MAX_ENVELOPE_BYTES,
         "Probe output capacity reached"
@@ -385,6 +389,7 @@ fn normalize(request: &ProbeRequest, output: ProbeOutput) -> Result<EvidenceEnve
         schema: evidence::EVIDENCE_SCHEMA,
         id: Uuid::new_v4(),
         binding: request.binding.clone(),
+        request_intent_sha256: Some(request.intent_sha256()?),
         capability_id: request.capability_id,
         capability_version: request.capability_version,
         parser_version: output.parser_version,
@@ -399,6 +404,7 @@ fn normalize(request: &ProbeRequest, output: ProbeOutput) -> Result<EvidenceEnve
         records: output.records,
         metrics: output.metrics,
         sql_observations: output.sql_observations,
+        sql_artifacts: output.sql_artifacts,
         evidence_refs: output.evidence_refs,
     };
     envelope.validate_shape()?;
@@ -439,6 +445,12 @@ pub fn built_in_registry() -> Result<CapabilityRegistry> {
                     descriptor,
                     Arc::new(super::adapters::containers::KubernetesAdapter),
                 )?,
+            CapabilityId::SqlPlan => {
+                registry.register(descriptor, Arc::new(super::sql::SqlPlanAdapter))?
+            }
+            CapabilityId::SqlWorkloadBaseline => {
+                registry.register(descriptor, Arc::new(super::sql::SqlWorkloadAdapter))?
+            }
             _ => {}
         }
     }
@@ -504,6 +516,7 @@ impl ProbeAdapter for TcpProbe {
                     missing_reason: (!connected).then_some(evidence::MissingReason::Unavailable),
                 }],
                 sql_observations: Vec::new(),
+                sql_artifacts: Vec::new(),
                 evidence_refs: Vec::new(),
                 source_id: format!("tcp:{host}:{port}").into_bytes(),
                 source_observed_at: end,
@@ -594,6 +607,7 @@ impl ProbeAdapter for HttpProbe {
                 }],
                 metrics: Vec::new(),
                 sql_observations: Vec::new(),
+                sql_artifacts: Vec::new(),
                 evidence_refs: Vec::new(),
                 source_id: url.as_str().as_bytes().to_vec(),
                 source_observed_at: end,

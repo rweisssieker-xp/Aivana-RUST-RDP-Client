@@ -64,6 +64,7 @@ pub(crate) fn observed_case() -> (HelperStore, HelperCase, EvidenceEnvelope) {
         schema: EVIDENCE_SCHEMA,
         id: Uuid::new_v4(),
         binding,
+        request_intent_sha256: None,
         capability_id: CapabilityId::NetworkReachability,
         capability_version: 1,
         parser_version: 1,
@@ -96,6 +97,7 @@ pub(crate) fn observed_case() -> (HelperStore, HelperCase, EvidenceEnvelope) {
         .collect(),
         metrics: vec![],
         sql_observations: vec![],
+        sql_artifacts: vec![],
         evidence_refs: vec![],
     };
     store.attach_evidence(id, envelope.clone()).unwrap();

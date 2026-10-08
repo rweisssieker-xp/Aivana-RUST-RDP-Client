@@ -140,6 +140,20 @@ pub enum SqlObservation {
         columns: i32,
         estimated_rows: Option<f64>,
     },
+    /// Observed from pg_class in the same read transaction as the column projection.
+    PostgresObject {
+        schema: String,
+        name: String,
+        object_id: u64,
+        column_count: u32,
+    },
+    /// Positive pg_attribute.attnum for a non-dropped ordinary table column.
+    PostgresColumn {
+        object_id: u64,
+        column_id: u32,
+        name: String,
+        plain: bool,
+    },
     Index {
         name: String,
         method: String,
@@ -302,6 +316,24 @@ impl SqlObservation {
                 estimated_rows,
                 ..
             } => field(schema) && field(name) && estimated_rows.is_none_or(f64::is_finite),
+            Self::PostgresObject {
+                schema,
+                name,
+                object_id,
+                column_count,
+            } => {
+                field(schema)
+                    && field(name)
+                    && *object_id > 0
+                    && *column_count > 0
+                    && *column_count <= 20
+            }
+            Self::PostgresColumn {
+                object_id,
+                column_id,
+                name,
+                ..
+            } => *object_id > 0 && *column_id > 0 && field(name),
             Self::Index { name, method, .. } => field(name) && Self::token(method),
             Self::Statistics { .. } | Self::Permission { .. } => true,
         }

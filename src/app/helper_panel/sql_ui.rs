@@ -11,8 +11,18 @@ use crate::helper::{
 };
 use eframe::egui;
 
-pub(super) fn show(ui: &mut egui::Ui, case: &HelperCase) {
+mod plan_ui;
+
+pub(super) fn show(
+    state: &mut super::HelperState,
+    ui: &mut egui::Ui,
+    case: &HelperCase,
+    profiles: &[crate::models::ConnectionProfile],
+) {
     for scope in case.scopes() {
+        if matches!(scope, BoundScope::Database { .. }) {
+            plan_ui::show(state, ui, case, scope, profiles);
+        }
         if matches!(
             scope,
             BoundScope::Database {
@@ -305,6 +315,7 @@ mod tests {
                 credential_scope_sha256: "b".repeat(64),
                 run_id: None,
             },
+            request_intent_sha256: None,
             capability_id: CapabilityId::SqlRead,
             capability_version: 1,
             parser_version: 1,
@@ -328,6 +339,7 @@ mod tests {
             }],
             metrics: vec![],
             sql_observations: vec![],
+            sql_artifacts: vec![],
             evidence_refs: vec![],
         };
         assert_eq!(

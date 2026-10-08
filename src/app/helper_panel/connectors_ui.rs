@@ -717,6 +717,86 @@ impl HelperState {
         Ok(id)
     }
 
+    pub(super) fn try_collect_sql(
+        &mut self,
+        case_id: Uuid,
+        scope: &BoundScope,
+        profiles: &[ConnectionProfile],
+        capability_id: CapabilityId,
+        params: ProbeParams,
+    ) -> Result<Uuid> {
+        let case = self
+            .store
+            .as_ref()
+            .and_then(|store| store.case(case_id))
+            .ok_or_else(|| anyhow::anyhow!("Case unavailable"))?
+            .clone();
+        let scope_digest = scope.digest()?;
+        ensure!(
+            case.scopes()
+                .iter()
+                .any(|candidate| candidate.digest().ok().as_deref() == Some(&scope_digest)),
+            "Scope not in current case"
+        );
+        ensure!(
+            current_profile_matches(scope, profiles),
+            "Saved endpoint changed"
+        );
+        self.authority.publish(
+            self.store
+                .as_ref()
+                .map(|store| store.cases())
+                .unwrap_or(&[]),
+            profiles,
+        );
+        if self.worker.is_none() {
+            self.worker = Some(worker::HelperWorker::new(
+                Arc::new(worker::built_in_registry()?),
+                Arc::new(PersistentSecretResolver::new()?),
+                self.authority.clone(),
+            )?);
+        }
+        let id = Uuid::new_v4();
+        let mut request = ProbeRequest {
+            binding: EvidenceBinding {
+                case_id,
+                case_revision: case.revision(),
+                request_id: id,
+                scope_sha256: scope_digest,
+                credential_scope_sha256: scope.credential_scope_digest()?,
+                run_id: None,
+            },
+            scope: scope.clone(),
+            capability_id,
+            capability_version: 1,
+            params,
+            requested_at: Utc::now(),
+            deadline_secs: Some(30),
+        };
+        let worker = self.worker.as_mut().expect("created worker");
+        worker.registry().validate_request(&case, &request)?;
+        let store = self
+            .store
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("Store unavailable"))?;
+        request.binding = store.register_accepted_capture(worker.registry(), &request)?;
+        let path = self
+            .path
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Store path unavailable"))?;
+        if let Err(error) = store.save(path) {
+            store.cancel_pending_capture(id)?;
+            return Err(error);
+        }
+        if let Err(error) = worker.submit(request) {
+            store.cancel_pending_capture(id)?;
+            store.save(path)?;
+            return Err(error);
+        }
+        self.collect_jobs.insert(id, case_id);
+        Ok(id)
+    }
+
     pub(super) fn poll_collect(&mut self, profiles: &[ConnectionProfile]) {
         self.authority.publish(
             self.store

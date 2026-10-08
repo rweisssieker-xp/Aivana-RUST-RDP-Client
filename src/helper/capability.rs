@@ -8,6 +8,7 @@ use super::{
 use crate::helper::credentials::SecretResolver;
 use anyhow::{Result, ensure};
 use chrono::{DateTime, Utc};
+use sha2::{Digest, Sha256};
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
@@ -24,12 +25,29 @@ pub struct ProbeRequest {
     pub deadline_secs: Option<u64>,
 }
 
+impl ProbeRequest {
+    pub fn intent_sha256(&self) -> Result<String> {
+        let mut hash = Sha256::new();
+        hash.update(b"relayne-probe-intent-v1\0");
+        hash.update(serde_json::to_vec(&(
+            &self.binding,
+            self.capability_id,
+            self.capability_version,
+            &self.params,
+            self.requested_at,
+            self.deadline_secs,
+        ))?);
+        Ok(format!("{:x}", hash.finalize()))
+    }
+}
+
 pub struct ProbeOutput {
     pub status: EvidenceStatus,
     pub coverage: Coverage,
     pub records: Vec<NormalizedRecord>,
     pub metrics: Vec<NormalizedMetric>,
     pub sql_observations: Vec<super::sql::types::SqlObservation>,
+    pub sql_artifacts: Vec<super::sql::artifacts::SqlArtifact>,
     pub evidence_refs: Vec<uuid::Uuid>,
     /// Raw source identity is hashed before the envelope is persisted.
     pub source_id: Vec<u8>,
@@ -233,13 +251,44 @@ impl CapabilityRegistry {
             (
                 CapabilityId::SqlPlan,
                 ProbeParams::SqlPlan { query_digest },
-                BoundScope::Database { .. },
-            ) if super::evidence::is_digest(query_digest) => {}
+                BoundScope::Database {
+                    engine: super::scope::DatabaseEngine::Postgres,
+                    credential: Some(credential),
+                    ..
+                },
+            ) if credential.purpose == super::scope::CredentialPurpose::Read
+                && super::sql::templates::ReviewedSelectTemplate::from_fingerprint(
+                    &request.scope,
+                    query_digest,
+                )
+                .is_some_and(|template| template.reviewed_statement(&request.scope).is_ok()) => {}
             (
-                CapabilityId::SqlWorkloadBaseline | CapabilityId::SqlWorkloadRehearsal,
-                ProbeParams::SqlWorkload { workload_digest },
-                BoundScope::Database { .. },
-            ) if super::evidence::is_digest(workload_digest) => {}
+                CapabilityId::SqlWorkloadBaseline,
+                ProbeParams::SqlWorkload {
+                    workload_digest,
+                    review_evidence_id,
+                    review_content_sha256,
+                },
+                BoundScope::Database {
+                    engine: super::scope::DatabaseEngine::Postgres,
+                    credential: Some(credential),
+                    ..
+                },
+            ) if credential.purpose == super::scope::CredentialPurpose::Read
+                && super::sql::templates::ReviewedSelectTemplate::from_fingerprint(
+                    &request.scope,
+                    workload_digest,
+                )
+                .and_then(|template| {
+                    super::sql::benchmark::ReviewedWorkload::review(
+                        case,
+                        &request.scope,
+                        template,
+                        *review_evidence_id,
+                    )
+                    .ok()
+                })
+                .is_some_and(|review| review.review_content_sha256() == review_content_sha256) => {}
             (
                 CapabilityId::ContainerStatus,
                 ProbeParams::Container,

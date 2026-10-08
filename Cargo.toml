@@ -13,6 +13,7 @@ name = "relayne-perf"
 path = "src/bin/relayne_perf.rs"
 
 [dependencies]
+quick-xml = "=0.39.4"
 tokio-postgres = "0.7"
 postgres-native-tls = "0.5"
 native-tls = "0.2"

@@ -47,6 +47,7 @@ fn fixture() -> (HelperStore, Uuid) {
             credential_scope_sha256,
             run_id: None,
         },
+        request_intent_sha256: None,
         capability_id: CapabilityId::NetworkReachability,
         capability_version: 1,
         parser_version: 1,
@@ -65,6 +66,7 @@ fn fixture() -> (HelperStore, Uuid) {
         records: vec![],
         metrics: vec![],
         sql_observations: vec![],
+        sql_artifacts: vec![],
         evidence_refs: vec![],
     };
     attach_evidence(&mut store, id, envelope).unwrap();

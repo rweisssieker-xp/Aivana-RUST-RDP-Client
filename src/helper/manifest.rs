@@ -82,6 +82,11 @@ pub enum ProbeParams {
     },
     SqlWorkload {
         workload_digest: String,
+        /// Defaults keep older declarative plans loadable; nil is never executable.
+        #[serde(default)]
+        review_evidence_id: uuid::Uuid,
+        #[serde(default)]
+        review_content_sha256: String,
     },
     Container,
     DockerInspect,
@@ -218,5 +223,29 @@ impl CapabilityManifest {
             ),
         ];
         Self { declarations }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProbeParams;
+
+    #[test]
+    fn legacy_declarative_workload_keeps_loading_without_review_authority() {
+        let value = format!(
+            r#"{{"kind":"sql_workload","workload_digest":"{}"}}"#,
+            "a".repeat(64)
+        );
+        let params: ProbeParams = serde_json::from_str(&value).unwrap();
+        let ProbeParams::SqlWorkload {
+            review_evidence_id,
+            review_content_sha256,
+            ..
+        } = params
+        else {
+            panic!("expected workload declaration")
+        };
+        assert!(review_evidence_id.is_nil());
+        assert!(review_content_sha256.is_empty());
     }
 }
