@@ -1,5 +1,8 @@
 use super::{
-    benchmark::{Comparison, SamplingPolicy, WorkloadSamples, compare},
+    benchmark::{
+        Comparison, CompatibilityEngine, CompatibilityEvidence, SamplingPolicy, WorkloadSamples,
+        compare,
+    },
     plans::{self, ImportSource, PlanImportFormat, Spill},
     templates::{OrderStatus, ReviewedSelectTemplate},
 };
@@ -458,6 +461,11 @@ fn sample(times: Vec<f64>) -> WorkloadSamples {
         result_sha256: "d".repeat(64),
         environment_fingerprint: "e".repeat(64),
         live_metadata_sha256: "f".repeat(64),
+        compatibility: CompatibilityEvidence::incomplete(
+            CompatibilityEngine::Postgres,
+            Some("e".repeat(64)),
+            None,
+        ),
         warmups: 3,
         milliseconds: times,
         median_ms: 100.0,
@@ -485,10 +493,75 @@ fn workload_comparison_requires_repeated_compatible_samples_and_change_receipt()
     let change = "f".repeat(64);
     assert_eq!(compare(&before, &after, &change), Comparison::Inconclusive);
     after.approved_change_sha256 = Some(change.clone());
-    assert_eq!(compare(&before, &after, &change), Comparison::Improvement);
+    assert_eq!(compare(&before, &after, &change), Comparison::Inconclusive);
     after.result_sha256 = "0".repeat(64);
     assert_eq!(compare(&before, &after, &change), Comparison::Inconclusive);
     after.result_sha256 = before.result_sha256.clone();
     after.milliseconds = vec![50.0];
     assert_eq!(compare(&before, &after, &change), Comparison::Inconclusive);
+}
+
+#[test]
+fn result_and_approved_change_cannot_invent_environment_completeness() {
+    let before = sample(vec![100.0; 15]);
+    let mut after = sample(vec![50.0; 15]);
+    after.case_id = before.case_id;
+    let change = "f".repeat(64);
+    after.approved_change_sha256 = Some(change.clone());
+
+    // The SELECT result and legacy environment hash can match while an index,
+    // optimizer setting, or other unobserved data state changes.
+    after.compatibility = CompatibilityEvidence::incomplete(
+        CompatibilityEngine::Postgres,
+        Some("1".repeat(64)),
+        None,
+    );
+    assert_eq!(before.result_sha256, after.result_sha256);
+    assert_eq!(
+        before.environment_fingerprint,
+        after.environment_fingerprint
+    );
+    assert_eq!(compare(&before, &after, &change), Comparison::Inconclusive);
+
+    // A missing post-sample snapshot cannot establish stability. Hand-building
+    // equal-looking digests also leaves the native coverage gaps unresolved.
+    after.compatibility = CompatibilityEvidence::incomplete(
+        CompatibilityEngine::Postgres,
+        Some("e".repeat(64)),
+        None,
+    );
+    assert!(!after.compatibility.is_complete());
+    assert_eq!(compare(&before, &after, &change), Comparison::Inconclusive);
+    after.compatibility = CompatibilityEvidence::incomplete(
+        CompatibilityEngine::Postgres,
+        Some("e".repeat(64)),
+        Some("e".repeat(64)),
+    );
+    assert!(!after.compatibility.is_complete());
+    assert_eq!(compare(&before, &after, &change), Comparison::Inconclusive);
+    after.compatibility = CompatibilityEvidence::incomplete(
+        CompatibilityEngine::Postgres,
+        Some("e".repeat(64)),
+        Some("2".repeat(64)),
+    );
+    assert_eq!(compare(&before, &after, &change), Comparison::Inconclusive);
+}
+
+#[test]
+fn persisted_workload_compatibility_defaults_incomplete_for_legacy_artifacts() {
+    use super::artifacts::{SqlArtifact, WorkloadArtifact};
+    let artifact = WorkloadArtifact::from_samples(&sample(vec![100.0; 15])).unwrap();
+    let mut value = serde_json::to_value(&artifact).unwrap();
+    assert!(value["compatibility"]["missing"].is_array());
+    assert_eq!(value["compatibility"]["status"], "incomplete");
+    let mut forged = value.clone();
+    forged["compatibility"]["status"] = serde_json::json!("native_complete");
+    forged["compatibility"]["missing"] = serde_json::json!([]);
+    forged["compatibility"]["observed_post_sha256"] = serde_json::json!("e".repeat(64));
+    let forged: WorkloadArtifact = serde_json::from_value(forged).unwrap();
+    assert!(SqlArtifact::Workload(forged).validate().is_err());
+    value.as_object_mut().unwrap().remove("compatibility");
+    let legacy: WorkloadArtifact = serde_json::from_value(value).unwrap();
+    assert!(!legacy.compatibility.is_complete());
+    SqlArtifact::Workload(legacy).validate().unwrap();
 }

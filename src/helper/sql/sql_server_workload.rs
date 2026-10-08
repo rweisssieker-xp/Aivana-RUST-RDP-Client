@@ -2,7 +2,10 @@
 
 use super::*;
 use crate::helper::sql::{
-    benchmark::{self, POLICY_VERSION, ReviewedWorkload, SamplingPolicy, WorkloadSamples},
+    benchmark::{
+        self, CompatibilityEngine, CompatibilityEvidence, POLICY_VERSION, ReviewedWorkload,
+        SamplingPolicy, WorkloadSamples,
+    },
     templates::{FIXTURE_SCHEMA, TemplateBind, TemplateStatement},
 };
 
@@ -150,6 +153,7 @@ async fn collect_with_session(
     } else {
         &b"release"[..]
     });
+    let environment_fingerprint = format!("{:x}", environment.finalize());
     Ok(WorkloadSamples {
         policy_version: POLICY_VERSION,
         case_id: request.case_id,
@@ -159,8 +163,13 @@ async fn collect_with_session(
         scope_sha256: request.scope.digest()?,
         workload_fingerprint: statement.fingerprint.clone(),
         result_sha256: result_digest.ok_or_else(|| anyhow::anyhow!("Missing workload result"))?,
-        environment_fingerprint: format!("{:x}", environment.finalize()),
+        environment_fingerprint: environment_fingerprint.clone(),
         live_metadata_sha256: metadata_sha256,
+        compatibility: CompatibilityEvidence::incomplete(
+            CompatibilityEngine::SqlServer,
+            Some(environment_fingerprint),
+            None,
+        ),
         warmups: policy.warmups,
         milliseconds: samples,
         median_ms,

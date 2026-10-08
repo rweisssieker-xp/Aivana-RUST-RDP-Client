@@ -351,6 +351,9 @@ pub(super) fn show(
                             ));
                             ui.label(format!("Reviewed SQL read: {}", sample.review_evidence_id));
                             ui.label(format!("Result SHA-256: {}", sample.result_sha256));
+                            if !sample.compatibility.is_complete() {
+                                ui.label("Comparison blocked: optimizer, index, statistics, data, plan, and post-sample state are not fully verified.");
+                            }
                             ui.label("One run does not establish an improvement.");
                         },
                     );

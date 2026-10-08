@@ -1,7 +1,7 @@
 //! Bounded, redacted SQL projections kept with protected case evidence.
 
 use super::{
-    benchmark::WorkloadSamples,
+    benchmark::{CompatibilityEvidence, WorkloadSamples},
     plans::{PlanImportFormat, PlanNode, PlanReport},
 };
 use crate::helper::evidence::is_digest;
@@ -62,6 +62,8 @@ pub struct WorkloadArtifact {
     pub result_sha256: String,
     pub environment_sha256: String,
     pub metadata_sha256: String,
+    #[serde(default)]
+    pub compatibility: CompatibilityEvidence,
     pub warmups: u8,
     pub milliseconds: Vec<f64>,
     pub median_ms: f64,
@@ -162,6 +164,7 @@ impl WorkloadArtifact {
             result_sha256: samples.result_sha256.clone(),
             environment_sha256: samples.environment_fingerprint.clone(),
             metadata_sha256: samples.live_metadata_sha256.clone(),
+            compatibility: samples.compatibility.clone(),
             warmups: samples.warmups,
             milliseconds: samples.milliseconds.clone(),
             median_ms: samples.median_ms,
@@ -172,6 +175,7 @@ impl WorkloadArtifact {
         Ok(artifact)
     }
     fn validate(&self) -> Result<()> {
+        self.compatibility.validate()?;
         ensure!(
             self.policy_version == 1
                 && self.warmups == 3

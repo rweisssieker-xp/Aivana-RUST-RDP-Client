@@ -5,6 +5,7 @@ use crate::helper::{
     sql::types::SqlObservation,
 };
 use anyhow::{Result, ensure};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -246,6 +247,9 @@ pub struct WorkloadSamples {
     pub result_sha256: String,
     pub environment_fingerprint: String,
     pub live_metadata_sha256: String,
+    /// Native observations and explicit gaps; a digest alone is never a proof
+    /// that two optimizer/data environments are comparable.
+    pub compatibility: CompatibilityEvidence,
     pub warmups: u8,
     pub milliseconds: Vec<f64>,
     pub median_ms: f64,
@@ -253,6 +257,126 @@ pub struct WorkloadSamples {
     pub mad_ms: f64,
     /// An intended schema/index/session-setting change must be supplied by a future approved action receipt.
     pub approved_change_sha256: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompatibilityGap {
+    ColumnTypes,
+    SessionOptimizerSettings,
+    IndexDefinitions,
+    StatisticsState,
+    DataState,
+    PlanFingerprint,
+    PostSampleState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompatibilityEngine {
+    Unknown,
+    Postgres,
+    SqlServer,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompatibilityStatus {
+    #[default]
+    Incomplete,
+    NativeComplete,
+}
+
+/// Descriptive native observations are deliberately separate from a trusted
+/// completeness proof. The latter has no constructor until a native producer
+/// can attest every required dimension and a stable post-sample snapshot.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompatibilityEvidence {
+    #[serde(default)]
+    status: CompatibilityStatus,
+    engine: CompatibilityEngine,
+    observed_pre_sha256: Option<String>,
+    observed_post_sha256: Option<String>,
+    missing: Vec<CompatibilityGap>,
+    #[serde(skip)]
+    verified_complete: bool,
+}
+
+impl Default for CompatibilityEvidence {
+    fn default() -> Self {
+        Self::incomplete(CompatibilityEngine::Unknown, None, None)
+    }
+}
+
+impl CompatibilityEvidence {
+    pub(crate) fn incomplete(
+        engine: CompatibilityEngine,
+        observed_pre_sha256: Option<String>,
+        observed_post_sha256: Option<String>,
+    ) -> Self {
+        let mut missing = vec![
+            CompatibilityGap::SessionOptimizerSettings,
+            CompatibilityGap::IndexDefinitions,
+            CompatibilityGap::StatisticsState,
+            CompatibilityGap::DataState,
+            CompatibilityGap::PlanFingerprint,
+            CompatibilityGap::PostSampleState,
+        ];
+        if engine != CompatibilityEngine::Postgres {
+            missing.push(CompatibilityGap::ColumnTypes);
+        }
+        missing.sort_unstable();
+        Self {
+            status: CompatibilityStatus::Incomplete,
+            engine,
+            observed_pre_sha256,
+            observed_post_sha256,
+            missing,
+            verified_complete: false,
+        }
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.status == CompatibilityStatus::NativeComplete
+            && self.verified_complete
+            && self.missing.is_empty()
+            && self.observed_pre_sha256.is_some()
+            && self.observed_pre_sha256 == self.observed_post_sha256
+    }
+
+    fn comparable_with(&self, other: &Self) -> bool {
+        self.is_complete()
+            && other.is_complete()
+            && self.engine == other.engine
+            && self.observed_pre_sha256 == other.observed_pre_sha256
+    }
+
+    pub fn missing(&self) -> &[CompatibilityGap] {
+        &self.missing
+    }
+
+    pub(crate) fn validate(&self) -> Result<()> {
+        use crate::helper::evidence::is_digest;
+        ensure!(
+            self.observed_pre_sha256.as_deref().is_none_or(is_digest)
+                && self.observed_post_sha256.as_deref().is_none_or(is_digest)
+                && (self.observed_post_sha256.is_none() || self.observed_pre_sha256.is_some()),
+            "invalid compatibility observation digest"
+        );
+        ensure!(
+            self.missing.len() <= 7
+                && self.missing.windows(2).all(|pair| pair[0] < pair[1])
+                && match self.status {
+                    CompatibilityStatus::Incomplete => {
+                        !self.missing.is_empty() && !self.verified_complete
+                    }
+                    CompatibilityStatus::NativeComplete => self.is_complete(),
+                },
+            "invalid compatibility coverage"
+        );
+        Ok(())
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Comparison {
@@ -289,6 +413,11 @@ pub fn compare(
 ) -> Comparison {
     use crate::helper::evidence::is_digest;
     if !is_digest(approved_change_sha256)
+        || !is_digest(&before.review_content_sha256)
+        || !is_digest(&after.review_content_sha256)
+        || before.compatibility.validate().is_err()
+        || after.compatibility.validate().is_err()
+        || !before.compatibility.comparable_with(&after.compatibility)
         || before.policy_version != POLICY_VERSION
         || after.policy_version != POLICY_VERSION
         || before.warmups < 3
@@ -393,6 +522,7 @@ pub async fn run_sandbox_workload(
         } else {
             &b"release"[..]
         });
+        let environment_fingerprint = format!("{:x}", environment.finalize());
         Ok(WorkloadSamples {
             policy_version: POLICY_VERSION,
             case_id: request.case_id,
@@ -403,8 +533,13 @@ pub async fn run_sandbox_workload(
             workload_fingerprint: statement.fingerprint,
             result_sha256: result_digest
                 .ok_or_else(|| anyhow::anyhow!("missing workload result"))?,
-            environment_fingerprint: format!("{:x}", environment.finalize()),
+            environment_fingerprint: environment_fingerprint.clone(),
             live_metadata_sha256: session.metadata_sha256.clone(),
+            compatibility: CompatibilityEvidence::incomplete(
+                CompatibilityEngine::Postgres,
+                Some(environment_fingerprint),
+                None,
+            ),
             warmups: policy.warmups,
             milliseconds: samples,
             median_ms,

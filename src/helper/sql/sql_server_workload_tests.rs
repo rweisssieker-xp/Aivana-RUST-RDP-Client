@@ -178,6 +178,19 @@ async fn repeated_fixed_samples_have_bound_provenance_and_statistics() {
     assert_eq!(result.result_sha256.len(), 64);
     assert_eq!(result.environment_fingerprint.len(), 64);
     assert_eq!(result.live_metadata_sha256.len(), 64);
+    assert!(!result.compatibility.is_complete());
+    assert!(
+        result
+            .compatibility
+            .missing()
+            .contains(&benchmark::CompatibilityGap::ColumnTypes)
+    );
+    assert!(
+        result
+            .compatibility
+            .missing()
+            .contains(&benchmark::CompatibilityGap::PostSampleState)
+    );
     assert_eq!(session.calls.len(), 20);
     assert!(!result.can_prove_repair());
 }
