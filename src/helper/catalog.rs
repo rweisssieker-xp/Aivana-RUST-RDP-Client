@@ -725,9 +725,13 @@ fn exact_metadata_values(values: Vec<serde_json::Value>, metadata: &VerifiedSqlM
                 object_id,
                 column_count,
             } if metadata.object.engine == SqlEngine::Postgres => {
-                if schema == metadata.object.schema && name == metadata.object.table {
+                if object_id == metadata.object.object_id
+                    || (schema == metadata.object.schema && name == metadata.object.table)
+                {
                     object_rows += 1;
-                    if object_id != metadata.object.object_id
+                    if schema != metadata.object.schema
+                        || name != metadata.object.table
+                        || object_id != metadata.object.object_id
                         || column_count as usize != metadata.columns.len()
                     {
                         return false;
@@ -740,9 +744,13 @@ fn exact_metadata_values(values: Vec<serde_json::Value>, metadata: &VerifiedSqlM
                 object_id,
                 column_count,
             } if metadata.object.engine == SqlEngine::SqlServer => {
-                if schema == metadata.object.schema && name == metadata.object.table {
+                if object_id == metadata.object.object_id
+                    || (schema == metadata.object.schema && name == metadata.object.table)
+                {
                     object_rows += 1;
-                    if object_id != metadata.object.object_id
+                    if schema != metadata.object.schema
+                        || name != metadata.object.table
+                        || object_id != metadata.object.object_id
                         || column_count as usize != metadata.columns.len()
                     {
                         return false;
@@ -909,6 +917,7 @@ mod tests {
                         scope_sha256: d(),
                         expected_status: 200,
                         body_sha256: None,
+                        window: "after change".into(),
                     },
                     RequiredCheck::Performance {
                         scope_sha256: d(),
@@ -918,6 +927,7 @@ mod tests {
                         maximum_p95_ms: 200,
                         minimum_warmups: 3,
                         minimum_samples: 15,
+                        window: "after change".into(),
                     },
                 ],
                 criteria: vec![
@@ -1179,6 +1189,32 @@ mod tests {
         ));
         assert!(!exact_metadata_values(
             vec![
+                object.clone(),
+                column.clone(),
+                serde_json::json!({"kind":"postgres_object","schema":"public","name":"other","object_id":42,"column_count":1})
+            ],
+            metadata
+        ));
+        let mut sql_server = (*metadata).clone();
+        sql_server.object.engine = SqlEngine::SqlServer;
+        let server_object = serde_json::json!({"kind":"sql_server_object","schema":"public",
+            "name":"orders","object_id":42,"column_count":1});
+        let server_column = serde_json::json!({"kind":"sql_server_column","object_id":42,
+            "column_id":1,"name":"status","plain":true});
+        assert!(exact_metadata_values(
+            vec![server_object.clone(), server_column.clone()],
+            &sql_server
+        ));
+        assert!(!exact_metadata_values(
+            vec![
+                server_object,
+                server_column,
+                serde_json::json!({"kind":"sql_server_object","schema":"other","name":"orders","object_id":42,"column_count":1})
+            ],
+            &sql_server
+        ));
+        assert!(!exact_metadata_values(
+            vec![
                 object,
                 column,
                 serde_json::json!({"kind":"postgres_column","object_id":42,"column_id":"bad","name":"status","plain":true})
@@ -1222,6 +1258,7 @@ mod tests {
             scope_sha256: d(),
             object_id: 43,
             expected_row_count: 1,
+            window: "after change".into(),
         };
         assert!(
             check_gaps(&case, &wrong, action.object())

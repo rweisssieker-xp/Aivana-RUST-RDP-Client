@@ -336,11 +336,13 @@ pub enum RequiredCheck {
         scope_sha256: Digest,
         expected_status: u16,
         body_sha256: Option<Digest>,
+        window: String,
     },
     SqlFunctional {
         scope_sha256: Digest,
         object_id: u64,
         expected_row_count: u64,
+        window: String,
     },
     Performance {
         scope_sha256: Digest,
@@ -350,6 +352,7 @@ pub enum RequiredCheck {
         maximum_p95_ms: u64,
         minimum_warmups: u8,
         minimum_samples: u8,
+        window: String,
     },
 }
 
@@ -360,18 +363,21 @@ impl RequiredCheck {
                 scope_sha256,
                 expected_status,
                 body_sha256,
+                window,
             } => ensure!(
                 valid_digest(scope_sha256)
                     && (100..=599).contains(expected_status)
-                    && body_sha256.as_deref().is_none_or(valid_digest),
+                    && body_sha256.as_deref().is_none_or(valid_digest)
+                    && valid_criterion_field(window),
                 "Invalid HTTP check"
             ),
             Self::SqlFunctional {
                 scope_sha256,
                 object_id,
+                window,
                 ..
             } => ensure!(
-                valid_digest(scope_sha256) && *object_id > 0,
+                valid_digest(scope_sha256) && *object_id > 0 && valid_criterion_field(window),
                 "Invalid SQL check"
             ),
             Self::Performance {
@@ -382,6 +388,7 @@ impl RequiredCheck {
                 maximum_p95_ms,
                 minimum_warmups,
                 minimum_samples,
+                window,
             } => ensure!(
                 valid_digest(scope_sha256)
                     && *object_id > 0
@@ -389,7 +396,8 @@ impl RequiredCheck {
                     && *maximum_median_ms > 0
                     && *maximum_p95_ms >= *maximum_median_ms
                     && *minimum_warmups >= 3
-                    && *minimum_samples >= 15,
+                    && *minimum_samples >= 15
+                    && valid_criterion_field(window),
                 "Invalid performance check"
             ),
         }
@@ -419,14 +427,77 @@ pub struct CriterionRequirement {
     pub window: String,
 }
 
+fn valid_criterion_field(s: &str) -> bool {
+    !s.trim().is_empty() && s.len() <= 512 && !s.chars().any(char::is_control)
+}
+
+fn exact_u64(value: u64) -> Option<f64> {
+    (value <= 9_007_199_254_740_992).then_some(value as f64)
+}
+
+fn exact_value_satisfies(value: f64, criterion: &CriterionRequirement) -> bool {
+    let threshold = f64::from_bits(criterion.threshold_bits);
+    threshold.is_finite()
+        && match criterion.comparator {
+            CriterionComparator::AtMost => value <= threshold,
+            CriterionComparator::AtLeast => value >= threshold,
+            CriterionComparator::Equal => value == threshold,
+        }
+}
+
+impl RequiredCheck {
+    pub fn implies_criterion(&self, criterion: &CriterionRequirement) -> bool {
+        match self {
+            Self::HttpFunctional {
+                expected_status,
+                window,
+                ..
+            } => {
+                criterion.measure == "HTTP status"
+                    && criterion.unit == "status"
+                    && criterion.window == *window
+                    && f64::from_bits(criterion.threshold_bits) > 0.0
+                    && exact_value_satisfies(f64::from(*expected_status), criterion)
+            }
+            Self::SqlFunctional {
+                expected_row_count,
+                window,
+                ..
+            } => {
+                criterion.measure == "SQL row count"
+                    && criterion.unit == "rows"
+                    && criterion.window == *window
+                    && exact_u64(*expected_row_count)
+                        .is_some_and(|v| exact_value_satisfies(v, criterion))
+            }
+            Self::Performance {
+                maximum_median_ms,
+                maximum_p95_ms,
+                window,
+                ..
+            } => {
+                let upper_bound = match criterion.measure.as_str() {
+                    "Median latency" => *maximum_median_ms,
+                    "P95 latency" => *maximum_p95_ms,
+                    _ => return false,
+                };
+                criterion.unit == "ms"
+                    && criterion.window == *window
+                    && criterion.comparator == CriterionComparator::AtMost
+                    && f64::from_bits(criterion.threshold_bits) > 0.0
+                    && exact_u64(upper_bound)
+                        .is_some_and(|v| v <= f64::from_bits(criterion.threshold_bits))
+            }
+        }
+    }
+}
+
 impl CriterionRequirement {
     pub fn validate(&self) -> Result<()> {
-        let field =
-            |s: &str| !s.trim().is_empty() && s.len() <= 512 && !s.chars().any(char::is_control);
         ensure!(
-            field(&self.measure)
-                && field(&self.unit)
-                && field(&self.window)
+            valid_criterion_field(&self.measure)
+                && valid_criterion_field(&self.unit)
+                && valid_criterion_field(&self.window)
                 && f64::from_bits(self.threshold_bits).is_finite(),
             "Invalid criterion requirement"
         );
@@ -451,11 +522,13 @@ impl VerificationSpec {
                 && self.checks.iter().any(|c| !c.functional()),
             "Functional and performance checks are required"
         );
-        for check in &self.checks {
+        for (check, criterion) in self.checks.iter().zip(&self.criteria) {
             check.validate()?;
-        }
-        for criterion in &self.criteria {
             criterion.validate()?;
+            ensure!(
+                check.implies_criterion(criterion),
+                "Required check cannot prove paired criterion"
+            );
         }
         let unique = self
             .criteria
@@ -482,6 +555,63 @@ mod tests {
     use super::*;
     fn d() -> String {
         "a".repeat(64)
+    }
+    #[test]
+    fn typed_checks_only_claim_criteria_they_prove() {
+        let http = RequiredCheck::HttpFunctional {
+            scope_sha256: d(),
+            expected_status: 200,
+            body_sha256: None,
+            window: "after change".into(),
+        };
+        let performance = RequiredCheck::Performance {
+            scope_sha256: d(),
+            object_id: 42,
+            workload_sha256: d(),
+            maximum_median_ms: 100,
+            maximum_p95_ms: 200,
+            minimum_warmups: 3,
+            minimum_samples: 15,
+            window: "after change".into(),
+        };
+        let status = CriterionRequirement {
+            measure: "HTTP status".into(),
+            comparator: CriterionComparator::Equal,
+            threshold_bits: 200f64.to_bits(),
+            unit: "status".into(),
+            window: "after change".into(),
+        };
+        let latency = CriterionRequirement {
+            measure: "Median latency".into(),
+            comparator: CriterionComparator::AtMost,
+            threshold_bits: 100f64.to_bits(),
+            unit: "ms".into(),
+            window: "after change".into(),
+        };
+        let mut spec = VerificationSpec {
+            checks: vec![http, performance],
+            criteria: vec![status, latency],
+        };
+        spec.validate().unwrap();
+        spec.criteria.swap(0, 1);
+        assert!(spec.validate().is_err());
+        spec.criteria.swap(0, 1);
+        spec.criteria[1].threshold_bits = 99f64.to_bits();
+        assert!(spec.validate().is_err());
+        spec.criteria[1].threshold_bits = 100f64.to_bits();
+        spec.criteria[1].window = "before change".into();
+        assert!(spec.validate().is_err());
+        spec.criteria[1].window = "after change".into();
+        spec.criteria[1].unit = "s".into();
+        assert!(spec.validate().is_err());
+        spec.criteria[1].unit = "ms".into();
+        spec.criteria[1].comparator = CriterionComparator::AtLeast;
+        assert!(spec.validate().is_err());
+        spec.criteria[1].comparator = CriterionComparator::AtMost;
+        spec.criteria[1].threshold_bits = f64::NAN.to_bits();
+        assert!(spec.validate().is_err());
+        spec.criteria[1].threshold_bits = 0f64.to_bits();
+        assert!(spec.validate().is_err());
     }
     fn metadata(engine: SqlEngine) -> VerifiedSqlMetadata {
         VerifiedSqlMetadata {
