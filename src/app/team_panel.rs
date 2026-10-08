@@ -1,4 +1,7 @@
 use super::*;
+use crate::helper_approval::{
+    ActionApprovalStateV2, ActionApprovalV2, ActionDecisionV2, DecideActionApprovalV2,
+};
 use crate::repair_approval::{DecideRepairApproval, RepairApproval, RepairDecision, RepairState};
 use crate::team_client::TeamClient;
 use crate::team_server::{Audit, IssuedToken, Role, SharedItem, Snapshot, TokenInfo, TokenRequest};
@@ -24,6 +27,9 @@ pub(super) struct TeamState {
     repairs: Vec<RepairApproval>,
     repairs_loaded: bool,
     repairs_offset: usize,
+    actions: Vec<ActionApprovalV2>,
+    actions_loaded: bool,
+    actions_offset: usize,
     pending: Option<mpsc::Receiver<Result<TeamResult, String>>>,
     message: String,
     repair_identity_generation: Uuid,
@@ -36,6 +42,8 @@ enum TeamResult {
     Revoked,
     Repairs(usize, Vec<RepairApproval>),
     RepairDecision(RepairApproval),
+    Actions(usize, Vec<ActionApprovalV2>),
+    ActionDecision(ActionApprovalV2),
 }
 impl Default for TeamState {
     fn default() -> Self {
@@ -59,6 +67,9 @@ impl Default for TeamState {
             repairs: vec![],
             repairs_loaded: false,
             repairs_offset: 0,
+            actions: vec![],
+            actions_loaded: false,
+            actions_offset: 0,
             pending: None,
             message: String::new(),
             repair_identity_generation: Uuid::new_v4(),
@@ -84,6 +95,9 @@ impl TeamState {
         self.repairs.clear();
         self.repairs_loaded = false;
         self.repairs_offset = 0;
+        self.actions.clear();
+        self.actions_loaded = false;
+        self.actions_offset = 0;
     }
     fn load_repairs(&mut self, offset: usize) {
         if offset > 1000 || self.pending.is_some() {
@@ -363,6 +377,15 @@ impl AivanaApp {
                             self.team.repairs.retain(|old| old.id != item.id);
                             self.team.repairs.push(item);
                         }
+                        TeamResult::Actions(offset, items) => {
+                            self.team.actions_offset = offset;
+                            self.team.actions = items;
+                            self.team.actions_loaded = true;
+                        }
+                        TeamResult::ActionDecision(item) => {
+                            self.team.actions.retain(|old| old.id != item.id);
+                            self.team.actions.push(item);
+                        }
                     }
                 }
             }
@@ -486,6 +509,45 @@ impl AivanaApp {
                     }
                     if ui.add_enabled(self.team.pending.is_none() && self.team.repairs.len() == 20 && self.team.repairs_offset < 1000, egui::Button::new("Next approvals")).clicked() {
                         self.team.load_repairs(self.team.repairs_offset + 20);
+                    }
+                });
+            }
+        });
+        ui.collapsing("Generic helper SQL action approvals · v2", |ui| {
+            ui.small("This is consent for a typed, scoped action. The requester must still pass current local checks and a durable dispatch-intent gate. An approved request alone cannot run SQL.");
+            if ui.add_enabled(self.team.pending.is_none() && snapshot.role != Role::Viewer, egui::Button::new("Load action approvals")).clicked() {
+                self.team.start(|client| Ok(TeamResult::Actions(0, client.list_actions_v2(0)?)));
+            }
+            if snapshot.role == Role::Viewer { ui.label("Operator role required."); }
+            if self.team.actions_loaded {
+                ui.small(format!("Showing {} action approvals at offset {}", self.team.actions.len(), self.team.actions_offset));
+                for item in self.team.actions.clone() {
+                    ui.group(|ui| {
+                        ui.strong(format!("{:?} · {:?} · {}", item.state, item.binding.run_kind, item.id));
+                        ui.label(format!("Requester {} · Approver {} · case {} revision {}", item.requester, item.approver.as_deref().unwrap_or("—"), item.binding.case_id, item.binding.case_revision));
+                        ui.label(format!("Action: {} · database {} · {}.{} · object {}", item.binding.action.operation_preview(), item.binding.action.object().database, item.binding.action.object().schema, item.binding.action.object().table, item.binding.action.object().object_id));
+                        ui.label(format!("Scope {} · credential {} · metadata {}", item.binding.scope_sha256, item.binding.credential_scope_sha256, item.binding.metadata_sha256));
+                        ui.label(format!("Before {} · plan {} · verification {} · proof {}", item.binding.before_sha256, item.binding.plan_sha256, item.binding.verification_sha256, item.binding.proof.digest()));
+                        ui.label(format!("Restoration {:?} · statistics limit acknowledged {} · expires {}", item.binding.restoration, item.binding.statistics_limit_acknowledged, item.expires_at));
+                        ui.monospace(format!("Exact approval fingerprint: {}", item.fingerprint));
+                        if item.state == ActionApprovalStateV2::Pending && item.expires_at > chrono::Utc::now() && item.requester != snapshot.actor && snapshot.role != Role::Viewer {
+                            ui.horizontal(|ui| {
+                                for (label,decision) in [("Approve action",ActionDecisionV2::Approve),("Deny action",ActionDecisionV2::Deny)] {
+                                    if ui.add_enabled(self.team.pending.is_none(),egui::Button::new(format!("{label}##{}",item.id))).clicked() {
+                                        let id=item.id;
+                                        self.team.start(move |client| Ok(TeamResult::ActionDecision(client.decide_action_v2(id,&DecideActionApprovalV2{decision})?)));
+                                    }
+                                }
+                            });
+                        }
+                    });
+                }
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(self.team.pending.is_none() && self.team.actions_offset>=20,egui::Button::new("Previous actions")).clicked() {
+                        let offset=self.team.actions_offset-20;self.team.start(move |client|Ok(TeamResult::Actions(offset,client.list_actions_v2(offset)?)));
+                    }
+                    if ui.add_enabled(self.team.pending.is_none() && self.team.actions.len()==20 && self.team.actions_offset<1000,egui::Button::new("Next actions")).clicked() {
+                        let offset=self.team.actions_offset+20;self.team.start(move |client|Ok(TeamResult::Actions(offset,client.list_actions_v2(offset)?)));
                     }
                 });
             }

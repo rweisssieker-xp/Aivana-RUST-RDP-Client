@@ -16,6 +16,25 @@ mod planning_ui;
 mod scope_ui;
 mod sql_ui;
 
+#[derive(Default)]
+struct ActionUiState {
+    organization: Option<String>,
+    reviewed_endpoint: Option<String>,
+    identity_generation: Option<Uuid>,
+    organization_confirmed: bool,
+    pending: Option<std::sync::mpsc::Receiver<anyhow::Result<ActionUiEvent>>>,
+    approval: Option<crate::helper_approval::ActionApprovalV2>,
+    receipt: Option<crate::helper_approval::ConsumeReceiptV2>,
+    intent: Option<crate::helper::journal::IntentId>,
+    consume_attempted: bool,
+}
+enum ActionUiEvent {
+    Identity(String),
+    Requested(crate::helper_approval::ActionApprovalV2),
+    Refreshed(crate::helper_approval::ActionApprovalV2),
+    Consumed(crate::helper_approval::ConsumeReceiptV2),
+}
+
 pub(super) struct HelperState {
     store: Option<HelperStore>,
     path: Option<PathBuf>,
@@ -44,6 +63,7 @@ pub(super) struct HelperState {
     recipe_key_reviewed: bool,
     recipe_entry_reviewed: bool,
     notice: String,
+    action_ui: ActionUiState,
 }
 
 impl HelperState {
@@ -76,6 +96,7 @@ impl HelperState {
                 recipe_key_reviewed: false,
                 recipe_entry_reviewed: false,
                 notice: format!("Helper storage unavailable: {e}"),
+                action_ui: ActionUiState::default(),
             },
         }
     }
@@ -127,6 +148,7 @@ impl HelperState {
                         "Case workspace loaded; protected credential recovery needs attention"
                             .into()
                     },
+                    action_ui: ActionUiState::default(),
                 }
             }
             Err(e) => Self {
@@ -157,6 +179,7 @@ impl HelperState {
                 notice: format!(
                     "Helper store could not be loaded: {e}. Repair or restore the file before editing."
                 ),
+                action_ui: ActionUiState::default(),
             },
         }
     }
@@ -164,9 +187,21 @@ impl HelperState {
         let id = self.selected?;
         self.store.as_ref()?.case(id)
     }
+    fn suspend_action_authority(&self, case_id: Uuid) -> anyhow::Result<()> {
+        let case_path = self
+            .path
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Case store path unavailable"))?;
+        let journal_path = crate::helper::journal::ActionJournal::path()?;
+        crate::helper::approval::withdraw_local_review(case_path, &journal_path, case_id)
+    }
     fn select(&mut self, id: Uuid) {
         self.scope_editor.clear_cloud_draft();
         self.reviewed_proposal = None;
+        self.action_ui.approval = None;
+        self.action_ui.receipt = None;
+        self.action_ui.intent = None;
+        self.action_ui.consume_attempted = false;
         self.statistics_limit_acknowledged = false;
         self.statistics_ack_case = None;
         if let Some(cancel) = self.advisory_cancel.take() {
@@ -197,6 +232,10 @@ impl HelperState {
     }
     fn revise(&mut self, edit: CaseEdit) {
         self.reviewed_proposal = None;
+        self.action_ui.approval = None;
+        self.action_ui.receipt = None;
+        self.action_ui.intent = None;
+        self.action_ui.consume_attempted = false;
         self.statistics_limit_acknowledged = false;
         self.statistics_ack_case = None;
         if let Some(cancel) = self.advisory_cancel.take() {
@@ -208,7 +247,10 @@ impl HelperState {
             .current()
             .map(|c| (c.id(), c.revision()))
             .ok_or_else(|| anyhow::anyhow!("Select a case"))
-            .and_then(|(id, rev)| self.store.as_mut().unwrap().revise(id, rev, edit));
+            .and_then(|(id, rev)| {
+                self.suspend_action_authority(id)?;
+                self.store.as_mut().unwrap().revise(id, rev, edit)
+            });
         self.notice = match result {
             Ok(rev) => format!("Answer recorded at revision {rev}. Save to keep it."),
             Err(e) => format!("Answer not recorded: {e}"),
@@ -266,6 +308,7 @@ impl HelperState {
             recipe_key_reviewed: false,
             recipe_entry_reviewed: false,
             notice,
+            action_ui: ActionUiState::default(),
         }
     }
     pub(super) fn adopt_incident(&mut self, source: crate::incident::Source) {
@@ -304,6 +347,45 @@ impl HelperState {
 
 impl AivanaApp {
     pub(super) fn poll_helper(&mut self) {
+        let result = self
+            .helper
+            .action_ui
+            .pending
+            .as_ref()
+            .and_then(|rx| match rx.try_recv() {
+                Ok(value) => Some(value),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Some(Err(anyhow::anyhow!("Action request worker stopped")))
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            });
+        if let Some(result) = result {
+            self.helper.action_ui.pending = None;
+            match result {
+                Ok(ActionUiEvent::Identity(org)) => {
+                    self.helper.action_ui.organization = Some(org);
+                    self.helper.action_ui.organization_confirmed = false;
+                    self.helper.notice =
+                        "Team organization identity loaded. Verify it before requesting consent."
+                            .into();
+                }
+                Ok(ActionUiEvent::Requested(item)) => {
+                    self.helper.notice = format!("Action approval requested: {:?}", item.state);
+                    self.helper.action_ui.approval = Some(item);
+                }
+                Ok(ActionUiEvent::Refreshed(item)) => {
+                    self.helper.action_ui.approval = Some(item);
+                    self.helper.notice = "Action approval status refreshed".into();
+                }
+                Ok(ActionUiEvent::Consumed(receipt)) => {
+                    self.helper.action_ui.receipt = Some(receipt);
+                    self.helper.notice = "Action approval consumed; final local gate and durable intent are still required".into();
+                }
+                Err(error) => {
+                    self.helper.notice = format!("Action authority request failed: {error}")
+                }
+            }
+        }
         self.helper.poll_advisory();
         self.helper.poll_collect(&self.profiles);
     }
@@ -378,7 +460,7 @@ impl AivanaApp {
                 evidence_ui::show(ui, &case, store);
             }
             planning_ui::show(&mut self.helper, ui, &case);
-            change_ui::show(&mut self.helper, ui, &case);
+            change_ui::show(&mut self.helper, ui, &case, &self.team);
         } else if self.helper.store.is_some() {
             ui.label("Create or select a case to begin.");
         }

@@ -1,40 +1,36 @@
 mod ai;
-mod vnc_client;
 mod app;
+mod application_checks;
 mod autopilot;
 mod certificate;
 mod change_history;
 mod computer_use;
 mod connection_options;
-mod mstsc_settings;
+mod diagnostic_lab;
 mod diagnostics;
 mod equivalence;
 mod execution;
-mod repair_approval;
+mod frame_pipeline;
 mod health_suggestions;
 mod helper;
 mod helper_action;
-mod application_checks;
+mod helper_approval;
 mod incident;
 mod integrations;
 mod intelligence;
-mod localization;
-mod ticket_intake;
-mod ticket_escalation;
-mod release_readiness;
-mod diagnostic_lab;
 #[cfg(test)]
 mod intelligence_tests;
 mod ironrdp_client;
 mod legacy_rdp;
+mod localization;
 mod memory;
 mod mission;
 mod models;
-mod frame_pipeline;
-#[cfg(windows)]
-mod native_remoteapp;
+mod mstsc_settings;
 #[cfg(windows)]
 mod native_rdp_resources;
+#[cfg(windows)]
+mod native_remoteapp;
 mod operations;
 mod package_trust;
 mod policy;
@@ -52,7 +48,9 @@ mod recovery;
 mod recovery_contracts;
 mod recovery_daemon;
 mod recovery_tickets;
+mod release_readiness;
 mod remoteapp;
+mod repair_approval;
 mod repair_catalog;
 mod runbook;
 mod security;
@@ -63,9 +61,12 @@ mod team_server;
 mod telemetry;
 mod terminal;
 mod test_lab;
+mod ticket_escalation;
+mod ticket_intake;
 mod timeline;
 mod transferable;
 mod vision;
+mod vnc_client;
 mod workflow;
 mod workspace;
 
@@ -146,11 +147,18 @@ fn main() -> eframe::Result<()> {
         let locale = match args.windows(2).find(|w| w[0] == "--language") {
             Some(pair) => match localization::Locale::parse(&pair[1]) {
                 Some(locale) => locale,
-                None => { eprintln!("Supported locales: en-US, de, fr, it"); std::process::exit(2); }
+                None => {
+                    eprintln!("Supported locales: en-US, de, fr, it");
+                    std::process::exit(2);
+                }
             },
             None => localization::Locale::EnUs,
         };
-        println!("{}", serde_json::to_string_pretty(&release_readiness::report(locale)).expect("static readiness report"));
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&release_readiness::report(locale))
+                .expect("static readiness report")
+        );
         return Ok(());
     }
     if args.iter().any(|arg| arg == "--recovery-worker-once") {
@@ -665,8 +673,10 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../assets/relayne.png"))
-                .expect("embedded Relayne icon must be valid PNG"))
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!("../assets/relayne.png"))
+                    .expect("embedded Relayne icon must be valid PNG"),
+            )
             .with_inner_size(if args.iter().any(|arg| arg == "--gui-capture") {
                 [1440.0, 1024.0]
             } else {

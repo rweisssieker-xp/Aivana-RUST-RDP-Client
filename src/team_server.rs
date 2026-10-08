@@ -1,8 +1,13 @@
 //! Relayne team API. Deliberately shares endpoint metadata, never credential material.
+#[cfg(test)]
+#[path = "team_server/approval_tests.rs"]
+mod approval_tests;
 #[path = "collaboration_session.rs"]
 pub mod collaboration_session;
 #[path = "commerce.rs"]
 pub mod commerce;
+#[path = "team_server/helper_repair.rs"]
+pub(crate) mod helper_repair;
 #[path = "team_oidc.rs"]
 pub mod oidc;
 #[path = "team_server/repair.rs"]
@@ -114,6 +119,7 @@ pub fn open_store(path: &Path) -> Result<Connection> {
       CREATE TABLE IF NOT EXISTS items(id TEXT PRIMARY KEY, revision INTEGER NOT NULL, payload TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS audit(sequence INTEGER PRIMARY KEY AUTOINCREMENT, actor TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL, time TEXT NOT NULL);")?;
     repair::migrate(&db)?;
+    helper_repair::migrate(&db)?;
     Ok(db)
 }
 fn audit(db: &Connection, actor: &str, action: &str, target: &str) -> Result<()> {
@@ -343,6 +349,9 @@ fn serve_request_with_oidc(
     let method = request.method().clone();
     if path.starts_with("/v1/repair-") {
         return repair::serve(db, request, &path, &method, &identity);
+    }
+    if path.starts_with("/v2/helper-action-") || path == "/v2/helper-capabilities" {
+        return helper_repair::serve(db, request, &path, &method, &identity);
     }
     let actor = identity.actor;
     let role = identity.role;

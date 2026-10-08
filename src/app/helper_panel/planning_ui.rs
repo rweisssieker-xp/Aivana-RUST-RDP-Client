@@ -147,15 +147,20 @@ pub(super) fn show(state: &mut HelperState, ui: &mut Ui, case: &HelperCase) {
                             evidence_refs: h.support.clone(),
                             case_revision: case.revision(),
                         };
-                        state.notice = match state.store.as_mut().unwrap().confirm_hypothesis(
-                            case.id(),
-                            case.revision(),
-                            h.kind,
-                            confirmation,
-                        ) {
-                            Ok(_) => "Human confirmation recorded for this case revision.".into(),
-                            Err(e) => format!("Confirmation rejected: {e}"),
-                        };
+                        state.notice =
+                            match state.suspend_action_authority(case.id()).and_then(|_| {
+                                state.store.as_mut().unwrap().confirm_hypothesis(
+                                    case.id(),
+                                    case.revision(),
+                                    h.kind,
+                                    confirmation,
+                                )
+                            }) {
+                                Ok(_) => {
+                                    "Human confirmation recorded for this case revision.".into()
+                                }
+                                Err(e) => format!("Confirmation rejected: {e}"),
+                            };
                     }
                 }
             }

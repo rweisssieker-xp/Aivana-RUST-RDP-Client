@@ -72,6 +72,16 @@ fn lock(path: &Path) -> Result<std::fs::File> {
 }
 
 impl HelperStore {
+    /// Holds the same OS lock as case saves while the caller inspects the current
+    /// protected on-disk state and durably records a dispatch intent.
+    pub fn inspect_locked<T>(path: &Path, inspect: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let _guard = lock(path)?;
+        let current = Self::load(path)?;
+        inspect(&current)
+    }
     pub fn cases(&self) -> &[HelperCase] {
         &self.cases
     }

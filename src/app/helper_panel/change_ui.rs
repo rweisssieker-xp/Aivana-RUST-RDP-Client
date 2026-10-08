@@ -174,7 +174,12 @@ fn recipe_import(
     });
 }
 
-pub(super) fn show(state: &mut HelperState, ui: &mut Ui, case: &HelperCase) {
+pub(super) fn show(
+    state: &mut HelperState,
+    ui: &mut Ui,
+    case: &HelperCase,
+    team: &super::super::team_panel::TeamState,
+) {
     if state.statistics_ack_case != Some((case.id(), case.revision())) {
         state.statistics_limit_acknowledged = false;
         state.statistics_ack_case = None;
@@ -294,4 +299,272 @@ pub(super) fn show(state: &mut HelperState, ui: &mut Ui, case: &HelperCase) {
                 }
             }
         });
+    action_authority(state, ui, case, team);
+}
+
+fn action_authority(
+    state: &mut HelperState,
+    ui: &mut Ui,
+    case: &HelperCase,
+    team: &super::super::team_panel::TeamState,
+) {
+    use crate::helper_approval::{
+        ActionApprovalStateV2, ConsumeActionApprovalV2, CreateActionApprovalV2,
+    };
+    ui.separator();
+    ui.heading("Generic SQL action authority · v2");
+    ui.small("A proposal remains a candidate until current privileges, a reviewed isolated rehearsal, and the final local gate are proven. This screen does not run SQL.");
+    let Ok((client, generation, endpoint)) = team.repair_client() else {
+        ui.label("Connect as a team operator to request action consent.");
+        return;
+    };
+    if state.action_ui.identity_generation != Some(generation)
+        || state.action_ui.reviewed_endpoint.as_deref() != Some(endpoint.as_str())
+    {
+        state.action_ui = super::ActionUiState::default();
+        state.action_ui.identity_generation = Some(generation);
+        state.action_ui.reviewed_endpoint = Some(endpoint.clone());
+    }
+    ui.label(format!("Reviewed team endpoint: {endpoint}"));
+    if ui
+        .add_enabled(
+            state.action_ui.pending.is_none(),
+            egui::Button::new("Check team organization identity"),
+        )
+        .clicked()
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        state.action_ui.pending = Some(rx);
+        std::thread::spawn(move || {
+            let _ = tx.send(client.helper_capabilities().and_then(|caps| {
+                anyhow::ensure!(
+                    caps.authority_version == 2,
+                    "Unsupported team authority version"
+                );
+                Ok(super::ActionUiEvent::Identity(caps.organization_sha256))
+            }));
+        });
+    }
+    if let Some(org) = &state.action_ui.organization {
+        ui.monospace(format!("Organization identity SHA-256: {org}"));
+        ui.checkbox(
+            &mut state.action_ui.organization_confirmed,
+            "I verified this team endpoint and organization identity",
+        );
+    }
+    if let Some(proposal) = state.reviewed_proposal.clone() {
+        if proposal.case_id == case.id() && proposal.case_revision == case.revision() {
+            ui.label(format!(
+                "Reviewed proposal: {}",
+                proposal.review_digest().unwrap_or_default()
+            ));
+            if ui
+                .add_enabled(
+                    state.action_ui.pending.is_none() && state.action_ui.organization_confirmed,
+                    egui::Button::new("Request staged action consent"),
+                )
+                .clicked()
+            {
+                let result = (|| -> anyhow::Result<_> {
+                    let org = state
+                        .action_ui
+                        .organization
+                        .clone()
+                        .ok_or_else(|| anyhow::anyhow!("Team organization missing"))?;
+                    let (binding, _) = crate::helper::approval::staged_request_binding(
+                        case,
+                        &proposal,
+                        org.clone(),
+                    )?;
+                    let case_path = state
+                        .path
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("Case store path missing"))?;
+                    let journal_path = crate::helper::journal::ActionJournal::path()?;
+                    crate::helper::approval::record_local_review(
+                        case_path,
+                        &journal_path,
+                        case,
+                        &proposal,
+                    )?;
+                    Ok((
+                        CreateActionApprovalV2 {
+                            request_id: Uuid::new_v4(),
+                            binding,
+                        },
+                        org,
+                    ))
+                })();
+                match result {
+                    Ok((input, org)) => {
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        state.action_ui.pending = Some(rx);
+                        let client = team.repair_client().map(|v| v.0);
+                        std::thread::spawn(move || {
+                            let result = client.and_then(|client| {
+                                let caps = client.helper_capabilities()?;
+                                anyhow::ensure!(
+                                    caps.organization_sha256 == org && caps.authority_version == 2,
+                                    "Team organization identity changed"
+                                );
+                                client
+                                    .request_action_v2(&input)
+                                    .map(super::ActionUiEvent::Requested)
+                            });
+                            let _ = tx.send(result);
+                        });
+                    }
+                    Err(error) => state.notice = format!("Action request unavailable: {error}"),
+                }
+            }
+            if ui.button("Withdraw local action review").clicked() {
+                state.notice = match (
+                    state.path.as_ref(),
+                    crate::helper::journal::ActionJournal::path(),
+                ) {
+                    (Some(path), Ok(journal)) => {
+                        match crate::helper::approval::withdraw_local_review(
+                            path,
+                            &journal,
+                            case.id(),
+                        ) {
+                            Ok(()) => {
+                                "Local review withdrawn; any consumed approval cannot dispatch"
+                                    .into()
+                            }
+                            Err(e) => format!("Review withdrawal blocked authority: {e}"),
+                        }
+                    }
+                    _ => "Review withdrawal blocked authority: storage unavailable".into(),
+                };
+            }
+        }
+    }
+    if let Some(item) = state.action_ui.approval.clone() {
+        ui.label(format!(
+            "Team action approval: {:?} · expires {}",
+            item.state, item.expires_at
+        ));
+        ui.monospace(format!("Exact action fingerprint: {}", item.fingerprint));
+        if ui
+            .add_enabled(
+                state.action_ui.pending.is_none(),
+                egui::Button::new("Refresh action status"),
+            )
+            .clicked()
+        {
+            let (tx, rx) = std::sync::mpsc::channel();
+            state.action_ui.pending = Some(rx);
+            let id = item.id;
+            let client = team.repair_client().map(|v| v.0);
+            std::thread::spawn(move || {
+                let _ = tx.send(
+                    client.and_then(|c| c.action_v2(id).map(super::ActionUiEvent::Refreshed)),
+                );
+            });
+        }
+        if item.state == ActionApprovalStateV2::Approved
+            && state.action_ui.receipt.is_none()
+            && !state.action_ui.consume_attempted
+            && item.expires_at > chrono::Utc::now()
+        {
+            if ui
+                .add_enabled(
+                    state.action_ui.pending.is_none(),
+                    egui::Button::new("Consume approved action for final local check"),
+                )
+                .clicked()
+            {
+                state.action_ui.consume_attempted = true;
+                let (tx, rx) = std::sync::mpsc::channel();
+                state.action_ui.pending = Some(rx);
+                let client = team.repair_client().map(|v| v.0);
+                let to_consume = item.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(client.and_then(|c| {
+                        c.consume_action_v2(
+                            to_consume.id,
+                            &ConsumeActionApprovalV2 {
+                                binding: to_consume.binding,
+                            },
+                        )
+                        .map(super::ActionUiEvent::Consumed)
+                    }));
+                });
+            }
+        }
+        if state.action_ui.consume_attempted && state.action_ui.receipt.is_none() {
+            ui.strong("Consumption may have reached the team server. Refresh status and reconcile with an operator; no automatic retry or SQL dispatch.");
+        }
+        if let Some(receipt) = state.action_ui.receipt.clone() {
+            ui.label(format!(
+                "Consumed once: {}. A durable local intent is required before any target contact.",
+                receipt.consume_id
+            ));
+            if state.action_ui.intent.is_none()
+                && ui.button("Record final checked intent").clicked()
+            {
+                let result = (|| -> anyhow::Result<_> {
+                    let proposal = state
+                        .reviewed_proposal
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("Proposal missing"))?;
+                    let (_, observed) = crate::helper::approval::staged_request_binding(
+                        case,
+                        proposal,
+                        item.binding.organization_sha256.clone(),
+                    )?;
+                    let case_path = state
+                        .path
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("Case store path missing"))?;
+                    let journal_path = crate::helper::journal::ActionJournal::path()?;
+                    crate::helper::approval::authorize_and_record_intent(
+                        case_path,
+                        &journal_path,
+                        proposal,
+                        &item.binding,
+                        &receipt,
+                        &observed,
+                    )
+                })();
+                match result {
+                    Ok(id) => {
+                        state.action_ui.intent = Some(id);
+                        state.notice="Prepared intent saved. No SQL executor is registered in this wave; no action was launched.".into()
+                    }
+                    Err(e) => {
+                        state.notice = format!("No action launched: final local gate failed: {e}")
+                    }
+                };
+            }
+        }
+    }
+    if let Some(id) = state.action_ui.intent {
+        ui.label(format!(
+            "Durable prepared intent {id}; awaiting executor and explicit reconciliation."
+        ));
+    }
+    if state.action_ui.pending.is_some() {
+        ui.spinner();
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(100));
+    }
+    if let Ok(path) = crate::helper::journal::ActionJournal::path() {
+        if let Ok(journal) = crate::helper::journal::ActionJournal::load(&path) {
+            for intent in journal.intents().iter().filter(|i| i.case_id == case.id()) {
+                ui.label(format!(
+                    "Run {} · {:?} · outcome reported {}",
+                    intent.run_id, intent.state, intent.outcome_acknowledged
+                ));
+                if matches!(
+                    intent.state,
+                    crate::helper::journal::IntentState::OutcomeUnknown
+                        | crate::helper::journal::IntentState::NeedsIntervention
+                ) {
+                    ui.strong("Requires human reconciliation; do not replay the action.");
+                }
+            }
+        }
+    }
 }

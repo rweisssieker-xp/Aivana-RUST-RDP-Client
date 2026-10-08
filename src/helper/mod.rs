@@ -1,8 +1,9 @@
 pub mod adapters;
 pub mod advisory;
+pub mod approval;
 pub mod capability;
-pub mod catalog;
 pub mod case;
+pub mod catalog;
 pub mod cloud;
 // Scoped credential APIs are consumed by the next adapter waves.
 #[allow(dead_code)]
@@ -10,6 +11,7 @@ pub mod credentials;
 pub mod evidence;
 pub mod export;
 pub mod inventory;
+pub mod journal;
 pub mod manifest;
 pub mod planner;
 // Fixed tool variants are consumed by the platform adapter waves.

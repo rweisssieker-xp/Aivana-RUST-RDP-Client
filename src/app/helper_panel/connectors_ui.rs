@@ -684,8 +684,13 @@ impl HelperState {
             requested_at: Utc::now(),
             deadline_secs: None,
         };
+        self.worker
+            .as_ref()
+            .expect("created worker")
+            .registry()
+            .validate_request(&case, &request)?;
+        self.suspend_action_authority(case_id)?;
         let worker = self.worker.as_mut().expect("created worker");
-        worker.registry().validate_request(&case, &request)?;
         let store = self
             .store
             .as_mut()
@@ -821,6 +826,11 @@ impl HelperState {
             };
             let case_id = job.case_id;
             let scope_digest = job.scope_digest.clone();
+            if let Err(error) = self.suspend_action_authority(case_id) {
+                self.notice =
+                    format!("Capture held; action authority could not be suspended: {error}");
+                continue;
+            }
             let Some(store) = self.store.as_mut() else {
                 continue;
             };

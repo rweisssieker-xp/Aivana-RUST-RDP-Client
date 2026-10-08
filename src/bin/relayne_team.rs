@@ -1,10 +1,12 @@
+#[path = "../helper_action.rs"]
+mod helper_action;
+#[path = "../helper_approval.rs"]
+mod helper_approval;
+#[path = "../repair_approval.rs"]
+mod repair_approval;
 #[cfg(test)]
 #[path = "../team_client.rs"]
 mod team_client;
-#[path = "../repair_approval.rs"]
-mod repair_approval;
-#[path = "../helper_action.rs"]
-mod helper_action;
 #[path = "../team_server.rs"]
 mod team_server;
 #[path = "../ticket_escalation.rs"]
@@ -37,7 +39,7 @@ fn main() -> anyhow::Result<()> {
             )?;
         }
         _ => anyhow::bail!(
-                "Usage: relayne_team bootstrap <database> <admin-name> | serve <database> [bind-address:port] | escalation-worker <database>. Remote access requires a TLS reverse proxy."
+            "Usage: relayne_team bootstrap <database> <admin-name> | serve <database> [bind-address:port] | escalation-worker <database>. Remote access requires a TLS reverse proxy."
         ),
     }
     Ok(())

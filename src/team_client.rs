@@ -1,6 +1,10 @@
 //! Explicit, foreground initiated team operations; bearer tokens remain in memory.
 #[path = "team_login.rs"]
 pub mod login;
+use crate::helper_approval::{
+    ActionApprovalV2, ActionOutcomeAckV2, ActionOutcomeEventV2, ConsumeActionApprovalV2,
+    ConsumeReceiptV2, CreateActionApprovalV2, DecideActionApprovalV2,
+};
 use crate::repair_approval::{
     ConsumeReceipt, ConsumeRepairApproval, CreateRepairApproval, DecideRepairApproval,
     RepairApproval, RepairOutcomeAck, RepairOutcomeEvent,
@@ -18,6 +22,49 @@ pub struct TeamClient {
     token: String,
 }
 impl TeamClient {
+    pub fn helper_capabilities(
+        &self,
+    ) -> Result<crate::team_server::helper_repair::HelperCapabilitiesV2> {
+        self.request("/v2/helper-capabilities", None::<()>)
+    }
+    pub fn request_action_v2(&self, input: &CreateActionApprovalV2) -> Result<ActionApprovalV2> {
+        self.request("/v2/helper-action-approvals", Some(input))
+    }
+    pub fn list_actions_v2(&self, offset: usize) -> Result<Vec<ActionApprovalV2>> {
+        self.request(
+            &format!("/v2/helper-action-approvals?limit=20&offset={offset}"),
+            None::<()>,
+        )
+    }
+    pub fn action_v2(&self, id: uuid::Uuid) -> Result<ActionApprovalV2> {
+        self.request(&format!("/v2/helper-action-approvals/{id}"), None::<()>)
+    }
+    pub fn decide_action_v2(
+        &self,
+        id: uuid::Uuid,
+        input: &DecideActionApprovalV2,
+    ) -> Result<ActionApprovalV2> {
+        self.request(
+            &format!("/v2/helper-action-approvals/{id}/decision"),
+            Some(input),
+        )
+    }
+    pub fn consume_action_v2(
+        &self,
+        id: uuid::Uuid,
+        input: &ConsumeActionApprovalV2,
+    ) -> Result<ConsumeReceiptV2> {
+        self.request(
+            &format!("/v2/helper-action-approvals/{id}/consume"),
+            Some(input),
+        )
+    }
+    pub fn report_action_outcome_v2(
+        &self,
+        input: &ActionOutcomeEventV2,
+    ) -> Result<ActionOutcomeAckV2> {
+        self.request("/v2/helper-action-outcomes", Some(input))
+    }
     pub fn request_repair(&self, input: &CreateRepairApproval) -> Result<RepairApproval> {
         self.request("/v1/repair-approvals", Some(input))
     }
@@ -135,7 +182,7 @@ impl TeamClient {
             )
         }
         let mut bytes = Vec::new();
-        let limit = if path.starts_with("/v1/repair-") {
+        let limit = if path.starts_with("/v1/repair-") || path.starts_with("/v2/helper-") {
             256_000u64
         } else if path == "/v1/collaboration" {
             4_000_000u64
