@@ -1,5 +1,9 @@
 # Geprüfte Ausführung und echte Testläufe
 
+## Fehler und Wiederherstellung
+
+Ein fehlgeschlagener Funktionstest stoppt den Rollout. Falls Relayne den Dienst zuvor geändert hat, versucht es, den aufgezeichneten ursprünglichen Dienstzustand wiederherzustellen. `Restored` bedeutet nur, dass dieser Dienstzustand verifiziert wurde; Anwendung, Abhängigkeiten und externe Nebenwirkungen müssen gesondert geprüft werden. Bei fehlgeschlagener Wiederherstellung, Abbruch, unterbrochenem Auftrag oder unvollständiger Antwort bleibt das Ergebnis `Unknown`. Der nächste Zielhost wird dann nicht gestartet. Vor einem neuen, separat geprüften Lauf sind Journal und tatsächlicher Dienst- und Anwendungszustand zu prüfen. Ein abgebrochener Remote-Auftrag kann noch wirken. Die Wiederherstellung ist keine transaktionale Rücknahme.
+
 Der Bereich „Geprüfte Ausführung & Testlauf“ führt einen unterstützten Windows-Dienstzustandswechsel mit WinRM unter der aktuellen Windows-Identität aus. Der Operator ordnet jedem Produktionsprofil ein eigenes Testprofil zu. Reihenfolge: erstes Produktionsziel = Pilot, weitere Ziele = einzeln freizugebender Rollout. Es werden keine Zugangsdaten aus RDP-Profilen verwendet.
 
 Der unveränderliche Plan enthält Dienst, Sollzustand, Healthcheck und vollständige Ziel-Snapshots (Profil, Host, Port, Protokoll, Benutzer, Domain, Route). Sein SHA-256 bindet erfolgreiche Testnachweise für eine Stunde an genau diesen Plan. Änderungen oder andere Zielzuordnungen erfordern einen neuen Testlauf. Identische normalisierte Hosts sind gesperrt; der Operator muss zusätzlich bestätigen, dass verschiedene DNS-Namen keine Aliase desselben Systems sind.

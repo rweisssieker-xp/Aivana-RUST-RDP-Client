@@ -128,6 +128,8 @@ impl State {
                         ui.label(format!("Baseline {} · Change {} · Outage {} · Repair {} · Rollback {}",mark(p.baseline),mark(p.changed),mark(p.fault_observed),mark(p.repaired),mark(p.returned)));
                         ui.label(if p.passed(){"Passed — historical clone evidence, no production approval"}else{"Failed"});
                         if p.untouched{ui.label("Stopped before making a change; clone unchanged.");}
+                        if p.returned && !p.checkpoint_removed { ui.label("Guest return was observed, but the checkpoint remains. Inspect the clone and checkpoint; this trial is unsettled and cannot serve as production proof."); }
+                        if p.changed && !p.returned { ui.label("Return to the original guest state was not verified. Inspect the clone and saved checkpoint before another trial."); }
                     }else{ui.label("No completion evidence; state unresolved.");}
                     if record.recovered{ui.label("Rollback confirmed separately; trial still has no evidence of success.");}
                     if record.unresolved() && ui.button(format!("Prepare rollback for {} …",record.request.id)).clicked(){self.restore_review=Some(record.request.id);self.review=None;}

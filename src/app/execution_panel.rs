@@ -5,6 +5,10 @@ use crate::mission::Target;
 use crate::operations::{JobQueue, JobStatus};
 use std::sync::mpsc;
 
+fn handoff_blocks_execution(phase: Phase, matches_current: bool) -> bool {
+    matches!(phase, Phase::Capture | Phase::Apply) && !matches_current
+}
+
 pub(super) fn edit_http_steps(ui: &mut Ui, steps: &mut Vec<crate::execution::HttpGetStep>) {
     let mut remove = None;
     for (index, step) in steps.iter_mut().enumerate() {
@@ -464,10 +468,7 @@ impl AivanaApp {
     fn execution_fail(&mut self, message: String) {
         if let Some(i) = self.execution.selected {
             let r = &mut self.execution.book.runs[i];
-            let t = &mut r.targets[r.current];
-            t.phase = Phase::Unknown;
-            t.evidence.push(message);
-            r.advance();
+            r.fail_current(message);
         }
         self.execution_save();
     }
@@ -553,9 +554,12 @@ impl AivanaApp {
             return;
         };
         let r = &self.execution.book.runs[i];
-        if self.verification_handoff.as_ref().is_some_and(|handoff| {
-            !r.matches_diagnostic(&handoff.execution_link())
-        }) {
+        if handoff_blocks_execution(
+            r.targets[r.current].phase,
+            self.verification_handoff.as_ref().is_none_or(|handoff| {
+                r.matches_diagnostic(&handoff.execution_link())
+            }),
+        ) {
             self.status = "Selected execution run does not match the active diagnostic case and target; dismiss the handoff or select its linked run.".into();
             return;
         }
@@ -947,8 +951,16 @@ impl AivanaApp {
         if run.successful() && !recovery_only {
             ui.label("All targets functionally verified. Test run retains the displayed changed service state.");
         }
+        if t.phase == Phase::Restore {
+            ui.label("Functional check failed. Restoration of the recorded service state is pending; do not start another target.");
+        }
         if matches!(t.phase, Phase::Unknown | Phase::Restored | Phase::Failed) {
-            ui.label("Rollout stopped. Review findings and restore infrastructure manually if needed. This run will not be retried.");
+            ui.label(match t.phase {
+                Phase::Restored => "Original service state verified; functional repair failed. Check application and dependencies separately before a new reviewed run. This is not a transaction rollback.",
+                Phase::Failed => "Functional check failed without a service change to restore. Inspect the check and target before preparing a new reviewed run.",
+                _ => "Remote or restoration outcome unknown. Inspect the journal and verify actual service and application state before a new reviewed run. A canceled job may still finish.",
+            });
+            ui.label("This run will not be retried; later targets remain untouched.");
         }
         ui.collapsing("Previous runs", |ui| {
             for r in self.execution.book.runs.iter().rev().skip(1).take(20) {
@@ -991,6 +1003,14 @@ impl ExecutionState {
 #[cfg(test)]
 mod recovery_selection_tests {
     use super::*;
+    #[test]
+    fn changed_diagnostic_blocks_new_dispatch_but_not_in_flight_verification_or_restore() {
+        assert!(handoff_blocks_execution(Phase::Capture, false));
+        assert!(handoff_blocks_execution(Phase::Apply, false));
+        assert!(!handoff_blocks_execution(Phase::Verify, false));
+        assert!(!handoff_blocks_execution(Phase::Restore, false));
+        assert!(!handoff_blocks_execution(Phase::Apply, true));
+    }
     fn run(case: Uuid, finished: bool) -> Run {
         let target = |host: &str| Target {
             profile_id: Uuid::new_v4(),

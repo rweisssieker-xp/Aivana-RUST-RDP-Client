@@ -524,6 +524,14 @@ impl AivanaApp {
         if let Some(j) = &s.journal {
             ui.separator();
             ui.strong(format!("{} · {} steps completed", j.state, j.completed));
+            if j.state.starts_with("Failed") {
+                ui.label("A reviewed step failed. Later steps were not started. Inspect the recorded result and target state; any recovery is a separate plan with its own review and verification. No automatic compensation occurred.");
+            } else if j.state.starts_with("Cancelled")
+                || j.state.starts_with("Interrupted")
+                || j.state.starts_with("Outcome recorded in memory only")
+            {
+                ui.label("An in-flight effect may still exist. Inspect the durable journal and verify the actual target state before retrying or reviewing a recovery plan. Do not assume the action was reversed.");
+            }
             ui.monospace(format!("Run {} · {}", j.run_id, j.at));
             egui::ScrollArea::vertical()
                 .id_salt("workflow_journal")

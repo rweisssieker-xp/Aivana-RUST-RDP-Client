@@ -438,6 +438,12 @@ impl Run {
             self.finished = Some(Utc::now());
         }
     }
+    pub fn fail_current(&mut self, message: String) {
+        let target = &mut self.targets[self.current];
+        target.phase = Phase::Unknown;
+        target.evidence.push(message);
+        self.advance();
+    }
     pub fn interrupt_after_restart(&mut self) {
         if self.finished.is_none() {
             for t in &mut self.targets {
@@ -1123,6 +1129,35 @@ mod tests {
         assert!(r.finished.is_some());
         assert_eq!(r.targets[1].phase, Phase::Capture);
         assert!(!r.successful());
+    }
+    #[test]
+    fn failed_restoration_is_unknown_and_never_advances_to_next_target() {
+        let mut p = plan();
+        p.mappings.push(Mapping {
+            production: target("prod2"),
+            staging: target("test2"),
+        });
+        for response in [
+            r#"{"service":"Spooler","before":"Running","desired":"Stopped","actual":"Running","verified":false}"#,
+            r#"{"service":"Wrong","before":"Running","desired":"Stopped","actual":"Stopped","verified":true}"#,
+        ] {
+            let mut run = Run::new(p.clone(), true).unwrap();
+            run.targets[0].before = Some(ServiceState::Stopped);
+            run.targets[0].phase = Phase::Verify;
+            run.finish_health(health(false)).unwrap();
+            assert_eq!(run.targets[0].phase, Phase::Restore);
+            if run.assess_mutation(response, true).is_err() {
+                run.fail_current("Invalid restoration response".into());
+            } else {
+                run.advance();
+            }
+            assert_eq!(run.targets[0].phase, Phase::Unknown);
+            assert_eq!(run.current, 0);
+            assert_eq!(run.targets[1].phase, Phase::Capture);
+            assert!(run.finished.is_some());
+            assert!(!run.successful());
+            assert!(!run.proof_for(&p, Utc::now()));
+        }
     }
     #[test]
     fn restart_never_repeats_apply_or_restore() {

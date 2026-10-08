@@ -1,5 +1,9 @@
 # Relayne workflow packages (schema 1)
 
+## Failure and recovery
+
+A failed step stops later steps without automatic compensation. Cancellation or interruption leaves an in-flight effect uncertain, even when the UI has stopped waiting. Inspect the durable journal and actual target state before retrying. Declared restore steps become a separate plan: review its preconditions and assertions for the restored state and approve it afresh. A verified restore step does not establish reversal of every application or external effect.
+
 Current extensions: the inner schema-1 package is now distributed in an [Ed25519-signed envelope](relayne-signed-packages.md) (512 KiB outer bound); normal UI imports require an explicitly enrolled publisher key. The inner plan/package checks below still apply. [Demonstrated RDP procedures](relayne-icon-procedures.md) can run as typed workflow actions, with complete parameter preflight before any earlier action and per-request nonces for actual UI completion. Runtime values are separate from the exported plan.
 
 Incident links use uniquely matching local SSH transport snapshots. A demonstrated RDP action additionally passes that snapshot to the UI and checks it against the actual session source before dispatch. Manual RDP attestations and HTTP/WinRM actions remain unbound rather than asserting a profile identity they have not established. The fixed WinRM adapter uses current Windows authentication on port 5985; a nonempty workflow `target.user` or another declared port is rejected instead of silently ignored.

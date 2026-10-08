@@ -679,6 +679,16 @@ pub fn start_with_profiles(
     secrets: BTreeMap<String, String>,
     profiles: &[crate::models::ConnectionProfile],
 ) -> Result<Running, String> {
+    start_with_profiles_and_save(plan, approved_digest, secrets, profiles, save)
+}
+
+fn start_with_profiles_and_save(
+    plan: Plan,
+    approved_digest: &str,
+    secrets: BTreeMap<String, String>,
+    profiles: &[crate::models::ConnectionProfile],
+    save_journal: fn(&Journal) -> Result<(), String>,
+) -> Result<Running, String> {
     let profiles: Vec<_> = profiles
         .iter()
         .map(crate::mission::Target::from_profile)
@@ -726,7 +736,7 @@ pub fn start_with_profiles(
         events: vec![],
         records: vec![],
     };
-    save(&j)?;
+    save_journal(&j)?;
     let (tx, events) = mpsc::channel();
     let (evidence, rx) = mpsc::channel::<(String, String)>();
     let cancel = Arc::new(AtomicBool::new(false));
@@ -753,7 +763,7 @@ pub fn start_with_profiles(
                 &profiles,
             );
             j.at = chrono::Utc::now();
-            if let Err(e) = save(&j) {
+            if let Err(e) = save_journal(&j) {
                 j.state = format!("Journal write failed: {e}");
                 break;
             }
@@ -797,7 +807,7 @@ pub fn start_with_profiles(
                         parameters,
                     } => {
                         j.state = "Awaiting evidence".into();
-                        save(&j)?;
+                        save_journal(&j)?;
                         let token = uuid::Uuid::new_v4().to_string();
                         let values = parameters
                             .iter()
@@ -836,7 +846,7 @@ pub fn start_with_profiles(
                     Action::Http { .. } => http.execute(&s.action, &secrets),
                     Action::RdpCheckpoint { target, expected } => {
                         j.state = "Awaiting evidence".into();
-                        save(&j)?;
+                        save_journal(&j)?;
                         let token = uuid::Uuid::new_v4().to_string();
                         let _ = tx.send(Event::Checkpoint {
                             token: token.clone(),
@@ -883,7 +893,12 @@ pub fn start_with_profiles(
                     );
                 }
                 Err(e) => {
-                    j.state = "Failed — no automatic compensation".into();
+                    j.state = if stop.load(Ordering::Relaxed) {
+                        "Cancelled — verify in-flight effects before retry"
+                    } else {
+                        "Failed — no automatic compensation"
+                    }
+                    .into();
                     record(
                         &mut j,
                         s,
@@ -903,7 +918,7 @@ pub fn start_with_profiles(
             j.state = "Cancelled — verify in-flight effects".into();
         }
         j.at = chrono::Utc::now();
-        if let Err(e) = save(&j) {
+        if let Err(e) = save_journal(&j) {
             j.state = format!("Outcome recorded in memory only; journal persistence failed: {e}");
         }
         let _ = tx.send(Event::Journal(j));
@@ -1170,6 +1185,72 @@ mod tests {
         session.execute(&verify, &BTreeMap::new()).unwrap();
         server.join().unwrap();
     }
+    #[cfg(windows)]
+    #[test]
+    fn failed_initial_journal_save_prevents_action_dispatch() {
+        fn fail_save(_: &Journal) -> Result<(), String> {
+            Err("synthetic persistence failure".into())
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut plan = example();
+        if let Action::Http { url, .. } = &mut plan.steps[0].action {
+            *url = format!("http://{}/", listener.local_addr().unwrap());
+        }
+        let digest = review_digest(&plan).unwrap();
+        let error = start_with_profiles_and_save(plan, &digest, BTreeMap::new(), &[], fail_save)
+            .err()
+            .expect("journal failure must reject the run before spawning a worker");
+        assert!(error.contains("persistence failure"));
+        assert!(listener.accept().is_err());
+    }
+
+    #[test]
+    fn cancelled_manual_checkpoint_never_dispatches_later_action() {
+        fn fake_save(_: &Journal) -> Result<(), String> {
+            Ok(())
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut plan = example();
+        plan.steps.insert(
+            0,
+            Step {
+                name: "Manual checkpoint".into(),
+                action: Action::RdpCheckpoint {
+                    target: "test-host".into(),
+                    expected: "Observed state".into(),
+                },
+            },
+        );
+        if let Action::Http { url, .. } = &mut plan.steps[1].action {
+            *url = format!("http://{}/", listener.local_addr().unwrap());
+        }
+        let digest = review_digest(&plan).unwrap();
+        let run =
+            start_with_profiles_and_save(plan, &digest, BTreeMap::new(), &[], fake_save).unwrap();
+        loop {
+            match run.events.recv_timeout(Duration::from_secs(5)).unwrap() {
+                Event::Checkpoint { .. } => break,
+                Event::Journal(_) => {}
+                _ => panic!("checkpoint was not reached"),
+            }
+        }
+        run.cancel();
+        let mut final_journal = None;
+        loop {
+            match run.events.recv_timeout(Duration::from_secs(5)).unwrap() {
+                Event::Journal(j) => final_journal = Some(j),
+                Event::Done => break,
+                _ => {}
+            }
+        }
+        let journal = final_journal.unwrap();
+        assert!(journal.state.starts_with("Cancelled"));
+        assert_eq!(journal.completed, 0);
+        assert!(listener.accept().is_err());
+    }
+
     #[cfg(windows)]
     #[test]
     fn runner_persists_failure_and_never_launches_following_step() {
