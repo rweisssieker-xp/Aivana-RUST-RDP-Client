@@ -37,12 +37,14 @@ struct FakeTransport {
     database: String,
     server_port: u16,
     delay: Duration,
+    object_present: bool,
 }
 struct FakeSession {
     calls: Arc<Mutex<Vec<String>>>,
     database: String,
     server_port: u16,
     delay: Duration,
+    object_present: bool,
 }
 impl PgTransport for FakeTransport {
     fn open<'a>(
@@ -70,6 +72,7 @@ impl PgTransport for FakeTransport {
                 database: self.database.clone(),
                 server_port: self.server_port,
                 delay: self.delay,
+                object_present: self.object_present,
             }) as Box<dyn PgSession>)
         })
     }
@@ -103,12 +106,13 @@ impl PgSession for FakeSession {
                     server_ip: "127.0.0.1".into(),
                     server_port: self.server_port,
                 }],
-                PgReadProbe::Objects => vec![SqlObservation::Object {
+                PgReadProbe::Objects if self.object_present => vec![SqlObservation::Object {
                     schema: "fixture".into(),
                     name: "orders".into(),
                     columns: 5,
                     estimated_rows: Some(12000.0),
                 }],
+                PgReadProbe::Objects => Vec::new(),
                 PgReadProbe::Statistics => vec![SqlObservation::Statistics {
                     live_rows: Some(12000),
                     dead_rows: Some(0),
@@ -117,7 +121,7 @@ impl PgSession for FakeSession {
                 PgReadProbe::Permissions => vec![SqlObservation::Permission {
                     database_connect: Some(true),
                     schema_usage: Some(true),
-                    table_select: Some(true),
+                    table_select: self.object_present.then_some(true),
                 }],
                 _ => Vec::new(),
             })
@@ -216,6 +220,7 @@ async fn native_adapter_orchestration_verifies_identity_and_rolls_back() {
         database: "relayne_helper_acceptance".into(),
         server_port: 55433,
         delay: Duration::ZERO,
+        object_present: true,
     };
     let output = collect_with(&transport, &request, &secrets, CancellationToken::new())
         .await
@@ -251,6 +256,73 @@ async fn native_adapter_orchestration_verifies_identity_and_rolls_back() {
 }
 
 #[tokio::test]
+async fn missing_object_skips_dependent_reads_but_present_object_can_have_no_indexes() {
+    for present in [false, true] {
+        let (request, secrets, path) = setup();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let transport = FakeTransport {
+            calls: calls.clone(),
+            database: "relayne_helper_acceptance".into(),
+            server_port: 55433,
+            delay: Duration::ZERO,
+            object_present: present,
+        };
+        let output = collect_with(&transport, &request, &secrets, CancellationToken::new())
+            .await
+            .unwrap();
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.contains(&"indexes".into()), present);
+        assert_eq!(calls.contains(&"statistics".into()), present);
+        assert_eq!(
+            output.coverage.observed,
+            if present { PROBE_COUNT } else { 3 }
+        );
+        assert_eq!(
+            output.status,
+            if present {
+                EvidenceStatus::Complete
+            } else {
+                EvidenceStatus::Partial
+            }
+        );
+        assert_eq!(
+            output.records[4].observation,
+            if present {
+                Observation::Healthy
+            } else {
+                Observation::Unknown
+            }
+        );
+        if !present {
+            assert_eq!(output.records[5].observation, Observation::Unknown);
+            assert_eq!(output.records[6].observation, Observation::Unknown);
+        }
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[test]
+fn known_denial_takes_precedence_over_unknown_permission() {
+    let rows = [SqlObservation::Permission {
+        database_connect: Some(false),
+        schema_usage: Some(true),
+        table_select: None,
+    }];
+    assert_eq!(
+        classify_rows(PgReadProbe::Permissions, &rows),
+        ReadState::Denied
+    );
+    assert_eq!(
+        rows[0],
+        SqlObservation::Permission {
+            database_connect: Some(false),
+            schema_usage: Some(true),
+            table_select: None,
+        }
+    );
+}
+
+#[tokio::test]
 async fn identity_mismatch_prevents_other_queries_and_rolls_back() {
     let (request, secrets, path) = setup();
     let calls = Arc::new(Mutex::new(Vec::new()));
@@ -259,6 +331,7 @@ async fn identity_mismatch_prevents_other_queries_and_rolls_back() {
         database: "other".into(),
         server_port: 55433,
         delay: Duration::ZERO,
+        object_present: true,
     };
     assert!(
         collect_with(&transport, &request, &secrets, CancellationToken::new())
@@ -275,6 +348,7 @@ async fn identity_mismatch_prevents_other_queries_and_rolls_back() {
         database: "relayne_helper_acceptance".into(),
         server_port: 55434,
         delay: Duration::ZERO,
+        object_present: true,
     };
     assert!(
         collect_with(&wrong_server, &request, &secrets, CancellationToken::new())
@@ -297,6 +371,7 @@ async fn canceled_query_attempts_server_cancel_then_rollback() {
         database: "relayne_helper_acceptance".into(),
         server_port: 55433,
         delay: Duration::from_millis(300),
+        object_present: true,
     };
     let cancel = CancellationToken::new();
     let trigger = cancel.clone();

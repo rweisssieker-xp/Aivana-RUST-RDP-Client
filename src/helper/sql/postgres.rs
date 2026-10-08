@@ -332,6 +332,75 @@ fn project(probe: PgReadProbe, row: &Row) -> std::result::Result<SqlObservation,
     Ok(value)
 }
 
+fn classify_rows(probe: PgReadProbe, rows: &[SqlObservation]) -> ReadState {
+    if rows.is_empty() {
+        return if matches!(
+            probe,
+            PgReadProbe::Objects | PgReadProbe::Statistics | PgReadProbe::Permissions
+        ) {
+            ReadState::Unknown
+        } else {
+            ReadState::Empty
+        };
+    }
+    // A known denied grant must remain visible even when another grant is unknown.
+    if rows.iter().any(|r| {
+        matches!(
+            r,
+            SqlObservation::Permission {
+                database_connect: Some(false),
+                ..
+            } | SqlObservation::Permission {
+                schema_usage: Some(false),
+                ..
+            } | SqlObservation::Permission {
+                table_select: Some(false),
+                ..
+            }
+        )
+    }) {
+        return ReadState::Denied;
+    }
+    if rows.iter().any(|r| {
+        matches!(
+            r,
+            SqlObservation::Activity { state: None, .. }
+                | SqlObservation::Blocking {
+                    blocker_state: None,
+                    ..
+                }
+                | SqlObservation::Index { scans: None, .. }
+                | SqlObservation::Object {
+                    estimated_rows: None,
+                    ..
+                }
+                | SqlObservation::Statistics {
+                    live_rows: None,
+                    ..
+                }
+                | SqlObservation::Permission {
+                    database_connect: None,
+                    ..
+                }
+                | SqlObservation::Permission {
+                    schema_usage: None,
+                    ..
+                }
+                | SqlObservation::Permission {
+                    table_select: None,
+                    ..
+                }
+        )
+    }) || rows.iter().any(|r| {
+        matches!(r,
+            SqlObservation::Object { estimated_rows: Some(v), .. } if *v < 0.0
+        )
+    }) {
+        return ReadState::Unknown;
+    }
+    ReadState::Observed
+}
+
 pub struct PostgresAdapter;
 impl ProbeAdapter for PostgresAdapter {
     fn collect<'a>(
@@ -414,12 +483,17 @@ async fn collect_with(
     let mut truncated = false;
     let mut failure = None;
     let mut transaction_aborted = false;
+    let mut object_present = false;
     for probe in PgReadProbe::ALL {
         if transaction_aborted {
             states.push((probe, ReadState::Unknown, 0));
             continue;
         }
         if probe.needs_object() && (schema.is_none() || object.is_none()) {
+            states.push((probe, ReadState::Unknown, 0));
+            continue;
+        }
+        if matches!(probe, PgReadProbe::Indexes | PgReadProbe::Statistics) && !object_present {
             states.push((probe, ReadState::Unknown, 0));
             continue;
         }
@@ -435,6 +509,9 @@ async fn collect_with(
         .await;
         match rows {
             Ok(rows) => {
+                if probe == PgReadProbe::Objects {
+                    object_present = !rows.is_empty();
+                }
                 if probe == PgReadProbe::Identity {
                     let Some(SqlObservation::Identity {
                         database: actual_db,
@@ -467,25 +544,12 @@ async fn collect_with(
                 }
                 let count = rows.len().min(MAX_ROWS) as u32;
                 observations.extend(rows.iter().take(MAX_ROWS).cloned());
-                let state = if rows.len() > MAX_ROWS { truncated = true; ReadState::Truncated }
-                    else if rows.is_empty() {
-                        if matches!(probe, PgReadProbe::Objects | PgReadProbe::Statistics | PgReadProbe::Permissions) {
-                            ReadState::Unknown
-                        } else { ReadState::Empty }
-                    }
-                    else if rows.iter().any(|r| matches!(r, SqlObservation::Activity { state: None, .. }
-                            | SqlObservation::Blocking { blocker_state: None, .. }
-                            | SqlObservation::Index { scans: None, .. }
-                            | SqlObservation::Object { estimated_rows: None, .. }
-                            | SqlObservation::Statistics { live_rows: None, .. }))
-                        || rows.iter().any(|r| matches!(r, SqlObservation::Object { estimated_rows: Some(v), .. } if *v < 0.0))
-                        || rows.iter().any(|r| matches!(r, SqlObservation::Permission { database_connect: None, .. }
-                            | SqlObservation::Permission { schema_usage: None, .. }
-                            | SqlObservation::Permission { table_select: None, .. })) { ReadState::Unknown }
-                    else if rows.iter().any(|r| matches!(r, SqlObservation::Permission { database_connect: Some(false), .. }
-                            | SqlObservation::Permission { schema_usage: Some(false), .. }
-                            | SqlObservation::Permission { table_select: Some(false), .. })) { ReadState::Denied }
-                    else { ReadState::Observed };
+                let state = if rows.len() > MAX_ROWS {
+                    truncated = true;
+                    ReadState::Truncated
+                } else {
+                    classify_rows(probe, &rows)
+                };
                 if state == ReadState::Observed || state == ReadState::Empty {
                     seen += 1;
                 }

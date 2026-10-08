@@ -1,6 +1,6 @@
 use crate::helper::{
     case::HelperCase,
-    evidence::{Eligibility, EvidenceStatus, Observation},
+    evidence::{Eligibility, EvidenceEnvelope, EvidenceStatus, Observation},
     manifest::CapabilityId,
     scope::{BoundScope, DatabaseEngine},
     sql::postgres::{PgReadProbe, probe_subject_digest},
@@ -34,7 +34,7 @@ pub(super) fn show(ui: &mut egui::Ui, case: &HelperCase) {
             ui.label("No PostgreSQL read capture yet.");
             continue;
         };
-        let eligibility = latest.eligibility(chrono::Utc::now(), chrono::Duration::minutes(5));
+        let eligibility = eligibility_for_context(latest, case.revision(), chrono::Utc::now());
         ui.label(format!(
             "Capture: {:?}; readiness: {:?}; coverage {}/{}{}",
             latest.status,
@@ -169,6 +169,18 @@ pub(super) fn show(ui: &mut egui::Ui, case: &HelperCase) {
     }
 }
 
+fn eligibility_for_context(
+    evidence: &EvidenceEnvelope,
+    case_revision: u64,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Eligibility {
+    if evidence.binding.case_revision != case_revision {
+        Eligibility::Stale
+    } else {
+        evidence.eligibility(now, chrono::Duration::minutes(5))
+    }
+}
+
 fn optional_count(value: Option<i64>) -> String {
     value.map_or("unknown".into(), |n| n.to_string())
 }
@@ -177,5 +189,62 @@ fn privilege(value: Option<bool>) -> &'static str {
         Some(true) => "granted",
         Some(false) => "denied",
         None => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::helper::evidence::{
+        Coverage, EvidenceBinding, NormalizedRecord, Origin, RecordKind, TimeQuality,
+    };
+    use uuid::Uuid;
+
+    #[test]
+    fn context_revision_change_marks_sql_capture_stale() {
+        let now = chrono::Utc::now();
+        let evidence = EvidenceEnvelope {
+            schema: crate::helper::evidence::EVIDENCE_SCHEMA,
+            id: Uuid::new_v4(),
+            binding: EvidenceBinding {
+                case_id: Uuid::new_v4(),
+                case_revision: 2,
+                request_id: Uuid::new_v4(),
+                scope_sha256: "a".repeat(64),
+                credential_scope_sha256: "b".repeat(64),
+                run_id: None,
+            },
+            capability_id: CapabilityId::SqlRead,
+            capability_version: 1,
+            parser_version: 1,
+            origin: Origin::Live,
+            source_id: "c".repeat(64),
+            source_observed_at: now,
+            retrieved_at: now,
+            time_quality: TimeQuality::Trusted,
+            status: EvidenceStatus::Complete,
+            coverage: Coverage {
+                observed: 1,
+                expected: 1,
+                truncated: false,
+            },
+            content_sha256: "d".repeat(64),
+            records: vec![NormalizedRecord {
+                kind: RecordKind::SqlRead,
+                observation: Observation::Healthy,
+                subject_sha256: "e".repeat(64),
+            }],
+            metrics: vec![],
+            sql_observations: vec![],
+            evidence_refs: vec![],
+        };
+        assert_eq!(
+            eligibility_for_context(&evidence, 2, now),
+            Eligibility::Eligible
+        );
+        assert_eq!(
+            eligibility_for_context(&evidence, 3, now),
+            Eligibility::Stale
+        );
     }
 }
