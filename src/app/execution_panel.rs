@@ -956,7 +956,8 @@ impl AivanaApp {
         }
         if matches!(t.phase, Phase::Unknown | Phase::Restored | Phase::Failed) {
             ui.label(match t.phase {
-                Phase::Restored => "Original service state verified; functional repair failed. Check application and dependencies separately before a new reviewed run. This is not a transaction rollback.",
+                Phase::Restored if t.health.as_ref().is_some_and(|check| !check.passed) => "Functional check failed; original service state verified. Check the application and dependencies before a new reviewed run. This is not a transaction rollback.",
+                Phase::Restored => "Original service state verified; no functional check result was recorded. Check the application and dependencies before a new reviewed run. This is not a transaction rollback.",
                 Phase::Failed => "Functional check failed without a service change to restore. Inspect the check and target before preparing a new reviewed run.",
                 _ => "Remote or restoration outcome unknown. Inspect the journal and verify actual service and application state before a new reviewed run. A canceled job may still finish.",
             });
