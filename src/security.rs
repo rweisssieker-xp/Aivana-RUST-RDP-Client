@@ -124,6 +124,8 @@ impl PersistentCredentialStore {
         scope_digest: &str,
         purpose: crate::helper::scope::CredentialPurpose,
         expected_current: Option<Uuid>,
+        case_id: Uuid,
+        expected_revision: u64,
         secret: SecretCredential,
     ) -> Result<crate::models::ScopedCredentialRef> {
         crate::helper::credentials::prepare_scoped_at(
@@ -131,12 +133,20 @@ impl PersistentCredentialStore {
             scope_digest,
             purpose,
             expected_current,
+            case_id,
+            expected_revision,
             secret,
         )
     }
-    pub fn commit_scoped(&mut self, new_id: Uuid, previous_id: Option<Uuid>) -> Result<()> {
+    pub fn commit_scoped(
+        &mut self,
+        case_path: &std::path::Path,
+        new_id: Uuid,
+        previous_id: Option<Uuid>,
+    ) -> Result<()> {
         crate::helper::credentials::commit_scoped_at(
             &self.path.with_extension("scoped.dpapi"),
+            case_path,
             new_id,
             previous_id,
         )

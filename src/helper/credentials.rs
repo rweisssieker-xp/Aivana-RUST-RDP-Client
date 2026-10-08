@@ -66,6 +66,16 @@ struct Vault {
     records: Vec<ProtectedRecord>,
     #[serde(default)]
     pending: Vec<Uuid>,
+    #[serde(default)]
+    rotation_intents: Vec<RotationIntent>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RotationIntent {
+    new_id: Uuid,
+    previous_id: Option<Uuid>,
+    case_id: Uuid,
+    saved_revision: u64,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -81,6 +91,7 @@ impl Default for Vault {
             refs: Vec::new(),
             records: Vec::new(),
             pending: Vec::new(),
+            rotation_intents: Vec::new(),
         }
     }
 }
@@ -171,6 +182,20 @@ fn load(path: &Path) -> Result<Vault> {
         "Scoped vault invalid"
     );
     ensure!(
+        vault.rotation_intents.iter().all(|intent| {
+            vault.pending.contains(&intent.new_id)
+                && !intent.case_id.is_nil()
+                && intent.saved_revision > 0
+                && vault
+                    .rotation_intents
+                    .iter()
+                    .filter(|other| other.new_id == intent.new_id)
+                    .count()
+                    == 1
+        }),
+        "Scoped vault invalid"
+    );
+    ensure!(
         vault.records.iter().all(|record| vault
             .refs
             .iter()
@@ -235,6 +260,9 @@ pub(crate) fn save_scoped_at(
     }
     vault.records.retain(|r| !retired.contains(&r.id));
     vault.pending.retain(|id| !retired.contains(id));
+    vault
+        .rotation_intents
+        .retain(|intent| !retired.contains(&intent.new_id));
     let reference = ScopedCredentialRef {
         id: Uuid::new_v4(),
         scope_digest: scope_digest.to_owned(),
@@ -261,6 +289,8 @@ pub(crate) fn prepare_scoped_at(
     scope_digest: &str,
     purpose: CredentialPurpose,
     expected_current: Option<Uuid>,
+    case_id: Uuid,
+    expected_revision: u64,
     secret: SecretCredential,
 ) -> Result<ScopedCredentialRef> {
     ensure!(
@@ -270,6 +300,10 @@ pub(crate) fn prepare_scoped_at(
             && !secret.username.chars().any(char::is_control),
         "Invalid credential scope/principal"
     );
+    ensure!(!case_id.is_nil(), "Invalid case identity");
+    let saved_revision = expected_revision
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("Case revision exhausted"))?;
     let _guard = lock(path)?;
     let mut vault = load(path)?;
     let current = vault.refs.iter().find(|reference| {
@@ -308,14 +342,57 @@ pub(crate) fn prepare_scoped_at(
         bytes: protected,
     });
     vault.pending.push(reference.id);
+    vault.rotation_intents.push(RotationIntent {
+        new_id: reference.id,
+        previous_id: expected_current,
+        case_id,
+        saved_revision,
+    });
     vault.refs.push(reference.clone());
     save(path, &vault)?;
     Ok(reference)
 }
 
-pub(crate) fn commit_scoped_at(path: &Path, new_id: Uuid, previous_id: Option<Uuid>) -> Result<()> {
-    let _guard = lock(path)?;
-    let mut vault = load(path)?;
+pub(crate) fn commit_scoped_at(
+    path: &Path,
+    case_path: &Path,
+    new_id: Uuid,
+    previous_id: Option<Uuid>,
+) -> Result<()> {
+    super::store::HelperStore::inspect_locked(case_path, |snapshot| {
+        let _guard = lock(path)?;
+        let mut vault = load(path)?;
+        let intent = vault
+            .rotation_intents
+            .iter()
+            .find(|intent| intent.new_id == new_id && intent.previous_id == previous_id)
+            .ok_or_else(|| anyhow::anyhow!("Rotation intent mismatch"))?;
+        let reference = vault
+            .refs
+            .iter()
+            .find(|reference| reference.id == new_id)
+            .ok_or_else(|| anyhow::anyhow!("Prepared credential missing"))?;
+        ensure!(
+            rotation_matches_case(intent, reference, snapshot.cases()),
+            "Saved case credential mismatch"
+        );
+        commit_scoped_in_vault(&mut vault, new_id, previous_id)?;
+        save(path, &vault)
+    })
+}
+
+fn commit_scoped_in_vault(
+    vault: &mut Vault,
+    new_id: Uuid,
+    previous_id: Option<Uuid>,
+) -> Result<()> {
+    ensure!(
+        vault
+            .rotation_intents
+            .iter()
+            .any(|intent| { intent.new_id == new_id && intent.previous_id == previous_id }),
+        "Rotation intent mismatch"
+    );
     let new = vault
         .refs
         .iter()
@@ -346,7 +423,55 @@ pub(crate) fn commit_scoped_at(path: &Path, new_id: Uuid, previous_id: Option<Uu
     }
     vault.records.retain(|r| Some(r.id) != previous_id);
     vault.pending.retain(|id| *id != new_id);
-    save(path, &vault)
+    vault
+        .rotation_intents
+        .retain(|intent| intent.new_id != new_id);
+    Ok(())
+}
+
+fn rotation_matches_case(
+    intent: &RotationIntent,
+    reference: &ScopedCredentialRef,
+    cases: &[super::case::HelperCase],
+) -> bool {
+    cases
+        .iter()
+        .filter(|case| case.id() == intent.case_id && case.revision() >= intent.saved_revision)
+        .flat_map(|case| case.scopes())
+        .filter(|scope| {
+            scope.resource_digest().ok().as_deref() == Some(reference.scope_digest.as_str())
+                && scope.credential().is_some_and(|credential| {
+                    credential.reference == reference.id
+                        && credential.purpose == reference.purpose
+                        && credential.generation == reference.generation
+                        && credential.principal == reference.principal
+                        && credential.context == reference.context
+                        && credential.context_digest == reference.scope_digest
+                })
+        })
+        .count()
+        == 1
+}
+
+pub(crate) fn reconcile_scoped_at(path: &Path, cases: &[super::case::HelperCase]) -> Result<usize> {
+    let _guard = lock(path)?;
+    let mut vault = load(path)?;
+    let intents = vault.rotation_intents.clone();
+    let mut completed = 0;
+    for intent in intents {
+        let Some(reference) = vault.refs.iter().find(|r| r.id == intent.new_id).cloned() else {
+            continue;
+        };
+        if rotation_matches_case(&intent, &reference, cases)
+            && commit_scoped_in_vault(&mut vault, intent.new_id, intent.previous_id).is_ok()
+        {
+            completed += 1;
+        }
+    }
+    if completed > 0 {
+        save(path, &vault)?;
+    }
+    Ok(completed)
 }
 
 pub(crate) fn abort_scoped_at(path: &Path, id: Uuid) -> Result<()> {
@@ -354,6 +479,7 @@ pub(crate) fn abort_scoped_at(path: &Path, id: Uuid) -> Result<()> {
     let mut vault = load(path)?;
     ensure!(vault.pending.contains(&id), "Prepared credential missing");
     vault.pending.retain(|candidate| *candidate != id);
+    vault.rotation_intents.retain(|intent| intent.new_id != id);
     for reference in &mut vault.refs {
         if reference.id == id {
             reference.revoked = true;
@@ -377,6 +503,7 @@ pub(crate) fn revoke_scoped_at(path: &Path, id: Uuid) -> Result<()> {
     }
     vault.records.retain(|r| r.id != id);
     vault.pending.retain(|candidate| *candidate != id);
+    vault.rotation_intents.retain(|intent| intent.new_id != id);
     save(path, &vault)
 }
 
@@ -399,6 +526,7 @@ impl SecretResolver for PersistentSecretResolver {
             .ok_or_else(|| anyhow::anyhow!("Credential unavailable or revoked"))?;
         ensure!(
             !reference.revoked
+                && !vault.pending.contains(&reference.id)
                 && reference.purpose == purpose
                 && reference.scope_digest == scope.context_digest
                 && reference.generation == scope.generation

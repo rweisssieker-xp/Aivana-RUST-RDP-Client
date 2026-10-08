@@ -59,6 +59,12 @@ impl HelperState {
         }
     }
     fn at_path(path: PathBuf) -> Self {
+        let recovery = HelperStore::inspect_locked(&path, |snapshot| {
+            crate::helper::credentials::reconcile_scoped_at(
+                &path.with_file_name("credentials.scoped.dpapi"),
+                snapshot.cases(),
+            )
+        });
         match HelperStore::load(&path) {
             Ok(mut store) => {
                 if store.cancel_abandoned_pending_captures() {
@@ -84,7 +90,12 @@ impl HelperState {
                     confirmation_actor: String::new(),
                     confirmation_rationale: String::new(),
                     confirmation_kind: None,
-                    notice: "Case workspace loaded".into(),
+                    notice: if recovery.is_ok() {
+                        "Case workspace loaded".into()
+                    } else {
+                        "Case workspace loaded; protected credential recovery needs attention"
+                            .into()
+                    },
                 }
             }
             Err(e) => Self {

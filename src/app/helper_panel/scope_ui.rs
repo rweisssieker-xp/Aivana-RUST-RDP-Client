@@ -98,6 +98,7 @@ impl Editor {
     fn provision_cloud(
         &mut self,
         case_id: Uuid,
+        case_revision: u64,
         scope: &BoundScope,
         store: &mut PersistentCredentialStore,
     ) -> anyhow::Result<BoundScope> {
@@ -152,6 +153,8 @@ impl Editor {
             &resource_digest,
             CredentialPurpose::Read,
             scope.credential().map(|credential| credential.reference),
+            case_id,
+            case_revision,
             SecretCredential {
                 username: principal,
                 password,
@@ -694,6 +697,23 @@ fn persist_cloud_credential(
     index: usize,
     store: &mut PersistentCredentialStore,
 ) -> anyhow::Result<()> {
+    let (new_id, old_id) = save_cloud_credential_case(state, case, index, store)?;
+    store.commit_scoped(
+        state
+            .path
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Case path unavailable"))?,
+        new_id,
+        old_id,
+    )
+}
+
+fn save_cloud_credential_case(
+    state: &mut HelperState,
+    case: &HelperCase,
+    index: usize,
+    store: &mut PersistentCredentialStore,
+) -> anyhow::Result<(Uuid, Option<Uuid>)> {
     anyhow::ensure!(
         state.current().is_some_and(|current| {
             current.id() == case.id()
@@ -711,9 +731,12 @@ fn persist_cloud_credential(
     let old_id = case.scopes()[index]
         .credential()
         .map(|credential| credential.reference);
-    let updated = state
-        .scope_editor
-        .provision_cloud(case.id(), &case.scopes()[index], store)?;
+    let updated = state.scope_editor.provision_cloud(
+        case.id(),
+        case.revision(),
+        &case.scopes()[index],
+        store,
+    )?;
     let new_id = updated
         .credential()
         .expect("validated cloud credential")
@@ -740,8 +763,7 @@ fn persist_cloud_credential(
         store.abort_scoped(new_id)?;
         return Err(error);
     }
-    store.commit_scoped(new_id, old_id)?;
-    Ok(())
+    Ok((new_id, old_id))
 }
 
 fn profile_review_status(scope: &BoundScope, profiles: &[ConnectionProfile]) -> &'static str {
@@ -791,13 +813,31 @@ mod tests {
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string())
         );
         let mut editor = Editor::default();
-        let case_id = Uuid::new_v4();
+        let case_path = dir.join("cases.dpapi");
+        let mut state = HelperState::at_path(case_path.clone());
+        state.create();
+        let case_id = state.current().unwrap().id();
+        state.revise(CaseEdit::Scopes(vec![scope.clone()]));
+        state.save();
+        let case_revision = state.current().unwrap().revision();
         editor.prepare_cloud(case_id, &scope).unwrap();
         editor.cloud_principal = "reviewed-principal".into();
         editor.cloud_secret = token.clone();
         let mut vault = PersistentCredentialStore::at(dir.join("credentials.json")).unwrap();
-        let updated = editor.provision_cloud(case_id, &scope, &mut vault).unwrap();
+        let updated = editor
+            .provision_cloud(case_id, case_revision, &scope, &mut vault)
+            .unwrap();
         let resolver = PersistentSecretResolver::at(dir.join("credentials.scoped.dpapi"));
+        assert!(
+            resolver
+                .resolve(updated.credential().unwrap(), CredentialPurpose::Read)
+                .is_err()
+        );
+        state.revise(CaseEdit::Scopes(vec![updated.clone()]));
+        state.save();
+        vault
+            .commit_scoped(&case_path, updated.credential().unwrap().reference, None)
+            .unwrap();
         assert!(super::super::connectors_ui::collect_enabled(
             &updated,
             &[],
@@ -863,14 +903,17 @@ mod tests {
         state.scope_editor.cloud_principal = "arn:aws:iam::123456789012:user/read".into();
         state.scope_editor.cloud_access_key = "AKIA1234567890123456".into();
         state.scope_editor.cloud_secret = "secret-sentinel-1".into();
+        let first_revision = state.current().unwrap().revision();
         let first = state
             .scope_editor
-            .provision_cloud(case_id, &scope, &mut vault)
+            .provision_cloud(case_id, first_revision, &scope, &mut vault)
             .unwrap();
         let first_ref = first.credential().unwrap().clone();
         state.revise(CaseEdit::Scopes(vec![first.clone()]));
         state.save();
-        vault.commit_scoped(first_ref.reference, None).unwrap();
+        vault
+            .commit_scoped(&dir.join("cases.dpapi"), first_ref.reference, None)
+            .unwrap();
         assert!(state.scope_editor.cloud_secret.is_empty());
         assert!(
             resolver
@@ -896,9 +939,10 @@ mod tests {
         state.scope_editor.prepare_cloud(case_id, &first).unwrap();
         state.scope_editor.cloud_access_key = "AKIA1234567890123456".into();
         state.scope_editor.cloud_secret = "secret-sentinel-2".into();
+        let second_revision = state.current().unwrap().revision();
         let second = state
             .scope_editor
-            .provision_cloud(case_id, &first, &mut vault)
+            .provision_cloud(case_id, second_revision, &first, &mut vault)
             .unwrap();
         assert_eq!(
             second.credential().unwrap().generation,
@@ -909,6 +953,21 @@ mod tests {
                 .resolve(&first_ref, CredentialPurpose::Read)
                 .is_ok()
         );
+        assert!(
+            resolver
+                .resolve(second.credential().unwrap(), CredentialPurpose::Read)
+                .is_err()
+        );
+        state.revise(CaseEdit::Scopes(vec![second.clone()]));
+        assert!(state.notice.starts_with("Answer recorded"));
+        state.save();
+        vault
+            .commit_scoped(
+                &dir.join("cases.dpapi"),
+                second.credential().unwrap().reference,
+                Some(first_ref.reference),
+            )
+            .unwrap();
         assert_eq!(
             resolver
                 .resolve(second.credential().unwrap(), CredentialPurpose::Read)
@@ -916,15 +975,6 @@ mod tests {
                 .password(),
             "secret-sentinel-2"
         );
-        state.revise(CaseEdit::Scopes(vec![second.clone()]));
-        assert!(state.notice.starts_with("Answer recorded"));
-        state.save();
-        vault
-            .commit_scoped(
-                second.credential().unwrap().reference,
-                Some(first_ref.reference),
-            )
-            .unwrap();
         assert!(
             resolver
                 .resolve(&first_ref, CredentialPurpose::Read)
@@ -1010,6 +1060,165 @@ mod tests {
             "secret-sentinel-1"
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn saved_cloud_rotation_recovers_after_crash_or_commit_failure() {
+        for inject_commit_failure in [false, true] {
+            let dir =
+                std::env::temp_dir().join(format!("relayne-cloud-recovery-{}", Uuid::new_v4()));
+            let path = dir.join("cases.dpapi");
+            let mut state = HelperState::at_path(path.clone());
+            state.create();
+            let case_id = state.current().unwrap().id();
+            let scope = BoundScope::AwsEc2 {
+                account: "123456789012".into(),
+                region: "eu-central-1".into(),
+                instance_id: "i-0123456789abcdef0".into(),
+                credential: None,
+            };
+            state.revise(CaseEdit::Scopes(vec![scope]));
+            state.save();
+            let mut vault = PersistentCredentialStore::at(dir.join("credentials.json")).unwrap();
+            let first_case = state.current().unwrap().clone();
+            state
+                .scope_editor
+                .prepare_cloud(case_id, &first_case.scopes()[0])
+                .unwrap();
+            state.scope_editor.cloud_principal = "arn:aws:iam::123456789012:user/read".into();
+            state.scope_editor.cloud_access_key = "AKIA1234567890123456".into();
+            state.scope_editor.cloud_secret = "secret-sentinel-1".into();
+            persist_cloud_credential(&mut state, &first_case, 0, &mut vault).unwrap();
+            let old_case = state.current().unwrap().clone();
+            let old = old_case.scopes()[0].credential().unwrap().clone();
+            state
+                .scope_editor
+                .prepare_cloud(case_id, &old_case.scopes()[0])
+                .unwrap();
+            state.scope_editor.cloud_access_key = "AKIA1234567890123456".into();
+            state.scope_editor.cloud_secret = "secret-sentinel-2".into();
+            let (new_id, old_id) =
+                save_cloud_credential_case(&mut state, &old_case, 0, &mut vault).unwrap();
+            let new = state.current().unwrap().scopes()[0]
+                .credential()
+                .unwrap()
+                .clone();
+            let resolver = PersistentSecretResolver::at(dir.join("credentials.scoped.dpapi"));
+            assert!(resolver.resolve(&new, CredentialPurpose::Read).is_err());
+            assert_eq!(
+                resolver
+                    .resolve(&old, CredentialPurpose::Read)
+                    .unwrap()
+                    .password(),
+                "secret-sentinel-1"
+            );
+            if inject_commit_failure {
+                assert!(
+                    vault
+                        .commit_scoped(&path, new_id, Some(Uuid::new_v4()))
+                        .is_err()
+                );
+                assert_eq!(old_id, Some(old.reference));
+                assert!(resolver.resolve(&new, CredentialPurpose::Read).is_err());
+            }
+            drop(state);
+            let mut restarted = HelperState::at_path(path.clone());
+            restarted.select(case_id);
+            assert_eq!(
+                restarted.current().unwrap().scopes()[0]
+                    .credential()
+                    .unwrap(),
+                &new
+            );
+            assert_eq!(
+                resolver
+                    .resolve(&new, CredentialPurpose::Read)
+                    .unwrap()
+                    .password(),
+                "secret-sentinel-2"
+            );
+            assert!(resolver.resolve(&old, CredentialPurpose::Read).is_err());
+            if !inject_commit_failure {
+                // A different vault authority wins after the next case save. Recovery must
+                // leave that authority intact and keep the case's pending reference blocked.
+                let current_case = restarted.current().unwrap().clone();
+                restarted
+                    .scope_editor
+                    .prepare_cloud(case_id, &current_case.scopes()[0])
+                    .unwrap();
+                restarted.scope_editor.cloud_access_key = "AKIA1234567890123456".into();
+                restarted.scope_editor.cloud_secret = "secret-sentinel-3".into();
+                let (blocked_id, _) =
+                    save_cloud_credential_case(&mut restarted, &current_case, 0, &mut vault)
+                        .unwrap();
+                let blocked = restarted.current().unwrap().scopes()[0]
+                    .credential()
+                    .unwrap()
+                    .clone();
+                assert_eq!(blocked.reference, blocked_id);
+                let mut competing_cases = crate::helper::store::HelperStore::load(&path).unwrap();
+                let competing_case_id = competing_cases
+                    .create(crate::helper::case::ProblemIntake::default())
+                    .unwrap();
+                let competing_revision =
+                    competing_cases.case(competing_case_id).unwrap().revision();
+                let competing = vault
+                    .prepare_scoped(
+                        &current_case.scopes()[0].resource_digest().unwrap(),
+                        CredentialPurpose::Read,
+                        Some(new.reference),
+                        competing_case_id,
+                        competing_revision,
+                        SecretCredential {
+                            username: new.principal.clone(),
+                            password: "competing-secret".into(),
+                            domain: String::new(),
+                        },
+                    )
+                    .unwrap();
+                let competing_id = competing.id;
+                let competing_scope = CredentialScope {
+                    reference: competing.id,
+                    purpose: competing.purpose,
+                    generation: competing.generation,
+                    principal: competing.principal,
+                    context: competing.context,
+                    context_digest: competing.scope_digest,
+                };
+                let mut competing_bound_scope = current_case.scopes()[0].clone();
+                if let BoundScope::AwsEc2 { credential, .. } = &mut competing_bound_scope {
+                    *credential = Some(competing_scope.clone());
+                }
+                competing_cases
+                    .revise(
+                        competing_case_id,
+                        competing_revision,
+                        CaseEdit::Scopes(vec![competing_bound_scope]),
+                    )
+                    .unwrap();
+                competing_cases.save(&path).unwrap();
+                vault
+                    .commit_scoped(&path, competing_id, Some(new.reference))
+                    .unwrap();
+                let mut conflicted = HelperState::at_path(path.clone());
+                conflicted.select(case_id);
+                assert_eq!(
+                    conflicted.current().unwrap().scopes()[0]
+                        .credential()
+                        .unwrap(),
+                    &blocked
+                );
+                assert!(resolver.resolve(&blocked, CredentialPurpose::Read).is_err());
+                assert_eq!(
+                    resolver
+                        .resolve(&competing_scope, CredentialPurpose::Read)
+                        .unwrap()
+                        .password(),
+                    "competing-secret"
+                );
+            }
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     #[test]
