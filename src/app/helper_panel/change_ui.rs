@@ -371,7 +371,7 @@ fn action_authority(
                         .organization
                         .clone()
                         .ok_or_else(|| anyhow::anyhow!("Team organization missing"))?;
-                    let (binding, _) = crate::helper::approval::staged_request_binding(
+                    let binding = crate::helper::approval::staged_request_binding(
                         case,
                         &proposal,
                         org.clone(),
@@ -499,45 +499,9 @@ fn action_authority(
         if let Some(receipt) = state.action_ui.receipt.clone() {
             ui.label(format!(
                 "Consumed once: {}. A durable local intent is required before any target contact.",
-                receipt.consume_id
+                receipt.receipt().consume_id
             ));
-            if state.action_ui.intent.is_none()
-                && ui.button("Record final checked intent").clicked()
-            {
-                let result = (|| -> anyhow::Result<_> {
-                    let proposal = state
-                        .reviewed_proposal
-                        .as_ref()
-                        .ok_or_else(|| anyhow::anyhow!("Proposal missing"))?;
-                    let (_, observed) = crate::helper::approval::staged_request_binding(
-                        case,
-                        proposal,
-                        item.binding.organization_sha256.clone(),
-                    )?;
-                    let case_path = state
-                        .path
-                        .as_ref()
-                        .ok_or_else(|| anyhow::anyhow!("Case store path missing"))?;
-                    let journal_path = crate::helper::journal::ActionJournal::path()?;
-                    crate::helper::approval::authorize_and_record_intent(
-                        case_path,
-                        &journal_path,
-                        proposal,
-                        &item.binding,
-                        &receipt,
-                        &observed,
-                    )
-                })();
-                match result {
-                    Ok(id) => {
-                        state.action_ui.intent = Some(id);
-                        state.notice="Prepared intent saved. No SQL executor is registered in this wave; no action was launched.".into()
-                    }
-                    Err(e) => {
-                        state.notice = format!("No action launched: final local gate failed: {e}")
-                    }
-                };
-            }
+            ui.strong("Native SQL verification is pending. This consumed approval cannot launch a change from stored evidence.");
         }
     }
     if let Some(id) = state.action_ui.intent {
@@ -550,19 +514,145 @@ fn action_authority(
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(100));
     }
+    if ui
+        .button("Find consumed team approvals for this case")
+        .clicked()
+    {
+        let result = (|| -> anyhow::Result<_> {
+            let client = team.repair_client()?.0;
+            let mut found = Vec::new();
+            for page in 0..50 {
+                let rows = client.list_actions_v2(page * 20)?;
+                let done = rows.len() < 20;
+                found.extend(rows.into_iter().filter(|a| {
+                    a.binding.case_id == case.id() && a.state == ActionApprovalStateV2::Consumed
+                }));
+                if done {
+                    break;
+                }
+            }
+            Ok(found)
+        })();
+        match result {
+            Ok(found) => state.action_ui.recovered = found,
+            Err(error) => state.notice = format!("Could not load consumed approvals: {error}"),
+        }
+    }
+    for approval in &state.action_ui.recovered {
+        ui.label(format!(
+            "Consumed approval {} · run {} · fingerprint {}",
+            approval.id, approval.binding.run_id, approval.fingerprint
+        ));
+    }
+    if !state.action_ui.recovered.is_empty() {
+        ui.strong("Reconcile the recorded run with an operator. Consumption cannot be retried automatically.");
+    }
     if let Ok(path) = crate::helper::journal::ActionJournal::path() {
-        if let Ok(journal) = crate::helper::journal::ActionJournal::load(&path) {
-            for intent in journal.intents().iter().filter(|i| i.case_id == case.id()) {
+        if let Ok(mut journal) = crate::helper::journal::ActionJournal::load(&path) {
+            let runs = journal
+                .intents()
+                .iter()
+                .filter(|i| i.case_id == case.id())
+                .cloned()
+                .collect::<Vec<_>>();
+            for intent in runs {
                 ui.label(format!(
                     "Run {} · {:?} · outcome reported {}",
                     intent.run_id, intent.state, intent.outcome_acknowledged
                 ));
+                let next = if intent.state == crate::helper::journal::IntentState::DispatchStarted
+                    && ui
+                        .button(format!("Mark run {} outcome unknown", intent.run_id))
+                        .clicked()
+                {
+                    Some((
+                        crate::helper::journal::IntentState::OutcomeUnknown,
+                        crate::helper_approval::ActionOutcomeV2::OutcomeUnknown,
+                    ))
+                } else if matches!(
+                    intent.state,
+                    crate::helper::journal::IntentState::DispatchStarted
+                        | crate::helper::journal::IntentState::OutcomeUnknown
+                        | crate::helper::journal::IntentState::NeedsIntervention
+                ) {
+                    ui.checkbox(
+                        &mut state.action_ui.outcome_observed,
+                        "I independently checked this run's outcome against the target",
+                    );
+                    if state.action_ui.outcome_observed
+                        && ui
+                            .button(format!("Record verified success for {}", intent.run_id))
+                            .clicked()
+                    {
+                        Some((
+                            crate::helper::journal::IntentState::Verified,
+                            crate::helper_approval::ActionOutcomeV2::Verified,
+                        ))
+                    } else if state.action_ui.outcome_observed
+                        && ui
+                            .button(format!("Record verified failure for {}", intent.run_id))
+                            .clicked()
+                    {
+                        Some((
+                            crate::helper::journal::IntentState::Failed,
+                            crate::helper_approval::ActionOutcomeV2::Failed,
+                        ))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some((observed, outcome)) = next {
+                    let result = journal
+                        .reconcile(intent.run_id, Some(observed))
+                        .and_then(|_| journal.queue_outcome(intent.id, outcome));
+                    state.action_ui.outcome_observed = false;
+                    state.notice = match result {
+                        Ok(event) => format!(
+                            "Outcome event {} saved for explicit delivery",
+                            event.event_id
+                        ),
+                        Err(error) => format!("Outcome reconciliation failed: {error}"),
+                    };
+                }
                 if matches!(
                     intent.state,
                     crate::helper::journal::IntentState::OutcomeUnknown
                         | crate::helper::journal::IntentState::NeedsIntervention
                 ) {
                     ui.strong("Requires human reconciliation; do not replay the action.");
+                }
+            }
+            let pending = journal
+                .pending_outcomes()
+                .filter(|event| {
+                    journal
+                        .intents()
+                        .iter()
+                        .any(|intent| intent.case_id == case.id() && intent.run_id == event.run_id)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            for event in pending {
+                if ui
+                    .button(format!(
+                        "Send saved outcome event {} (sequence {})",
+                        event.event_id, event.sequence
+                    ))
+                    .clicked()
+                {
+                    let result = team
+                        .repair_client()
+                        .map(|v| v.0)
+                        .and_then(|client| client.report_action_outcome_v2(&event))
+                        .and_then(|ack| journal.acknowledge_outcome(&ack));
+                    state.notice = match result {
+                        Ok(()) => format!("Team acknowledged outcome event {}", event.event_id),
+                        Err(error) => format!(
+                            "Outcome delivery/ack save failed; retry the same event: {error}"
+                        ),
+                    };
                 }
             }
         }

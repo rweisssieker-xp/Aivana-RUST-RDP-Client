@@ -18,11 +18,16 @@ use uuid::Uuid;
 
 /// Immutable observations from local collectors. A launcher must re-observe live
 /// remote metadata/credential/proof before calling the case-store gate below.
-pub struct DispatchObservation {
-    pub metadata_sha256: String,
-    pub before_sha256: String,
-    pub credential_scope_sha256: String,
-    pub observed_at: chrono::DateTime<Utc>,
+struct DispatchObservation {
+    metadata_sha256: String,
+    before_sha256: String,
+    credential_scope_sha256: String,
+    observed_at: chrono::DateTime<Utc>,
+}
+/// Reserved for the native SQL collector in Task 14. No public constructor is
+/// available, so stored evidence or a caller-filled DTO cannot authorize launch.
+pub struct NativeDispatchProof {
+    observation: DispatchObservation,
 }
 
 /// Prepares metadata for a staged consent request from the current reviewed case.
@@ -32,7 +37,7 @@ pub fn staged_request_binding(
     case: &HelperCase,
     proposal: &HelperProposal,
     organization_sha256: String,
-) -> Result<(ActionBindingV2, DispatchObservation)> {
+) -> Result<ActionBindingV2> {
     let now = Utc::now();
     ensure!(
         valid_digest(&organization_sha256),
@@ -57,14 +62,20 @@ pub fn staged_request_binding(
             .is_some_and(|c| c.purpose == CredentialPurpose::ControlledChange),
         "Controlled-change credential scope missing"
     );
+    let resource = scope.resource_digest()?;
     let evidence = case
         .evidence()
         .iter()
         .find(|e| {
             e.content_sha256 == metadata.source_evidence_sha256
-                && e.binding.scope_sha256 == metadata.object.scope_sha256
-                && e.binding.credential_scope_sha256
-                    == scope.credential_scope_digest().unwrap_or_default()
+                && case.scopes().iter().any(|read| {
+                    read.credential()
+                        .is_some_and(|credential| credential.purpose == CredentialPurpose::Read)
+                        && read.resource_digest().ok().as_deref() == Some(resource.as_str())
+                        && read.digest().ok().as_deref() == Some(e.binding.scope_sha256.as_str())
+                        && read.credential_scope_digest().ok().as_deref()
+                            == Some(e.binding.credential_scope_sha256.as_str())
+                })
                 && e.eligibility(now, chrono::Duration::seconds(119)) == Eligibility::Eligible
         })
         .ok_or_else(|| anyhow::anyhow!("Fresh live SQL before-state evidence missing"))?;
@@ -109,13 +120,7 @@ pub fn staged_request_binding(
         expires_at: now + chrono::Duration::minutes(3),
     };
     binding.validate(now)?;
-    let observation = DispatchObservation {
-        metadata_sha256,
-        before_sha256: evidence.content_sha256.clone(),
-        credential_scope_sha256,
-        observed_at: evidence.source_observed_at,
-    };
-    Ok((binding, observation))
+    Ok(binding)
 }
 
 pub struct DispatchContext<'a> {
@@ -156,6 +161,12 @@ fn state(case_id: Uuid) -> Result<(u64, bool)> {
 fn is_blocked(case_id: Uuid) -> Result<bool> {
     Ok(state(case_id)?.1)
 }
+fn scope_resource(case: &HelperCase, scope_sha256: &str) -> Option<String> {
+    case.scopes()
+        .iter()
+        .find(|scope| scope.digest().ok().as_deref() == Some(scope_sha256))
+        .and_then(|scope| scope.resource_digest().ok())
+}
 fn block(case_id: Uuid) -> Result<()> {
     let mut states = gate_states()
         .lock()
@@ -178,7 +189,7 @@ fn clear_if_unchanged(case_id: Uuid, generation: u64) -> Result<()> {
 
 pub fn authorize_dispatch(
     binding: &ActionBindingV2,
-    receipt: &ConsumeReceiptV2,
+    receipt: &crate::team_client::VerifiedConsumeV2,
     current: &DispatchContext<'_>,
 ) -> Result<DispatchPermit> {
     let now = Utc::now();
@@ -188,10 +199,10 @@ pub fn authorize_dispatch(
         "Case edit or review withdrawal suspended action authority"
     );
     ensure!(
-        receipt.approval_id != Uuid::nil()
-            && receipt.consume_id != Uuid::nil()
-            && receipt.fingerprint == binding.fingerprint()?
-            && receipt.organization_sha256 == binding.organization_sha256,
+        receipt.receipt().approval_id != Uuid::nil()
+            && receipt.receipt().consume_id != Uuid::nil()
+            && receipt.receipt().fingerprint == binding.fingerprint()?
+            && receipt.receipt().organization_sha256 == binding.organization_sha256,
         "Consumed action approval differs from binding"
     );
     ensure!(
@@ -243,14 +254,22 @@ pub fn authorize_dispatch(
         anyhow::bail!("Only typed SQL action uses v2 authority")
     };
     action.validate(metadata)?;
+    let resource = scope_resource(current.case, &binding.scope_sha256)
+        .ok_or_else(|| anyhow::anyhow!("Current change resource missing"))?;
     ensure!(
         current
             .case
             .evidence()
             .iter()
             .any(|e| e.content_sha256 == metadata.source_evidence_sha256
-                && e.binding.scope_sha256 == binding.scope_sha256
-                && e.binding.credential_scope_sha256 == binding.credential_scope_sha256
+                && current.case.scopes().iter().any(|read| {
+                    read.credential()
+                        .is_some_and(|credential| credential.purpose == CredentialPurpose::Read)
+                        && read.resource_digest().ok().as_deref() == Some(resource.as_str())
+                        && read.digest().ok().as_deref() == Some(e.binding.scope_sha256.as_str())
+                        && read.credential_scope_digest().ok().as_deref()
+                            == Some(e.binding.credential_scope_sha256.as_str())
+                })
                 && e.eligibility(now, chrono::Duration::seconds(119)) == Eligibility::Eligible),
         "Live metadata source changed or became stale"
     );
@@ -311,7 +330,7 @@ pub fn authorize_dispatch(
     }
     Ok(DispatchPermit {
         binding: binding.clone(),
-        receipt: receipt.clone(),
+        receipt: receipt.receipt().clone(),
     })
 }
 
@@ -334,9 +353,11 @@ pub fn record_local_review(
                     == digest(b"relayne-helper-case-review-v2", reviewed_case)?,
             "Stale or unsaved case review"
         );
-        let review_sha256 = proposal.review_digest()?;
-        let mut journal = ActionJournal::load(journal_path)?;
-        journal.record_review_locked(case.id(), case.revision(), review_sha256)
+        super::catalog::with_current_proposal(case, proposal, || {
+            let review_sha256 = proposal.review_digest()?;
+            let mut journal = ActionJournal::load(journal_path)?;
+            journal.record_review_locked(case.id(), case.revision(), review_sha256)
+        })
     })?;
     clear_if_unchanged(proposal.case_id, generation)
 }
@@ -358,22 +379,24 @@ pub fn authorize_and_record_intent(
     journal_path: &Path,
     proposal: &HelperProposal,
     binding: &ActionBindingV2,
-    receipt: &ConsumeReceiptV2,
-    observation: &DispatchObservation,
+    receipt: &crate::team_client::VerifiedConsumeV2,
+    observation: &NativeDispatchProof,
 ) -> Result<IntentId> {
     HelperStore::inspect_locked(case_path, |store| {
         let case = store
             .case(binding.case_id)
             .ok_or_else(|| anyhow::anyhow!("Case missing"))?;
-        let mut journal = ActionJournal::load(journal_path)?;
-        let current = DispatchContext {
-            case,
-            proposal,
-            journal: &journal,
-            observation,
-        };
-        let permit = authorize_dispatch(binding, receipt, &current)?;
-        journal.record_intent(permit)
+        super::catalog::with_current_proposal(case, proposal, || {
+            let mut journal = ActionJournal::load(journal_path)?;
+            let current = DispatchContext {
+                case,
+                proposal,
+                journal: &journal,
+                observation: &observation.observation,
+            };
+            let permit = authorize_dispatch(binding, receipt, &current)?;
+            journal.record_intent(permit)
+        })
     })
 }
 
@@ -386,36 +409,38 @@ pub fn authorize_and_start_dispatch(
     intent_id: IntentId,
     proposal: &HelperProposal,
     binding: &ActionBindingV2,
-    receipt: &ConsumeReceiptV2,
-    observation: &DispatchObservation,
+    receipt: &crate::team_client::VerifiedConsumeV2,
+    observation: &NativeDispatchProof,
 ) -> Result<DispatchPermit> {
     HelperStore::inspect_locked(case_path, |store| {
         let case = store
             .case(binding.case_id)
             .ok_or_else(|| anyhow::anyhow!("Case missing"))?;
-        let mut journal = ActionJournal::load(journal_path)?;
-        let intent = journal
-            .intents()
-            .iter()
-            .find(|i| i.id == intent_id)
-            .ok_or_else(|| anyhow::anyhow!("Prepared intent missing"))?;
-        ensure!(
-            intent.state == super::journal::IntentState::Prepared
-                && intent.approval_id == receipt.approval_id
-                && intent.consume_id == receipt.consume_id
-                && intent.run_id == binding.run_id
-                && intent.binding_fingerprint == receipt.fingerprint,
-            "Intent already launched or binding changed"
-        );
-        let current = DispatchContext {
-            case,
-            proposal,
-            journal: &journal,
-            observation,
-        };
-        let permit = authorize_dispatch(binding, receipt, &current)?;
-        journal.mark_dispatch_started(intent_id)?;
-        Ok(permit)
+        super::catalog::with_current_proposal(case, proposal, || {
+            let mut journal = ActionJournal::load(journal_path)?;
+            let intent = journal
+                .intents()
+                .iter()
+                .find(|i| i.id == intent_id)
+                .ok_or_else(|| anyhow::anyhow!("Prepared intent missing"))?;
+            ensure!(
+                intent.state == super::journal::IntentState::Prepared
+                    && intent.approval_id == receipt.receipt().approval_id
+                    && intent.consume_id == receipt.receipt().consume_id
+                    && intent.run_id == binding.run_id
+                    && intent.binding_fingerprint == receipt.receipt().fingerprint,
+                "Intent already launched or binding changed"
+            );
+            let current = DispatchContext {
+                case,
+                proposal,
+                journal: &journal,
+                observation: &observation.observation,
+            };
+            let permit = authorize_dispatch(binding, receipt, &current)?;
+            journal.mark_dispatch_started(intent_id)?;
+            Ok(permit)
+        })
     })
 }
 

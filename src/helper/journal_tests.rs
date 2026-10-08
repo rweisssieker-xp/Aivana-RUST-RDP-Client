@@ -159,3 +159,47 @@ fn ack_save_failure_keeps_exact_event_for_retry() {
         })
         .unwrap();
 }
+
+#[test]
+fn acknowledged_unknown_can_be_corrected_once_with_a_linked_event() {
+    let path = path();
+    let mut journal = ActionJournal::load(&path).unwrap();
+    let permit = permit();
+    let run = permit.binding().run_id;
+    let id = journal.record_intent(permit).unwrap();
+    journal.mark_dispatch_started(id).unwrap();
+    journal
+        .reconcile(run, Some(IntentState::OutcomeUnknown))
+        .unwrap();
+    let unknown = journal
+        .queue_outcome(id, ActionOutcomeV2::OutcomeUnknown)
+        .unwrap();
+    assert!(journal.reconcile(run, Some(IntentState::Verified)).is_err());
+    journal
+        .acknowledge_outcome(&ActionOutcomeAckV2 {
+            event_id: unknown.event_id,
+            accepted: true,
+        })
+        .unwrap();
+    journal.reconcile(run, Some(IntentState::Verified)).unwrap();
+    let verified = journal
+        .queue_outcome(id, ActionOutcomeV2::Verified)
+        .unwrap();
+    assert_eq!(verified.sequence, 2);
+    assert_eq!(verified.previous_event_id, Some(unknown.event_id));
+    assert_eq!(
+        journal
+            .queue_outcome(id, ActionOutcomeV2::Verified)
+            .unwrap()
+            .event_id,
+        verified.event_id
+    );
+    assert_eq!(
+        ActionJournal::load(&path)
+            .unwrap()
+            .pending_outcomes()
+            .next()
+            .unwrap(),
+        &verified
+    );
+}

@@ -645,6 +645,10 @@ impl Catalog {
             recipe_revision: entry.body.revision,
             action_version: entry.body.action_version,
             recipe_identity: entry.identity()?,
+            catalog_generation_sha256: helper_action::digest(
+                b"relayne-helper-catalog-generation-v1",
+                &self.entries,
+            )?,
             action,
             verification: entry.body.verification.clone(),
             restoration: entry.body.restoration.clone(),
@@ -813,6 +817,7 @@ pub struct HelperProposal {
     pub recipe_revision: u64,
     pub action_version: u16,
     pub recipe_identity: Digest,
+    pub catalog_generation_sha256: Digest,
     pub action: CatalogAction,
     pub verification: VerificationSpec,
     pub restoration: RestorationSpec,
@@ -824,6 +829,56 @@ pub struct HelperProposal {
     pub evidence_ids: Vec<Uuid>,
     pub statistics_limit_acknowledged: bool,
 }
+/// Reopen the protected trust and catalog while their write locks are held.
+/// Callers hold the case lock first; the closure retains both locks through
+/// the journal operation so a publisher withdrawal cannot race admission.
+pub fn with_current_proposal<T>(
+    case: &HelperCase,
+    proposal: &HelperProposal,
+    use_current: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let trust_path = crate::security::app_data_file("helper-recipe-trust.dpapi")?;
+    let catalog_path = crate::security::app_data_file("helper-recipes.dpapi")?;
+    with_current_proposal_at(&trust_path, &catalog_path, case, proposal, use_current)
+}
+
+fn with_current_proposal_at<T>(
+    trust_path: &Path,
+    catalog_path: &Path,
+    case: &HelperCase,
+    proposal: &HelperProposal,
+    use_current: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let _trust_lock = protected_lock(&trust_path)?;
+    let _catalog_lock = protected_lock(&catalog_path)?;
+    let trust = CatalogTrust::load_protected(&trust_path)?;
+    let catalog = Catalog::load_protected(&catalog_path, trust)?;
+    let entry = catalog
+        .entries
+        .iter()
+        .find(|entry| {
+            entry.body.id == proposal.recipe_id && entry.body.revision == proposal.recipe_revision
+        })
+        .ok_or_else(|| anyhow::anyhow!("Current signed recipe missing or replaced"))?;
+    ensure!(
+        entry.identity()? == proposal.recipe_identity,
+        "Signed recipe identity changed"
+    );
+    let current = catalog.propose(
+        case,
+        entry,
+        ProposalParams {
+            plan_sha256: proposal.plan_sha256.clone(),
+            evidence_ids: proposal.evidence_ids.clone(),
+            statistics_limit_acknowledged: proposal.statistics_limit_acknowledged,
+        },
+    )?;
+    ensure!(
+        current == *proposal && current.review_digest()? == proposal.review_digest()?,
+        "Current trusted recipe review differs"
+    );
+    use_current()
+}
 
 impl HelperProposal {
     pub fn review_digest(&self) -> Result<Digest> {
@@ -834,6 +889,7 @@ impl HelperProposal {
                 && self.recipe_revision > 0
                 && self.action_version == helper_action::SQL_ACTION_VERSION
                 && helper_action::valid_digest(&self.recipe_identity)
+                && helper_action::valid_digest(&self.catalog_generation_sha256)
                 && helper_action::valid_digest(&self.plan_sha256)
                 && helper_action::valid_digest(&self.criteria_sha256)
                 && !self.evidence_ids.is_empty(),
@@ -1105,6 +1161,7 @@ mod tests {
             recipe_revision: 1,
             action_version: 1,
             recipe_identity: entry.identity().unwrap(),
+            catalog_generation_sha256: d(),
             action: entry.body.action.clone(),
             verification: entry.body.verification.clone(),
             restoration: entry.body.restoration.clone(),
@@ -1319,6 +1376,281 @@ mod tests {
         assert!(
             matches!(catalog.applicability(&case, &entry, case.evidence(), Utc::now()),
             Applicability::Gaps(gaps) if gaps.iter().any(|g| g.contains("trust")))
+        );
+    }
+
+    #[test]
+    fn current_protected_recipe_is_rederived_and_rejects_revocation_or_replacement() {
+        use crate::helper::{
+            evidence::{
+                Coverage, EVIDENCE_SCHEMA, EvidenceBinding, EvidenceEnvelope, EvidenceStatus,
+                NormalizedRecord, Observation, Origin, RecordKind, TimeQuality,
+            },
+            manifest::{CapabilityId, CapabilityManifest, ProbeParams},
+            planner::{HelperPlan, HelperPlanStep},
+            scope::{BoundScope, CredentialPurpose, CredentialScope, DatabaseEngine},
+            sql::types::SqlObservation,
+        };
+        use crate::mission::Target;
+        let (mut entry, _) = entry();
+        let profile = Uuid::new_v4();
+        let target = Target {
+            profile_id: profile,
+            name: "test".into(),
+            host: "example.test".into(),
+            port: 5432,
+            protocol: "RDP".into(),
+            username: "tester".into(),
+            domain: "example".into(),
+            route: "direct".into(),
+        };
+        let db = |purpose| {
+            BoundScope::Database {
+                target: target.clone(),
+                engine: DatabaseEngine::Postgres,
+                port: 5432,
+                database: "db".into(),
+                schema: Some("public".into()),
+                object: Some("orders".into()),
+                credential: Some(CredentialScope {
+                    reference: Uuid::new_v4(),
+                    purpose,
+                    generation: 1,
+                    principal: "test".into(),
+                    context: "test".into(),
+                    context_digest: d(),
+                }),
+            }
+            .bind_credential_context()
+            .unwrap()
+        };
+        let read = db(CredentialPurpose::Read);
+        let change = db(CredentialPurpose::ControlledChange);
+        let http = BoundScope::Http {
+            target: target.clone(),
+            port: 443,
+            tls: true,
+            path: "/health".into(),
+        };
+        let change_sha = change.digest().unwrap();
+        let read_sha = read.digest().unwrap();
+        let read_credential_sha = read.credential_scope_digest().unwrap();
+        if let CatalogAction::Sql { action, metadata } = &mut entry.body.action {
+            metadata.object.scope_sha256 = change_sha.clone();
+            if let SqlAction::PostgresAnalyze { object } = action {
+                object.scope_sha256 = change_sha.clone();
+            }
+        }
+        if let RequiredCheck::HttpFunctional { scope_sha256, .. } =
+            &mut entry.body.verification.checks[0]
+        {
+            *scope_sha256 = http.digest().unwrap();
+        }
+        if let RequiredCheck::Performance { scope_sha256, .. } =
+            &mut entry.body.verification.checks[1]
+        {
+            *scope_sha256 = change_sha.clone();
+        }
+        let rng = SystemRandom::new();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let key = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+        entry.publisher_key = STANDARD.encode(key.public_key().as_ref());
+        entry.signature = STANDARD.encode(
+            key.sign(&recipe_bytes(&entry.body, &entry.provenance).unwrap())
+                .as_ref(),
+        );
+        let trust = CatalogTrust {
+            enrolled_keys: vec![entry.publisher_key.clone()],
+            source_digest: None,
+        };
+        entry.verify(&trust).unwrap();
+
+        let mut intake = super::super::case::ProblemIntake::default();
+        intake.success_criteria = entry
+            .body
+            .verification
+            .criteria
+            .iter()
+            .map(|criterion| super::super::case::SuccessCriterion {
+                measure: criterion.measure.clone(),
+                comparator: match criterion.comparator {
+                    CriterionComparator::AtMost => super::super::case::Comparator::AtMost,
+                    CriterionComparator::AtLeast => super::super::case::Comparator::AtLeast,
+                    CriterionComparator::Equal => super::super::case::Comparator::Equal,
+                },
+                threshold: f64::from_bits(criterion.threshold_bits),
+                unit: criterion.unit.clone(),
+                window: criterion.window.clone(),
+                reviewed: true,
+            })
+            .collect();
+        let case = HelperCase::new(intake).unwrap();
+        let now = Utc::now();
+        let evidence = EvidenceEnvelope {
+            schema: EVIDENCE_SCHEMA,
+            id: Uuid::new_v4(),
+            binding: EvidenceBinding {
+                case_id: case.id(),
+                case_revision: case.revision(),
+                request_id: Uuid::new_v4(),
+                scope_sha256: read_sha,
+                credential_scope_sha256: read_credential_sha,
+                run_id: None,
+            },
+            capability_id: CapabilityId::SqlRead,
+            capability_version: 1,
+            parser_version: 1,
+            origin: Origin::Live,
+            source_id: d(),
+            source_observed_at: now,
+            retrieved_at: now,
+            time_quality: TimeQuality::Trusted,
+            status: EvidenceStatus::Complete,
+            coverage: Coverage {
+                observed: 1,
+                expected: 1,
+                truncated: false,
+            },
+            content_sha256: d(),
+            records: vec![NormalizedRecord {
+                kind: RecordKind::SqlRead,
+                observation: Observation::Healthy,
+                subject_sha256: d(),
+            }],
+            metrics: vec![],
+            sql_observations: vec![
+                SqlObservation::PostgresObject {
+                    schema: "public".into(),
+                    name: "orders".into(),
+                    object_id: 42,
+                    column_count: 1,
+                },
+                SqlObservation::PostgresColumn {
+                    object_id: 42,
+                    column_id: 1,
+                    name: "status".into(),
+                    plain: true,
+                },
+            ],
+            evidence_refs: vec![],
+        };
+        let mut value = serde_json::to_value(case).unwrap();
+        value["profile_ids"] = serde_json::json!([profile]);
+        value["scopes"] = serde_json::to_value([read, change, http]).unwrap();
+        value["evidence"] = serde_json::to_value([evidence.clone()]).unwrap();
+        value["evidence_revision"] = serde_json::json!(1);
+        let mut case: HelperCase = serde_json::from_value(value).unwrap();
+        let manifest = CapabilityManifest::built_in();
+        let declaration = manifest
+            .declarations
+            .iter()
+            .find(|d| d.id == CapabilityId::SqlWorkloadBaseline)
+            .unwrap();
+        let plan = HelperPlan {
+            case_id: case.id(),
+            case_revision: case.revision(),
+            evidence_revision: case.evidence_revision(),
+            generated_at: now,
+            hypotheses: vec![],
+            steps: vec![HelperPlanStep {
+                capability_id: declaration.id,
+                version: declaration.version,
+                role: declaration.role,
+                prerequisites: declaration.prerequisites.clone(),
+                params: ProbeParams::SqlWorkload {
+                    workload_digest: d(),
+                },
+                scope_sha256: change_sha,
+                evidence_refs: vec![],
+            }],
+            rationale: "Synthetic reviewed workload fixture".into(),
+        };
+        case.refresh_plan(plan).unwrap();
+        case.validate().unwrap();
+        let catalog = Catalog {
+            entries: vec![entry.clone()],
+            trust: trust.clone(),
+            source_digest: None,
+        };
+        let CatalogAction::Sql { metadata, .. } = &entry.body.action else {
+            unreachable!()
+        };
+        assert_eq!(
+            case.evidence()[0].eligibility(Utc::now(), Duration::minutes(5)),
+            Eligibility::Eligible
+        );
+        assert!(
+            exact_metadata_in_evidence(&case.evidence()[0], metadata),
+            "exact metadata projection did not match"
+        );
+        assert!(
+            matches!(
+                catalog.applicability(&case, &entry, case.evidence(), Utc::now()),
+                Applicability::Candidate(_)
+            ),
+            "synthetic fixture gaps: {:?}",
+            catalog.applicability(&case, &entry, case.evidence(), Utc::now())
+        );
+        let proposal = catalog
+            .propose(
+                &case,
+                &entry,
+                ProposalParams {
+                    plan_sha256: helper_action::digest(
+                        b"relayne-helper-reviewed-plan-v1",
+                        case.plan().unwrap(),
+                    )
+                    .unwrap(),
+                    evidence_ids: vec![evidence.id],
+                    statistics_limit_acknowledged: true,
+                },
+            )
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!("relayne-current-catalog-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let trust_path = dir.join("trust.dpapi");
+        let catalog_path = dir.join("catalog.dpapi");
+        trust.save_protected(&trust_path).unwrap();
+        catalog.save_protected(&catalog_path).unwrap();
+        assert!(
+            with_current_proposal_at(&trust_path, &catalog_path, &case, &proposal, || Ok(()))
+                .is_ok()
+        );
+        let mut withdrawn = CatalogTrust::load_protected(&trust_path).unwrap();
+        withdrawn.enrolled_keys.clear();
+        withdrawn.save_protected(&trust_path).unwrap();
+        assert!(
+            with_current_proposal_at(&trust_path, &catalog_path, &case, &proposal, || Ok(()))
+                .is_err()
+        );
+        let mut restored = CatalogTrust::load_protected(&trust_path).unwrap();
+        restored.enroll(&entry.publisher_key).unwrap();
+        restored.save_protected(&trust_path).unwrap();
+        let mut replacement = Catalog::load_protected(&catalog_path, restored.clone()).unwrap();
+        let mut extra = entry.clone();
+        extra.body.id = Uuid::new_v4();
+        extra.signature = STANDARD.encode(
+            key.sign(&recipe_bytes(&extra.body, &extra.provenance).unwrap())
+                .as_ref(),
+        );
+        replacement.import_signed(extra).unwrap();
+        replacement.save_protected(&catalog_path).unwrap();
+        assert!(
+            with_current_proposal_at(&trust_path, &catalog_path, &case, &proposal, || Ok(()))
+                .is_err()
+        );
+        let mut replacement = Catalog::load_protected(&catalog_path, restored).unwrap();
+        let mut newer = entry.clone();
+        newer.body.revision = 2;
+        newer.signature = STANDARD.encode(
+            key.sign(&recipe_bytes(&newer.body, &newer.provenance).unwrap())
+                .as_ref(),
+        );
+        replacement.import_signed(newer).unwrap();
+        replacement.save_protected(&catalog_path).unwrap();
+        assert!(
+            with_current_proposal_at(&trust_path, &catalog_path, &case, &proposal, || Ok(()))
+                .is_err()
         );
     }
 }

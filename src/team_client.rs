@@ -16,6 +16,21 @@ use anyhow::{Context, Result, bail};
 use reqwest::{Url, blocking::Client};
 use serde::{Serialize, de::DeserializeOwned};
 use std::io::Read;
+/// Proof that this client received and checked a consume response over its
+/// authenticated team transport. A wire receipt alone cannot create this type.
+#[derive(Clone)]
+pub struct VerifiedConsumeV2 {
+    receipt: ConsumeReceiptV2,
+    endpoint: String,
+}
+impl VerifiedConsumeV2 {
+    pub fn receipt(&self) -> &ConsumeReceiptV2 {
+        &self.receipt
+    }
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+}
 #[derive(Clone)]
 pub struct TeamClient {
     endpoint: String,
@@ -53,11 +68,30 @@ impl TeamClient {
         &self,
         id: uuid::Uuid,
         input: &ConsumeActionApprovalV2,
-    ) -> Result<ConsumeReceiptV2> {
-        self.request(
+    ) -> Result<VerifiedConsumeV2> {
+        let capabilities = self.helper_capabilities()?;
+        anyhow::ensure!(
+            capabilities.authority_version == 2
+                && capabilities.organization_sha256 == input.binding.organization_sha256
+                && id != uuid::Uuid::nil(),
+            "Team organization changed before consumption"
+        );
+        input.binding.validate(chrono::Utc::now())?;
+        let receipt: ConsumeReceiptV2 = self.request(
             &format!("/v2/helper-action-approvals/{id}/consume"),
             Some(input),
-        )
+        )?;
+        anyhow::ensure!(
+            receipt.approval_id == id
+                && receipt.consume_id != uuid::Uuid::nil()
+                && receipt.fingerprint == input.binding.fingerprint()?
+                && receipt.organization_sha256 == capabilities.organization_sha256,
+            "Authenticated consume response differs from the requested action"
+        );
+        Ok(VerifiedConsumeV2 {
+            receipt,
+            endpoint: self.endpoint.clone(),
+        })
     }
     pub fn report_action_outcome_v2(
         &self,

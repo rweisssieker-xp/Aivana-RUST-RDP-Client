@@ -82,12 +82,13 @@ pub(super) fn show(state: &mut HelperState, ui: &mut Ui, case: &HelperCase) {
             ui.label("Local assessment · unconfirmed hypotheses");
             render_plan(ui, plan);
             if ui.button("Save current assessment").clicked() {
-                state.notice = match state
-                    .store
-                    .as_mut()
-                    .unwrap()
-                    .refresh_derived_plan(case.id(), plan.clone())
-                {
+                state.notice = match state.suspend_action_authority(case.id()).and_then(|_| {
+                    state
+                        .store
+                        .as_mut()
+                        .unwrap()
+                        .refresh_derived_plan(case.id(), plan.clone())
+                }) {
                     Ok(()) => "Derived assessment saved; case intent revision unchanged.".into(),
                     Err(e) => format!("Assessment could not be saved: {e}"),
                 };

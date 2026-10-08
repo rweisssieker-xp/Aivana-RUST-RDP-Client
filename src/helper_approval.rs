@@ -221,6 +221,9 @@ pub enum ActionOutcomeV2 {
 #[serde(deny_unknown_fields)]
 pub struct ActionOutcomeEventV2 {
     pub event_id: Uuid,
+    /// Starts at one. Each correction references the immediately preceding event.
+    pub sequence: u32,
+    pub previous_event_id: Option<Uuid>,
     pub approval_id: Uuid,
     pub consume_id: Uuid,
     pub run_id: Uuid,

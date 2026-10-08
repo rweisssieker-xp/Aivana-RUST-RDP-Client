@@ -193,18 +193,20 @@ fn actual_client_routes_enforce_two_people_exact_binding_and_one_consumption() {
     let receipt = client
         .consume_action_v2(item.id, &ConsumeActionApprovalV2 { binding: b.clone() })
         .unwrap();
-    assert_eq!(receipt.fingerprint, b.fingerprint().unwrap());
+    assert_eq!(receipt.receipt().fingerprint, b.fingerprint().unwrap());
     assert!(
         client
             .consume_action_v2(item.id, &ConsumeActionApprovalV2 { binding: b.clone() })
             .is_err()
     );
     let event = ActionOutcomeEventV2 {
+        sequence: 1,
+        previous_event_id: None,
         event_id: Uuid::new_v4(),
         approval_id: item.id,
-        consume_id: receipt.consume_id,
+        consume_id: receipt.receipt().consume_id,
         run_id: b.run_id,
-        fingerprint: receipt.fingerprint,
+        fingerprint: receipt.receipt().fingerprint.clone(),
         outcome: ActionOutcomeV2::OutcomeUnknown,
         occurred_at: Utc::now(),
     };
@@ -213,6 +215,29 @@ fn actual_client_routes_enforce_two_people_exact_binding_and_one_consumption() {
     let mut conflicting = event.clone();
     conflicting.outcome = ActionOutcomeV2::Failed;
     assert!(client.report_action_outcome_v2(&conflicting).is_err());
+    let correction = ActionOutcomeEventV2 {
+        event_id: Uuid::new_v4(),
+        sequence: 2,
+        previous_event_id: Some(event.event_id),
+        outcome: ActionOutcomeV2::Verified,
+        occurred_at: Utc::now(),
+        ..event.clone()
+    };
+    assert!(
+        client
+            .report_action_outcome_v2(&correction)
+            .unwrap()
+            .accepted
+    );
+    assert!(
+        client
+            .report_action_outcome_v2(&correction)
+            .unwrap()
+            .accepted
+    );
+    let mut stale = correction.clone();
+    stale.event_id = Uuid::new_v4();
+    assert!(client.report_action_outcome_v2(&stale).is_err());
 }
 
 #[test]

@@ -326,7 +326,7 @@ impl SqlObservation {
                     && field(name)
                     && *object_id > 0
                     && *column_count > 0
-                    && *column_count <= 20
+                    && *column_count <= 64
             }
             Self::PostgresColumn {
                 object_id,

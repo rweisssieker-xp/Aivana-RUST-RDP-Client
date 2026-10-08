@@ -41,6 +41,15 @@ pub struct IntentRecord {
     pub updated_at: DateTime<Utc>,
     pub outcome_event: Option<ActionOutcomeEventV2>,
     pub outcome_acknowledged: bool,
+    #[serde(default)]
+    pub outcome_corrections: Vec<OutcomeDelivery>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutcomeDelivery {
+    pub event: ActionOutcomeEventV2,
+    pub acknowledged: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -138,8 +147,8 @@ impl ActionJournal {
                 ids.insert(item.id)
                     && consumes.insert(item.consume_id)
                     && item.id != Uuid::nil()
-                && item.case_id != Uuid::nil()
-                && item.approval_id != Uuid::nil()
+                    && item.case_id != Uuid::nil()
+                    && item.approval_id != Uuid::nil()
                     && item.run_id != Uuid::nil()
                     && crate::helper_action::valid_digest(&item.binding_fingerprint),
                 "Invalid/duplicate action intent"
@@ -149,9 +158,29 @@ impl ActionJournal {
                     event.approval_id == item.approval_id
                         && event.consume_id == item.consume_id
                         && event.run_id == item.run_id
-                        && event.fingerprint == item.binding_fingerprint,
+                        && event.fingerprint == item.binding_fingerprint
+                        && event.sequence == 1
+                        && event.previous_event_id.is_none(),
                     "Invalid outcome event binding"
                 );
+            }
+            let mut previous = item.outcome_event.as_ref();
+            for correction in &item.outcome_corrections {
+                let event = &correction.event;
+                ensure!(
+                    previous.is_some_and(|prior| event.sequence == prior.sequence + 1
+                        && event.previous_event_id == Some(prior.event_id)
+                        && matches!(
+                            prior.outcome,
+                            ActionOutcomeV2::OutcomeUnknown | ActionOutcomeV2::NeedsIntervention
+                        ))
+                        && event.approval_id == item.approval_id
+                        && event.consume_id == item.consume_id
+                        && event.run_id == item.run_id
+                        && event.fingerprint == item.binding_fingerprint,
+                    "Invalid outcome correction chain"
+                );
+                previous = Some(event);
             }
             ensure!(
                 !item.outcome_acknowledged || item.outcome_event.is_some(),
@@ -253,6 +282,7 @@ impl ActionJournal {
             updated_at: now,
             outcome_event: None,
             outcome_acknowledged: false,
+            outcome_corrections: Vec::new(),
         });
         self.save()?;
         Ok(id)
@@ -296,10 +326,33 @@ impl ActionJournal {
                 ensure!(
                     matches!(
                         item.state,
-                        IntentState::DispatchStarted | IntentState::OutcomeUnknown
+                        IntentState::DispatchStarted
+                            | IntentState::OutcomeUnknown
+                            | IntentState::NeedsIntervention
                     ),
                     "Cannot reconcile an unlaunched run"
                 );
+                if matches!(
+                    item.state,
+                    IntentState::OutcomeUnknown | IntentState::NeedsIntervention
+                ) {
+                    ensure!(
+                        matches!(
+                            state,
+                            IntentState::Verified
+                                | IntentState::Failed
+                                | IntentState::NeedsIntervention
+                        ) && state != item.state,
+                        "Invalid outcome correction"
+                    );
+                    ensure!(
+                        item.outcome_corrections
+                            .last()
+                            .map(|d| d.acknowledged)
+                            .unwrap_or(item.outcome_acknowledged),
+                        "Report and acknowledge previous outcome before correction"
+                    );
+                }
                 item.state = state;
                 item.updated_at = Utc::now();
             }
@@ -335,11 +388,40 @@ impl ActionJournal {
             _ => anyhow::bail!("Run outcome unresolved"),
         };
         ensure!(outcome == expected, "Outcome differs from observed state");
-        if let Some(event) = &item.outcome_event {
-            return Ok(event.clone());
+        let previous = item
+            .outcome_corrections
+            .last()
+            .map(|d| (&d.event, d.acknowledged))
+            .or_else(|| {
+                item.outcome_event
+                    .as_ref()
+                    .map(|e| (e, item.outcome_acknowledged))
+            });
+        if let Some((event, acknowledged)) = previous {
+            if event.outcome == outcome {
+                return Ok(event.clone());
+            }
+            ensure!(
+                acknowledged,
+                "Previous outcome delivery must be acknowledged before correction"
+            );
+            ensure!(
+                matches!(
+                    event.outcome,
+                    ActionOutcomeV2::OutcomeUnknown | ActionOutcomeV2::NeedsIntervention
+                ) && matches!(
+                    outcome,
+                    ActionOutcomeV2::Verified
+                        | ActionOutcomeV2::Failed
+                        | ActionOutcomeV2::NeedsIntervention
+                ),
+                "Invalid outcome correction"
+            );
         }
         let event = ActionOutcomeEventV2 {
             event_id: Uuid::new_v4(),
+            sequence: previous.map_or(1, |(e, _)| e.sequence + 1),
+            previous_event_id: previous.map(|(e, _)| e.event_id),
             approval_id: item.approval_id,
             consume_id: item.consume_id,
             run_id: item.run_id,
@@ -347,7 +429,14 @@ impl ActionJournal {
             outcome,
             occurred_at: Utc::now(),
         };
-        item.outcome_event = Some(event.clone());
+        if item.outcome_event.is_some() {
+            item.outcome_corrections.push(OutcomeDelivery {
+                event: event.clone(),
+                acknowledged: false,
+            });
+        } else {
+            item.outcome_event = Some(event.clone());
+        }
         item.updated_at = Utc::now();
         self.save()?;
         Ok(event)
@@ -361,17 +450,38 @@ impl ActionJournal {
                 i.outcome_event
                     .as_ref()
                     .is_some_and(|e| e.event_id == ack.event_id)
+                    || i.outcome_corrections
+                        .iter()
+                        .any(|d| d.event.event_id == ack.event_id)
             })
             .ok_or_else(|| anyhow::anyhow!("Outcome event missing"))?;
-        item.outcome_acknowledged = true;
+        if item
+            .outcome_event
+            .as_ref()
+            .is_some_and(|e| e.event_id == ack.event_id)
+        {
+            item.outcome_acknowledged = true;
+        } else if let Some(delivery) = item
+            .outcome_corrections
+            .iter_mut()
+            .find(|d| d.event.event_id == ack.event_id)
+        {
+            delivery.acknowledged = true;
+        }
         item.updated_at = Utc::now();
         self.save()
     }
     pub fn pending_outcomes(&self) -> impl Iterator<Item = &ActionOutcomeEventV2> {
-        self.intents
-            .iter()
-            .filter(|i| !i.outcome_acknowledged)
-            .filter_map(|i| i.outcome_event.as_ref())
+        self.intents.iter().flat_map(|i| {
+            i.outcome_event
+                .iter()
+                .filter(move |_| !i.outcome_acknowledged)
+                .chain(
+                    i.outcome_corrections
+                        .iter()
+                        .filter_map(|d| (!d.acknowledged).then_some(&d.event)),
+                )
+        })
     }
 }
 

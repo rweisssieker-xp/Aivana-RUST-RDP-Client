@@ -26,9 +26,10 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
           approver_jwt_exp TEXT, state TEXT NOT NULL, created_at TEXT NOT NULL,
           decided_at TEXT, expires_at TEXT NOT NULL, consume_id TEXT UNIQUE, consumed_at TEXT);
         CREATE INDEX IF NOT EXISTS helper_action_requester_v2 ON helper_action_approvals_v2(requester_actor, created_at);
-        CREATE TABLE IF NOT EXISTS helper_action_outcomes_v2 (
-          event_id TEXT PRIMARY KEY, approval_id TEXT NOT NULL UNIQUE REFERENCES helper_action_approvals_v2(id),
-          payload TEXT NOT NULL, sender_actor TEXT NOT NULL, accepted_at TEXT NOT NULL);")?;
+        CREATE TABLE IF NOT EXISTS helper_action_outcome_events_v2 (
+          event_id TEXT PRIMARY KEY, approval_id TEXT NOT NULL REFERENCES helper_action_approvals_v2(id),
+          sequence INTEGER NOT NULL, payload TEXT NOT NULL, sender_actor TEXT NOT NULL,
+          accepted_at TEXT NOT NULL, UNIQUE(approval_id, sequence));")?;
     let identity: Option<String> = db
         .query_row(
             "SELECT value FROM helper_authority_v2 WHERE key='organization_sha256'",
@@ -463,6 +464,8 @@ pub(super) fn serve(
             }
         };
         if event.event_id == Uuid::nil()
+            || event.sequence == 0
+            || event.sequence > 16
             || event.occurred_at > now + Duration::minutes(1)
             || event.occurred_at < now - Duration::days(90)
             || !crate::helper_action::valid_digest(&event.fingerprint)
@@ -492,7 +495,7 @@ pub(super) fn serve(
         }
         if let Some(existing) = tx
             .query_row(
-                "SELECT payload FROM helper_action_outcomes_v2 WHERE event_id=?1",
+                "SELECT payload FROM helper_action_outcome_events_v2 WHERE event_id=?1",
                 [event.event_id.to_string()],
                 |r| r.get::<_, String>(0),
             )
@@ -512,15 +515,47 @@ pub(super) fn serve(
             };
             return Ok(());
         }
-        let count: i64 =
-            tx.query_row("SELECT COUNT(*) FROM helper_action_outcomes_v2", [], |r| {
-                r.get(0)
-            })?;
+        let preceding: Option<String> = tx.query_row(
+            "SELECT payload FROM helper_action_outcome_events_v2 WHERE approval_id=?1 ORDER BY sequence DESC LIMIT 1",
+            [event.approval_id.to_string()], |r| r.get(0)
+        ).optional()?;
+        let valid_sequence = match preceding {
+            None => event.sequence == 1 && event.previous_event_id.is_none(),
+            Some(payload) => {
+                let prior: ActionOutcomeEventV2 = serde_json::from_str(&payload)?;
+                event.sequence == prior.sequence + 1
+                    && event.previous_event_id == Some(prior.event_id)
+                    && matches!(
+                        prior.outcome,
+                        ActionOutcomeV2::OutcomeUnknown | ActionOutcomeV2::NeedsIntervention
+                    )
+                    && matches!(
+                        event.outcome,
+                        ActionOutcomeV2::Verified
+                            | ActionOutcomeV2::Failed
+                            | ActionOutcomeV2::NeedsIntervention
+                    )
+                    && event.outcome != prior.outcome
+            }
+        };
+        if !valid_sequence {
+            err(
+                request,
+                409,
+                "Action outcome sequence or correction invalid",
+            );
+            return Ok(());
+        }
+        let count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM helper_action_outcome_events_v2",
+            [],
+            |r| r.get(0),
+        )?;
         if count >= 200_000 {
             err(request, 503, "Action outcome capacity reached");
             return Ok(());
         }
-        tx.execute("INSERT INTO helper_action_outcomes_v2(event_id,approval_id,payload,sender_actor,accepted_at) VALUES(?1,?2,?3,?4,?5)",params![event.event_id.to_string(),event.approval_id.to_string(),payload,who.actor,now.to_rfc3339()])?;
+        tx.execute("INSERT INTO helper_action_outcome_events_v2(event_id,approval_id,sequence,payload,sender_actor,accepted_at) VALUES(?1,?2,?3,?4,?5,?6)",params![event.event_id.to_string(),event.approval_id.to_string(),event.sequence,payload,who.actor,now.to_rfc3339()])?;
         audit(
             &tx,
             &who.actor,

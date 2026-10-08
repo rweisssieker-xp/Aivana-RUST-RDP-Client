@@ -24,7 +24,9 @@ struct ActionUiState {
     organization_confirmed: bool,
     pending: Option<std::sync::mpsc::Receiver<anyhow::Result<ActionUiEvent>>>,
     approval: Option<crate::helper_approval::ActionApprovalV2>,
-    receipt: Option<crate::helper_approval::ConsumeReceiptV2>,
+    receipt: Option<crate::team_client::VerifiedConsumeV2>,
+    recovered: Vec<crate::helper_approval::ActionApprovalV2>,
+    outcome_observed: bool,
     intent: Option<crate::helper::journal::IntentId>,
     consume_attempted: bool,
 }
@@ -32,7 +34,7 @@ enum ActionUiEvent {
     Identity(String),
     Requested(crate::helper_approval::ActionApprovalV2),
     Refreshed(crate::helper_approval::ActionApprovalV2),
-    Consumed(crate::helper_approval::ConsumeReceiptV2),
+    Consumed(crate::team_client::VerifiedConsumeV2),
 }
 
 pub(super) struct HelperState {
