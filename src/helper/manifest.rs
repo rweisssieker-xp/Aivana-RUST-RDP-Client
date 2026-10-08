@@ -14,6 +14,10 @@ pub enum CapabilityId {
     SqlWorkloadRehearsal,
     ContainerStatus,
     CloudInstanceStatus,
+    AzureVmIdentity,
+    AzureVmResourceHealth,
+    AwsEc2Inventory,
+    AwsEc2Status,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,6 +142,26 @@ impl CapabilityManifest {
             ),
             declaration(
                 CloudInstanceStatus,
+                Diagnostic,
+                vec![ReviewedScope, ReadCredential, NetworkAccess],
+            ),
+            declaration(
+                AzureVmIdentity,
+                Diagnostic,
+                vec![ReviewedScope, ReadCredential, NetworkAccess],
+            ),
+            declaration(
+                AzureVmResourceHealth,
+                Diagnostic,
+                vec![ReviewedScope, ReadCredential, NetworkAccess],
+            ),
+            declaration(
+                AwsEc2Inventory,
+                Diagnostic,
+                vec![ReviewedScope, ReadCredential, NetworkAccess],
+            ),
+            declaration(
+                AwsEc2Status,
                 Diagnostic,
                 vec![ReviewedScope, ReadCredential, NetworkAccess],
             ),

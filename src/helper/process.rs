@@ -37,6 +37,9 @@ pub(crate) enum FixedToolOperation {
         region: String,
         instance_id: String,
     },
+    AwsCallerIdentity {
+        region: String,
+    },
     AwsEc2Status {
         region: String,
         instance_id: String,
@@ -77,13 +80,33 @@ fn value(input: &str) -> Result<OsString, ProcessFailure> {
     Ok(OsString::from(input))
 }
 
+#[cfg(not(test))]
+fn trusted_aws_program() -> Result<OsString, ProcessFailure> {
+    #[cfg(windows)]
+    let candidates = [std::env::var_os("ProgramFiles")
+        .map(|root| std::path::PathBuf::from(root).join("Amazon/AWSCLIV2/aws.exe"))
+        .ok_or(ProcessFailure::Spawn)?];
+    #[cfg(not(windows))]
+    let candidates = [
+        std::path::PathBuf::from("/usr/local/bin/aws"),
+        std::path::PathBuf::from("/usr/bin/aws"),
+    ];
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .map(std::path::PathBuf::into_os_string)
+        .ok_or(ProcessFailure::Spawn)
+}
+
 impl FixedToolOperation {
     fn argv(self) -> Result<(OsString, Vec<OsString>), ProcessFailure> {
         let program = match &self {
             Self::DockerContainerInspect { .. } | Self::DockerContainerStats { .. } => "docker.exe",
             Self::KubernetesWorkloadGet { .. } | Self::KubernetesEvents { .. } => "kubectl.exe",
             Self::AzureVmShow { .. } | Self::AzureVmInstanceView { .. } => "az.exe",
-            Self::AwsEc2Describe { .. } | Self::AwsEc2Status { .. } => "aws.exe",
+            Self::AwsCallerIdentity { .. }
+            | Self::AwsEc2Describe { .. }
+            | Self::AwsEc2Status { .. } => "aws.exe",
             #[cfg(test)]
             Self::TestPing => "ping.exe",
             #[cfg(test)]
@@ -102,7 +125,11 @@ impl FixedToolOperation {
             OsString::from(program)
         };
         #[cfg(not(test))]
-        let program = OsString::from(program);
+        let program = if program == "aws.exe" {
+            trusted_aws_program()?
+        } else {
+            OsString::from(program)
+        };
         let args: Vec<OsString> = match self {
             Self::DockerContainerInspect { container_id } => {
                 vec!["container".into(), "inspect".into(), value(&container_id)?]
@@ -156,6 +183,15 @@ impl FixedToolOperation {
                 "--output".into(),
                 "json".into(),
             ],
+            Self::AwsCallerIdentity { region } => vec![
+                "sts".into(),
+                "get-caller-identity".into(),
+                "--region".into(),
+                value(&region)?,
+                "--output".into(),
+                "json".into(),
+                "--no-cli-pager".into(),
+            ],
             Self::AwsEc2Describe {
                 region,
                 instance_id,
@@ -168,6 +204,7 @@ impl FixedToolOperation {
                 value(&instance_id)?,
                 "--output".into(),
                 "json".into(),
+                "--no-cli-pager".into(),
             ],
             Self::AwsEc2Status {
                 region,
@@ -182,6 +219,7 @@ impl FixedToolOperation {
                 "--include-all-instances".into(),
                 "--output".into(),
                 "json".into(),
+                "--no-cli-pager".into(),
             ],
             #[cfg(test)]
             Self::TestPing => vec!["-n".into(), "30".into(), "127.0.0.1".into()],
@@ -318,7 +356,50 @@ pub(crate) async fn run_fixed_tool(
     cancel: CancellationToken,
     deadline: Duration,
 ) -> Result<ProcessOutput, ProcessFailure> {
-    run_with_limit(operation, cancel, deadline, MAX_TOOL_STDOUT).await
+    if matches!(
+        operation,
+        FixedToolOperation::AzureVmShow { .. }
+            | FixedToolOperation::AzureVmInstanceView { .. }
+            | FixedToolOperation::AwsCallerIdentity { .. }
+            | FixedToolOperation::AwsEc2Describe { .. }
+            | FixedToolOperation::AwsEc2Status { .. }
+    ) {
+        return Err(ProcessFailure::InvalidInvocation);
+    }
+    run_with_limit(operation, cancel, deadline, MAX_TOOL_STDOUT, None).await
+}
+pub(crate) async fn run_aws_tool(
+    operation: FixedToolOperation,
+    access_key: &str,
+    secret_key: &str,
+    session_token: &str,
+    cancel: CancellationToken,
+    deadline: Duration,
+) -> Result<ProcessOutput, ProcessFailure> {
+    if !matches!(
+        operation,
+        FixedToolOperation::AwsCallerIdentity { .. }
+            | FixedToolOperation::AwsEc2Describe { .. }
+            | FixedToolOperation::AwsEc2Status { .. }
+    ) || access_key.is_empty()
+        || secret_key.is_empty()
+        || access_key.len() > 128
+        || secret_key.len() > 4096
+        || session_token.len() > 4096
+        || [access_key, secret_key, session_token]
+            .iter()
+            .any(|value| value.chars().any(char::is_control))
+    {
+        return Err(ProcessFailure::InvalidInvocation);
+    }
+    run_with_limit(
+        operation,
+        cancel,
+        deadline,
+        MAX_TOOL_STDOUT,
+        Some((access_key, secret_key, session_token)),
+    )
+    .await
 }
 
 async fn run_with_limit(
@@ -326,6 +407,7 @@ async fn run_with_limit(
     cancel: CancellationToken,
     deadline: Duration,
     stdout_limit: usize,
+    aws: Option<(&str, &str, &str)>,
 ) -> Result<ProcessOutput, ProcessFailure> {
     if deadline.is_zero() || deadline > Duration::from_secs(30) || stdout_limit > MAX_TOOL_STDOUT {
         return Err(ProcessFailure::InvalidInvocation);
@@ -347,6 +429,23 @@ async fn run_with_limit(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    if let Some((access_key, secret_key, session_token)) = aws {
+        command
+            .env("AWS_ACCESS_KEY_ID", access_key)
+            .env("AWS_SECRET_ACCESS_KEY", secret_key)
+            .env("AWS_EC2_METADATA_DISABLED", "true")
+            .env(
+                "AWS_CONFIG_FILE",
+                if cfg!(windows) { "NUL" } else { "/dev/null" },
+            )
+            .env(
+                "AWS_SHARED_CREDENTIALS_FILE",
+                if cfg!(windows) { "NUL" } else { "/dev/null" },
+            );
+        if !session_token.is_empty() {
+            command.env("AWS_SESSION_TOKEN", session_token);
+        }
+    }
     #[cfg(test)]
     if let Some(path) = pipe_pid_file {
         command
@@ -413,6 +512,77 @@ async fn run_with_limit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn aws_commands_are_fixed_exact_read_only_and_reject_option_ids() {
+        let (_, sts) = FixedToolOperation::AwsCallerIdentity {
+            region: "eu-central-1".into(),
+        }
+        .argv()
+        .unwrap();
+        assert_eq!(
+            sts,
+            vec![
+                "sts",
+                "get-caller-identity",
+                "--region",
+                "eu-central-1",
+                "--output",
+                "json",
+                "--no-cli-pager"
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>()
+        );
+        let (_, inventory) = FixedToolOperation::AwsEc2Describe {
+            region: "eu-central-1".into(),
+            instance_id: "i-0123456789abcdef0".into(),
+        }
+        .argv()
+        .unwrap();
+        assert!(inventory.contains(&OsString::from("--no-cli-pager")));
+        assert_eq!(
+            inventory
+                .iter()
+                .filter(|arg| *arg == "--instance-ids")
+                .count(),
+            1
+        );
+        assert!(
+            FixedToolOperation::AwsEc2Describe {
+                region: "--endpoint-url".into(),
+                instance_id: "i-0123456789abcdef0".into()
+            }
+            .argv()
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn generic_runner_rejects_unscoped_cloud_command() {
+        assert!(matches!(
+            run_fixed_tool(
+                FixedToolOperation::AwsCallerIdentity {
+                    region: "eu-central-1".into()
+                },
+                CancellationToken::new(),
+                Duration::from_secs(1)
+            )
+            .await,
+            Err(ProcessFailure::InvalidInvocation)
+        ));
+        assert!(matches!(
+            run_fixed_tool(
+                FixedToolOperation::AzureVmShow {
+                    resource_id: "vm".into()
+                },
+                CancellationToken::new(),
+                Duration::from_secs(1)
+            )
+            .await,
+            Err(ProcessFailure::InvalidInvocation)
+        ));
+    }
 
     #[test]
     fn pipe_parent_fixture() {
@@ -528,6 +698,7 @@ mod tests {
                 CancellationToken::new(),
                 Duration::from_secs(5),
                 1,
+                None,
             )
             .await;
             assert!(matches!(result, Err(ProcessFailure::OutputLimit)));

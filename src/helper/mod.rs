@@ -1,6 +1,7 @@
 pub mod advisory;
 pub mod capability;
 pub mod case;
+pub mod cloud;
 // Scoped credential APIs are consumed by the next adapter waves.
 #[allow(dead_code)]
 pub mod credentials;

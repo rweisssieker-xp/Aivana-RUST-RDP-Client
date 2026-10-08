@@ -177,11 +177,39 @@ impl CapabilityRegistry {
                 BoundScope::Docker { .. } | BoundScope::Kubernetes { .. },
             ) => {}
             (
-                CapabilityId::CloudInstanceStatus,
+                CapabilityId::CloudInstanceStatus
+                | CapabilityId::AzureVmIdentity
+                | CapabilityId::AzureVmResourceHealth
+                | CapabilityId::AwsEc2Inventory
+                | CapabilityId::AwsEc2Status,
                 ProbeParams::CloudInstance,
                 BoundScope::AzureVm { .. } | BoundScope::AwsEc2 { .. },
             ) => {}
             _ => anyhow::bail!("Capability parameters or scope mismatch"),
+        }
+        ensure!(
+            match request.capability_id {
+                CapabilityId::AzureVmIdentity | CapabilityId::AzureVmResourceHealth =>
+                    matches!(request.scope, BoundScope::AzureVm { .. }),
+                CapabilityId::AwsEc2Inventory | CapabilityId::AwsEc2Status =>
+                    matches!(request.scope, BoundScope::AwsEc2 { .. }),
+                _ => true,
+            },
+            "Cloud capability/scope mismatch"
+        );
+        if matches!(
+            request.capability_id,
+            CapabilityId::AzureVmIdentity
+                | CapabilityId::AzureVmResourceHealth
+                | CapabilityId::AwsEc2Inventory
+                | CapabilityId::AwsEc2Status
+        ) {
+            ensure!(
+                request.scope.credential().is_some_and(
+                    |credential| credential.purpose == super::scope::CredentialPurpose::Read
+                ),
+                "Cloud read credential required"
+            );
         }
         ensure!(descriptor.version > 0, "Capability version unavailable");
         Ok(())

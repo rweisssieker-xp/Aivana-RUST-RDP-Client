@@ -281,6 +281,12 @@ impl BoundScope {
                         && !parts[8].is_empty(),
                     "Invalid Azure VM resource ID"
                 );
+                ensure!(
+                    [parts[4], parts[8]].iter().all(|part| part.len() <= 90
+                        && part.bytes().all(|b| b.is_ascii_alphanumeric()
+                            || matches!(b, b'-' | b'_' | b'.' | b'(' | b')'))),
+                    "Invalid Azure VM path segment"
+                );
                 credential(c)?;
             }
             Self::AwsEc2 {

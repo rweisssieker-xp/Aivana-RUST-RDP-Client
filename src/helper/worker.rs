@@ -117,15 +117,21 @@ impl CurrentProbeAuthority for SnapshotProbeAuthority {
                     == request.binding.credential_scope_sha256,
             "Scope changed"
         );
-        let target = request
-            .scope
-            .target()
-            .ok_or_else(|| anyhow::anyhow!("No profile target"))?;
-        ensure!(
-            case.profile_ids.contains(&target.profile_id)
-                && current.1.iter().any(|profile| target.matches(profile)),
-            "Profile changed"
-        );
+        if let Some(target) = request.scope.target() {
+            ensure!(
+                case.profile_ids.contains(&target.profile_id)
+                    && current.1.iter().any(|profile| target.matches(profile)),
+                "Profile changed"
+            );
+        } else {
+            ensure!(
+                matches!(
+                    request.scope,
+                    BoundScope::AzureVm { .. } | BoundScope::AwsEc2 { .. }
+                ),
+                "No profile target"
+            );
+        }
         Ok(())
     }
 }
@@ -401,6 +407,12 @@ pub fn built_in_registry() -> Result<CapabilityRegistry> {
             CapabilityId::HttpHealth => registry.register(descriptor, Arc::new(HttpProbe))?,
             CapabilityId::SqlRead => {
                 registry.register(descriptor, Arc::new(super::sql::SqlReadAdapter))?
+            }
+            CapabilityId::AzureVmIdentity | CapabilityId::AzureVmResourceHealth => {
+                registry.register(descriptor, Arc::new(super::cloud::AzureVmAdapter))?
+            }
+            CapabilityId::AwsEc2Inventory | CapabilityId::AwsEc2Status => {
+                registry.register(descriptor, Arc::new(super::cloud::AwsEc2Adapter))?
             }
             _ => {}
         }

@@ -172,7 +172,11 @@ pub fn params_match(id: CapabilityId, params: &ProbeParams) -> bool {
             )
             | (CapabilityId::ContainerStatus, ProbeParams::Container)
             | (
-                CapabilityId::CloudInstanceStatus,
+                CapabilityId::CloudInstanceStatus
+                    | CapabilityId::AzureVmIdentity
+                    | CapabilityId::AzureVmResourceHealth
+                    | CapabilityId::AwsEc2Inventory
+                    | CapabilityId::AwsEc2Status,
                 ProbeParams::CloudInstance
             )
     );

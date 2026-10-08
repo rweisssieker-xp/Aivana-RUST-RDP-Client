@@ -18,6 +18,12 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 fn current_profile_matches(scope: &BoundScope, profiles: &[ConnectionProfile]) -> bool {
+    if matches!(
+        scope,
+        BoundScope::AzureVm { .. } | BoundScope::AwsEc2 { .. }
+    ) {
+        return true;
+    }
     scope
         .target()
         .is_some_and(|target| profiles.iter().any(|profile| target.matches(profile)))
@@ -43,6 +49,17 @@ fn supported(scope: &BoundScope) -> Option<(CapabilityId, ProbeParams)> {
             CapabilityId::NetworkReachability,
             ProbeParams::Network { port: *port },
         )),
+        BoundScope::AzureVm {
+            credential: Some(_),
+            ..
+        } => Some((
+            CapabilityId::AzureVmResourceHealth,
+            ProbeParams::CloudInstance,
+        )),
+        BoundScope::AwsEc2 {
+            credential: Some(_),
+            ..
+        } => Some((CapabilityId::AwsEc2Status, ProbeParams::CloudInstance)),
         _ => None,
     }
 }
@@ -55,6 +72,7 @@ pub(super) fn show(
 ) {
     ui.separator();
     ui.heading("Collect live evidence");
+    ui.small("Cloud checks use the reviewed credential and verify provider identity for the exact resource. Missing tools, access or status never imply live readiness; fixture tests only verify parser behavior.");
     ui.label(
         "Collection uses a registered read probe on the reviewed endpoint. AI consent is separate.",
     );
@@ -77,6 +95,8 @@ pub(super) fn show(
             } => "PostgreSQL read diagnostics",
             BoundScope::Database { .. } => "Database TCP reachability",
             BoundScope::Windows { .. } | BoundScope::Linux { .. } => "Host TCP reachability",
+            BoundScope::AzureVm { .. } => "Azure VM resource health (live ARM read)",
+            BoundScope::AwsEc2 { .. } => "AWS EC2 status (live scoped read)",
             _ => "No executable adapter in this wave",
         };
         ui.horizontal(|ui| {

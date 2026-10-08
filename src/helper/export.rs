@@ -98,6 +98,10 @@ fn label<T: std::fmt::Debug>(value: T) -> &'static str {
         "SqlWorkloadRehearsal" => "sql_workload_rehearsal",
         "ContainerStatus" => "container_status",
         "CloudInstanceStatus" => "cloud_instance_status",
+        "AzureVmIdentity" => "azure_vm_identity",
+        "AzureVmResourceHealth" => "azure_vm_resource_health",
+        "AwsEc2Inventory" => "aws_ec2_inventory",
+        "AwsEc2Status" => "aws_ec2_status",
         _ => "unknown",
     }
 }
