@@ -134,7 +134,7 @@ pub(super) fn edit_http_steps(ui: &mut Ui, steps: &mut Vec<crate::execution::Htt
         });
     }
     ui.small("Up to four checks: first GET, then GET/POST with host-only Path=/ session cookies. JSON Pointer: string/bool/null. Secret slots require HTTPS; never enter passwords in fixed form values.");
-    ui.small("POST may change application data. Automatic rollback restores the service state, not these application changes.");
+    ui.small("POST may change application data. If needed, Relayne attempts to restore the recorded service state, not these application changes.");
 }
 fn edit_http_fields(
     ui: &mut Ui,
@@ -1261,6 +1261,13 @@ impl AivanaApp {
                 ui.small("Every new production Apply requires a separate consumed team approval. Service restoration after a launched Apply remains local.");
             }
         }
+        if let Some(selected_run) = self.execution.selected.and_then(|i| self.execution.book.runs.get(i)) {
+            let authority = match &selected_run.approval_mode {
+                ApprovalMode::Standalone => "Standalone local review".to_owned(),
+                ApprovalMode::TeamControlled { server_origin } => format!("Team-controlled · {server_origin}"),
+            };
+            ui.small(format!("Selected run authority: {authority}. Its mode is fixed for this run."));
+        }
         if self.execution.repair_worker.is_some() {
             ui.spinner();
         }
@@ -1308,7 +1315,7 @@ impl AivanaApp {
                 "Runtime values bound immutably to this job; remain in memory until completion.",
             );
         }
-        ui.label("Diagnosis → reviewed service change → functional test → rollback on failure. Test environment first, then a pilot and individually approved additional targets.");
+        ui.label("Diagnosis → reviewed service change → functional test → guarded service-state restoration on failure. Test environment first, then a pilot and individually approved additional targets.");
         ui.small("WinRM uses the current Windows identity. Health checks run from the Relayne computer. Test runs modify real test systems you select.");
         if let Some(e) = &self.execution.error {
             ui.colored_label(tw::RED_600, e);
@@ -1478,7 +1485,7 @@ impl AivanaApp {
         let t = &run.targets[run.current];
         if t.phase == Phase::Review && run.finished.is_none() {
             if run.plan.restart {
-                ui.strong("Restart: stop the running service, verify Stopped, then start it again. Rollback can restore only the Running service state, not process state.");
+                ui.strong("Restart: stop the running service, verify Stopped, then start it again. Restoration can restore only the Running service state, not process state.");
             }
             ui.label(format!("Review change: {} / {} / {:?} → {}. On functional failure, restore to {:?}.",t.target.host,run.plan.service,t.before,run.plan.desired.label(),t.before));
             if let Some(before) = t.before {
@@ -1491,12 +1498,12 @@ impl AivanaApp {
                         Some((before, run.plan.desired)),
                     )
                 } {
-                    ui.collapsing("Exact command with safeguards and rollback", |ui| {
+                    ui.collapsing("Exact command with safeguards and service-state restoration", |ui| {
                         ui.monospace(spec.preview());
                     });
                 }
             }
-            ui.checkbox(&mut self.execution.reviewed,"Reviewed and approved this target, initial state, functional test, and automatic rollback");
+            ui.checkbox(&mut self.execution.reviewed,"Reviewed and approved this target, initial state, functional test, and guarded service-state restoration");
             let fresh = t
                 .captured
                 .is_some_and(|at| (0..120).contains(&(Utc::now() - at).num_seconds()));
@@ -1624,6 +1631,23 @@ impl AivanaApp {
                 _ => "Remote or restoration outcome unknown. Inspect the journal and verify actual service and application state before a new reviewed run. A canceled job may still finish.",
             });
             ui.label("This run will not be retried; later targets remain untouched.");
+        }
+        if let Some(selected_run) = self.execution.selected.and_then(|i| self.execution.book.runs.get(i)) {
+            if matches!(selected_run.approval_mode, ApprovalMode::TeamControlled { .. }) {
+                for (index, target) in selected_run.targets.iter().enumerate() {
+                    if let Some(marker) = &target.outcome {
+                        ui.label(format!(
+                            "Run {} · target {} · {:?} · event {} · {}",
+                            selected_run.id,
+                            index + 1,
+                            marker.event.outcome,
+                            marker.event.event_id,
+                            if marker.delivered { "Central acknowledgement recorded locally" } else { "Central outcome delivery pending" },
+                        ));
+                    }
+                }
+                ui.small("Outcome delivery is metadata audit status, not proof that application recovery succeeded. Local journal evidence remains authoritative for the observed result.");
+            }
         }
         let pending_outcomes = self
             .execution

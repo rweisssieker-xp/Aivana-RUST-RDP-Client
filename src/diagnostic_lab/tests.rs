@@ -474,16 +474,35 @@ fn diagnostic_http_adapter_checks_status_without_following_redirects() {
         listener.set_nonblocking(true).unwrap();
         let server = std::thread::spawn(move || {
             let start = std::time::Instant::now();
-            let mut calls = 0;
+            let mut requests = Vec::new();
+            let mut incomplete_sockets = 0;
             while start.elapsed() < std::time::Duration::from_secs(8) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         stream
                             .set_read_timeout(Some(std::time::Duration::from_secs(1)))
                             .unwrap();
+                        let mut bytes = Vec::new();
                         let mut buf = [0u8; 1024];
-                        let _ = stream.read(&mut buf);
-                        calls += 1;
+                        while bytes.len() < 4096
+                            && !bytes.windows(4).any(|part| part == b"\r\n\r\n")
+                        {
+                            match stream.read(&mut buf) {
+                                Ok(0) | Err(_) => break,
+                                Ok(size) => bytes.extend_from_slice(&buf[..size]),
+                            }
+                        }
+                        if !bytes.windows(4).any(|part| part == b"\r\n\r\n") {
+                            incomplete_sockets += 1;
+                            continue;
+                        }
+                        requests.push(
+                            String::from_utf8_lossy(&bytes)
+                                .lines()
+                                .next()
+                                .unwrap_or("")
+                                .to_owned(),
+                        );
                         let response = format!(
                             "HTTP/1.1 {status} Status\r\nLocation: http://127.0.0.1:{}/unexpected\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                             address.port()
@@ -491,7 +510,9 @@ fn diagnostic_http_adapter_checks_status_without_following_redirects() {
                         stream.write_all(response.as_bytes()).unwrap();
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        if calls > 0 && start.elapsed() > std::time::Duration::from_secs(2) {
+                        if !requests.is_empty()
+                            && start.elapsed() > std::time::Duration::from_secs(2)
+                        {
                             break;
                         }
                         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -499,16 +520,21 @@ fn diagnostic_http_adapter_checks_status_without_following_redirects() {
                     Err(e) => panic!("{e}"),
                 }
             }
-            calls
+            (requests, incomplete_sockets)
         });
         let mut c = real(Utc::now());
         c.config.dependency = format!("http://{address}/health");
         let (request, result) = execute_fixture(&c, Probe::Dependency, "");
         assert_eq!(adapter::value(&request, &result).unwrap(), want);
+        let (requests, incomplete_sockets) = server.join().unwrap();
         assert_eq!(
-            server.join().unwrap(),
+            requests.len(),
             1,
-            "Redirect must not issue a second request"
+            "status {status}: redirect or duplicate request: {requests:?}; incomplete sockets: {incomplete_sockets}"
+        );
+        assert!(
+            requests[0].starts_with("GET /health "),
+            "status {status}: unexpected request: {requests:?}"
         );
     }
 }

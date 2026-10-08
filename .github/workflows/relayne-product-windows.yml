@@ -1,0 +1,46 @@
+name: Relayne product Windows readiness
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/relayne-product-windows.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - 'src/**'
+      - 'docs/relayne-team.md'
+      - 'docs/relayne-execution.md'
+  pull_request:
+    paths:
+      - '.github/workflows/relayne-product-windows.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - 'src/**'
+      - 'docs/relayne-team.md'
+      - 'docs/relayne-execution.md'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: relayne-product-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline-readiness:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Build all binaries
+        run: cargo build --locked --bins
+      - name: Test all binaries serially
+        run: cargo test --locked --bins -- --test-threads=1
+      - name: Check Clippy correctness for main and team binaries
+        run: cargo clippy --locked --bin relayne --bin relayne_team -- -D clippy::correctness

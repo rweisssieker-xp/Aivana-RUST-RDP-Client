@@ -180,3 +180,87 @@ pub struct RepairOutcomeAck {
     pub event_id: Uuid,
     pub accepted: bool,
 }
+
+#[cfg(test)]
+mod wire_privacy_tests {
+    use super::*;
+
+    #[test]
+    fn approval_and_outcome_wire_shapes_are_metadata_only_and_reject_added_fields() {
+        let now = Utc::now();
+        let binding = RepairBinding {
+            version: 1,
+            run_id: Uuid::new_v4(),
+            target_index: 0,
+            profile_id: Uuid::new_v4(),
+            plan_sha256: "a".repeat(64),
+            target_sha256: "b".repeat(64),
+            service: "Spooler".into(),
+            before: RepairServiceState::Stopped,
+            desired: RepairServiceState::Running,
+            captured_at: now,
+            baseline_passed: true,
+            baseline_sha256: "c".repeat(64),
+            health_sha256: "d".repeat(64),
+            proof: RepairProof {
+                kind: ProofKind::Rehearsal,
+                reference_id: Uuid::new_v4(),
+                sha256: "e".repeat(64),
+                expires_at: now + chrono::Duration::minutes(5),
+            },
+        };
+        let request = CreateRepairApproval {
+            request_id: Uuid::new_v4(),
+            binding,
+        };
+        let mut json = serde_json::to_value(&request).unwrap();
+        let top = json.as_object().unwrap();
+        assert_eq!(
+            top.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["binding", "request_id"]
+        );
+        let fields = top["binding"].as_object().unwrap();
+        assert_eq!(fields.len(), 14);
+        for forbidden in [
+            "command",
+            "endpoint",
+            "output",
+            "password",
+            "token",
+            "secret_slot",
+            "credential_id",
+        ] {
+            assert!(!fields.contains_key(forbidden));
+        }
+        json["binding"]["credential_id"] = "never-on-wire".into();
+        assert!(serde_json::from_value::<CreateRepairApproval>(json).is_err());
+
+        let event = RepairOutcomeEvent {
+            event_id: Uuid::new_v4(),
+            approval_id: Uuid::new_v4(),
+            run_id: request.binding.run_id,
+            target_index: 0,
+            outcome: RepairOutcome::Unknown,
+            occurred_at: now,
+        };
+        let mut event_json = serde_json::to_value(&event).unwrap();
+        assert_eq!(
+            event_json
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            [
+                "approval_id",
+                "event_id",
+                "occurred_at",
+                "outcome",
+                "run_id",
+                "target_index"
+            ]
+        );
+        event_json["response_body"] = "never-on-wire".into();
+        assert!(serde_json::from_value::<RepairOutcomeEvent>(event_json).is_err());
+    }
+}

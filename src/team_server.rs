@@ -1406,6 +1406,90 @@ mod tests {
     }
 
     #[test]
+    fn repair_history_is_bounded_to_requester_and_deciding_approver() {
+        use crate::repair_approval::{RepairApproval, RepairDecision, RepairState};
+        let h = Harness::new();
+        let alice = h.issue_actor("alice", Role::Operator);
+        let bob = h.issue_actor("bob", Role::Operator);
+        let charlie = h.issue_actor("charlie", Role::Operator);
+        let viewer = h.issue_actor("viewer", Role::Viewer);
+        let path = "/v1/repair-approvals?limit=20&offset=0";
+        assert_eq!(
+            h.request(
+                reqwest::Method::GET,
+                path,
+                &viewer.token,
+                serde_json::Value::Null
+            )
+            .status(),
+            403
+        );
+        let item = create_repair(&h, &alice.token, repair_binding());
+        let list = |token: &str| -> Vec<RepairApproval> {
+            let response = h.request(reqwest::Method::GET, path, token, serde_json::Value::Null);
+            assert_eq!(response.status(), 200);
+            response.json().unwrap()
+        };
+        assert!(
+            list(&charlie.token)
+                .iter()
+                .any(|row| row.id == item.id && row.state == RepairState::Pending)
+        );
+        assert_eq!(
+            decide_repair(&h, &bob.token, item.id, RepairDecision::Approve).status(),
+            200
+        );
+        assert!(
+            list(&alice.token)
+                .iter()
+                .any(|row| row.id == item.id && row.state == RepairState::Approved)
+        );
+        assert!(
+            list(&bob.token)
+                .iter()
+                .any(|row| row.id == item.id && row.state == RepairState::Approved)
+        );
+        assert!(!list(&charlie.token).iter().any(|row| row.id == item.id));
+        assert_eq!(consume_repair(&h, &alice.token, &item).status(), 200);
+        assert!(
+            list(&bob.token)
+                .iter()
+                .any(|row| row.id == item.id && row.state == RepairState::Consumed)
+        );
+        assert!(!list(&charlie.token).iter().any(|row| row.id == item.id));
+        let denied = create_repair(&h, &alice.token, repair_binding());
+        assert_eq!(
+            decide_repair(&h, &charlie.token, denied.id, RepairDecision::Deny).status(),
+            200
+        );
+        assert!(
+            list(&charlie.token)
+                .iter()
+                .any(|row| row.id == denied.id && row.state == RepairState::Denied)
+        );
+        let one = h
+            .request(
+                reqwest::Method::GET,
+                "/v1/repair-approvals?limit=1&offset=0",
+                &alice.token,
+                serde_json::Value::Null,
+            )
+            .json::<Vec<RepairApproval>>()
+            .unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(
+            h.request(
+                reqwest::Method::GET,
+                "/v1/repair-approvals?limit=51",
+                &alice.token,
+                serde_json::Value::Null
+            )
+            .status(),
+            400
+        );
+    }
+
+    #[test]
     fn repair_requires_distinct_authenticated_actors_and_exact_binding() {
         use crate::repair_approval::*;
         let h = Harness::new();

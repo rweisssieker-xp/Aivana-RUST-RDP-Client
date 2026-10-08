@@ -22,6 +22,8 @@ pub(super) struct TeamState {
     tokens: Vec<TokenInfo>,
     audit: Vec<Audit>,
     repairs: Vec<RepairApproval>,
+    repairs_loaded: bool,
+    repairs_offset: usize,
     pending: Option<mpsc::Receiver<Result<TeamResult, String>>>,
     message: String,
     repair_identity_generation: Uuid,
@@ -32,7 +34,7 @@ enum TeamResult {
     Issued(IssuedToken),
     Admin(Vec<TokenInfo>, Vec<Audit>),
     Revoked,
-    Repairs(Vec<RepairApproval>),
+    Repairs(usize, Vec<RepairApproval>),
     RepairDecision(RepairApproval),
 }
 impl Default for TeamState {
@@ -55,6 +57,8 @@ impl Default for TeamState {
             tokens: vec![],
             audit: vec![],
             repairs: vec![],
+            repairs_loaded: false,
+            repairs_offset: 0,
             pending: None,
             message: String::new(),
             repair_identity_generation: Uuid::new_v4(),
@@ -76,6 +80,18 @@ impl TeamState {
     fn invalidate_repair_identity(&mut self) {
         self.repair_identity_generation = Uuid::new_v4();
     }
+    fn clear_repair_history(&mut self) {
+        self.repairs.clear();
+        self.repairs_loaded = false;
+        self.repairs_offset = 0;
+    }
+    fn load_repairs(&mut self, offset: usize) {
+        if offset > 1000 || self.pending.is_some() {
+            return;
+        }
+        self.clear_repair_history();
+        self.start(move |client| Ok(TeamResult::Repairs(offset, client.list_repairs(offset)?)));
+    }
     fn start(
         &mut self,
         work: impl FnOnce(TeamClient) -> anyhow::Result<TeamResult> + Send + 'static,
@@ -94,6 +110,131 @@ impl TeamState {
                 });
             }
         }
+    }
+}
+
+fn repair_state_label(state: RepairState) -> &'static str {
+    match state {
+        RepairState::Pending => "Pending decision",
+        RepairState::Approved => "Approved; not yet consumed",
+        RepairState::Consumed => "Consumed for one Apply attempt",
+        RepairState::Expired => "Expired",
+        RepairState::Denied => "Denied",
+    }
+}
+
+fn visible_repair_state(item: &RepairApproval) -> RepairState {
+    if item.expires_at <= chrono::Utc::now()
+        && matches!(item.state, RepairState::Pending | RepairState::Approved)
+    {
+        RepairState::Expired
+    } else {
+        item.state
+    }
+}
+
+fn repair_role_summary(role: &Role) -> &'static str {
+    match role {
+        Role::Viewer => {
+            "Viewer: read shared records; cannot request, decide, or consume repair approvals."
+        }
+        Role::Operator => {
+            "Operator: may request and decide for a different actor; server checks current role and exact binding before consume."
+        }
+        Role::Admin => {
+            "Admin: operator repair rights plus token administration and metadata audit access."
+        }
+    }
+}
+
+fn can_decide_repair(role: &Role, actor: &str, item: &RepairApproval) -> bool {
+    *role != Role::Viewer
+        && visible_repair_state(item) == RepairState::Pending
+        && item.requester != actor
+}
+
+fn abbreviated_fingerprint(fingerprint: &str) -> String {
+    fingerprint.chars().take(12).collect()
+}
+
+#[cfg(test)]
+mod repair_status_tests {
+    use super::*;
+
+    #[test]
+    fn every_server_state_has_a_distinct_operator_label() {
+        let states = [
+            RepairState::Pending,
+            RepairState::Approved,
+            RepairState::Consumed,
+            RepairState::Expired,
+            RepairState::Denied,
+        ];
+        let labels: std::collections::HashSet<_> =
+            states.into_iter().map(repair_state_label).collect();
+        assert_eq!(labels.len(), states.len());
+        assert!(repair_state_label(RepairState::Consumed).contains("one Apply"));
+    }
+
+    #[test]
+    fn decision_controls_require_nonviewer_different_actor_and_pending_state() {
+        let mut item = RepairApproval {
+            id: Uuid::new_v4(),
+            request_id: Uuid::new_v4(),
+            binding: crate::repair_approval::RepairBinding {
+                version: 1,
+                run_id: Uuid::new_v4(),
+                target_index: 0,
+                profile_id: Uuid::new_v4(),
+                plan_sha256: String::new(),
+                target_sha256: String::new(),
+                service: String::new(),
+                before: crate::repair_approval::RepairServiceState::Stopped,
+                desired: crate::repair_approval::RepairServiceState::Running,
+                captured_at: chrono::Utc::now(),
+                baseline_passed: false,
+                baseline_sha256: String::new(),
+                health_sha256: String::new(),
+                proof: crate::repair_approval::RepairProof {
+                    kind: crate::repair_approval::ProofKind::Rehearsal,
+                    reference_id: Uuid::new_v4(),
+                    sha256: String::new(),
+                    expires_at: chrono::Utc::now(),
+                },
+            },
+            fingerprint: String::new(),
+            requester: "alice".into(),
+            approver: None,
+            state: RepairState::Pending,
+            expires_at: chrono::Utc::now() + chrono::Duration::minutes(2),
+        };
+        assert!(!can_decide_repair(&Role::Viewer, "bob", &item));
+        assert!(!can_decide_repair(&Role::Operator, "alice", &item));
+        assert!(can_decide_repair(&Role::Operator, "bob", &item));
+        item.state = RepairState::Approved;
+        assert!(!can_decide_repair(&Role::Admin, "bob", &item));
+        item.state = RepairState::Pending;
+        item.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+        assert_eq!(visible_repair_state(&item), RepairState::Expired);
+        assert!(!can_decide_repair(&Role::Operator, "bob", &item));
+        item.state = RepairState::Approved;
+        assert_eq!(visible_repair_state(&item), RepairState::Expired);
+        item.state = RepairState::Consumed;
+        assert_eq!(visible_repair_state(&item), RepairState::Consumed);
+        item.state = RepairState::Denied;
+        assert_eq!(visible_repair_state(&item), RepairState::Denied);
+    }
+
+    #[test]
+    fn history_reset_removes_previous_identity_and_unicode_fingerprint_is_safe() {
+        let mut state = TeamState::default();
+        state.repairs_loaded = true;
+        state.repairs_offset = 20;
+        state.clear_repair_history();
+        assert!(!state.repairs_loaded);
+        assert_eq!(state.repairs_offset, 0);
+        assert!(state.repairs.is_empty());
+        assert_eq!(abbreviated_fingerprint("ä💡fingerprint"), "ä💡fingerprin");
     }
 }
 impl AivanaApp {
@@ -129,7 +270,7 @@ impl AivanaApp {
                             self.team.issued = None;
                             self.team.token = token;
                             self.team.invalidate_repair_identity();
-                            self.team.repairs.clear();
+                            self.team.clear_repair_history();
                             self.team
                                 .start(|client| Ok(TeamResult::State(client.snapshot()?)));
                         }
@@ -181,6 +322,7 @@ impl AivanaApp {
                     self.team.message = "Team request completed".into();
                     match result {
                         TeamResult::State(state) => {
+                            self.team.clear_repair_history();
                             self.team.snapshot = Some(state);
                             self.team.edit = None;
                         }
@@ -200,7 +342,11 @@ impl AivanaApp {
                             self.team.message = "Token revoked. Reload administration.".into();
                             self.team.tokens.clear();
                         }
-                        TeamResult::Repairs(items) => self.team.repairs = items,
+                        TeamResult::Repairs(offset, items) => {
+                            self.team.repairs_offset = offset;
+                            self.team.repairs = items;
+                            self.team.repairs_loaded = true;
+                        }
                         TeamResult::RepairDecision(item) => {
                             self.team.repairs.retain(|old| old.id != item.id);
                             self.team.repairs.push(item);
@@ -240,7 +386,7 @@ impl AivanaApp {
         ui.small("Organization JWTs require a server-configured OIDC provider and an explicit user role. Tokens are held only in memory.");
         if identity_changed {
             self.team.invalidate_repair_identity();
-            self.team.repairs.clear();
+            self.team.clear_repair_history();
             self.team.live = Default::default();
             self.team.snapshot = None;
             self.team.selected = None;
@@ -257,6 +403,7 @@ impl AivanaApp {
                 )
                 .clicked()
             {
+                self.team.clear_repair_history();
                 self.team.snapshot = None;
                 self.team.edit = None;
                 self.team.tokens.clear();
@@ -286,29 +433,51 @@ impl AivanaApp {
             "Signed in: {} · Server role: {:?}",
             snapshot.actor, snapshot.role
         ));
-        if snapshot.role != Role::Viewer {
-            ui.collapsing("Repair approval decisions", |ui| {
-                ui.small("Compare the complete fingerprint and intended change with the requester through your review channel. A second token for the same actor cannot approve it.");
-                if ui.add_enabled(self.team.pending.is_none(), egui::Button::new("Load recent repair requests")).clicked() {
-                    self.team.start(|client| Ok(TeamResult::Repairs(client.list_repairs(0)?)));
-                }
-                for item in self.team.repairs.clone().into_iter().filter(|item| item.state == RepairState::Pending && item.requester != snapshot.actor) {
+        ui.small(repair_role_summary(&snapshot.role));
+        ui.small("Legacy actor labels are assigned by an administrator; different labels do not prove different people. OIDC checks signed token expiry and current local subject role, without instant external identity-provider revocation.");
+        ui.small("Team records contain credential-free endpoints and repair metadata. RDP credentials stay local; WinRM uses your current Windows identity. The masked team token stays in this app's memory and is cleared on sign-out.");
+        ui.small("Successful repair requests, decisions, expiry, consumption, and outcome acceptance are recorded with metadata in the same server transaction. Only admins can load the latest 500 audit entries; an approval state is not a delivered outcome.");
+        ui.collapsing("Repair approval status", |ui| {
+            ui.small("The server makes the final authorization decision. A requester and approver must be different authenticated actors. Compare the full fingerprint and intended change through your review channel; a digest alone does not reveal the command.");
+            if ui.add_enabled(self.team.pending.is_none() && snapshot.role != Role::Viewer, egui::Button::new("Load recent repair approvals")).clicked() {
+                self.team.load_repairs(0);
+            }
+            if snapshot.role == Role::Viewer {
+                ui.small("Repair approval history requires an operator or admin role.");
+            }
+            if !self.team.repairs_loaded {
+                ui.small("Repair status unavailable until a successful load.");
+            } else {
+                ui.small(format!("Showing {} approvals from offset {} (up to 20 per page).", self.team.repairs.len(), self.team.repairs_offset));
+                for item in self.team.repairs.clone() {
                     ui.group(|ui| {
-                        ui.label(format!("Requester {} · Run {} · target {}", item.requester, item.binding.run_id, item.binding.target_index + 1));
-                        ui.label(format!("Service {} · {:?} → {:?} · expires {}", item.binding.service, item.binding.before, item.binding.desired, item.expires_at));
-                        ui.monospace(format!("Fingerprint: {}", item.fingerprint));
-                        ui.horizontal(|ui| {
-                            for (label, decision) in [("Approve", RepairDecision::Approve), ("Deny", RepairDecision::Deny)] {
-                                if ui.add_enabled(self.team.pending.is_none(), egui::Button::new(format!("{label}##{}", item.id))).clicked() {
-                                    let id = item.id;
-                                    self.team.start(move |client| Ok(TeamResult::RepairDecision(client.decide_repair(id, &DecideRepairApproval { decision })?)));
+                        ui.strong(repair_state_label(visible_repair_state(&item)));
+                        ui.label(format!("Requester {} · Approver {} · Run {} · target {}", item.requester, item.approver.as_deref().unwrap_or("—"), item.binding.run_id, item.binding.target_index + 1));
+                        ui.label(format!("Service {} · {:?} → {:?} · expires {} UTC", item.binding.service, item.binding.before, item.binding.desired, item.expires_at));
+                        ui.small(format!("Fingerprint {}…", abbreviated_fingerprint(&item.fingerprint)));
+                        ui.collapsing("Full binding fingerprint", |ui| { ui.monospace(&item.fingerprint); });
+                        if can_decide_repair(&snapshot.role, &snapshot.actor, &item) {
+                            ui.horizontal(|ui| {
+                                for (label, decision) in [("Approve", RepairDecision::Approve), ("Deny", RepairDecision::Deny)] {
+                                    if ui.add_enabled(self.team.pending.is_none(), egui::Button::new(format!("{label}##{}", item.id))).clicked() {
+                                        let id = item.id;
+                                        self.team.start(move |client| Ok(TeamResult::RepairDecision(client.decide_repair(id, &DecideRepairApproval { decision })?)));
+                                    }
                                 }
-                            }
-                        });
+                            });
+                        }
                     });
                 }
-            });
-        }
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(self.team.pending.is_none() && self.team.repairs_offset >= 20, egui::Button::new("Previous approvals")).clicked() {
+                        self.team.load_repairs(self.team.repairs_offset - 20);
+                    }
+                    if ui.add_enabled(self.team.pending.is_none() && self.team.repairs.len() == 20 && self.team.repairs_offset < 1000, egui::Button::new("Next approvals")).clicked() {
+                        self.team.load_repairs(self.team.repairs_offset + 20);
+                    }
+                });
+            }
+        });
         let busy = self.team.pending.is_some();
         ui.add_enabled_ui(!busy,|ui|{
             if snapshot.role==Role::Admin {

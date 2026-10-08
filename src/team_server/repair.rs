@@ -212,6 +212,10 @@ pub(super) fn serve(
             err(request, 405, "Use GET");
             return Ok(());
         }
+        if !operator(who) {
+            err(request, 403, "Operator identity required");
+            return Ok(());
+        }
         let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
         let mut limit = 20i64;
         let mut offset = 0i64;
@@ -239,7 +243,7 @@ pub(super) fn serve(
             err(request, 400, "Invalid list range");
             return Ok(());
         }
-        let mut stmt = db.prepare(&format!("{SELECT} WHERE requester_actor=?1 OR (state='pending' AND requester_actor<>?1) ORDER BY created_at DESC LIMIT ?2 OFFSET ?3"))?;
+        let mut stmt = db.prepare(&format!("{SELECT} WHERE requester_actor=?1 OR approver_actor=?1 OR (state='pending' AND requester_actor<>?1) ORDER BY created_at DESC LIMIT ?2 OFFSET ?3"))?;
         let mut rows = stmt
             .query_map(params![who.actor, limit, offset], row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
