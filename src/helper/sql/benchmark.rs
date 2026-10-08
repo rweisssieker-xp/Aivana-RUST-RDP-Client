@@ -119,17 +119,7 @@ pub(super) fn metadata_matches(
     observations: &[SqlObservation],
     template: ReviewedSelectTemplate,
 ) -> bool {
-    let expected: &[&str] = match template {
-        ReviewedSelectTemplate::OrderSort => &["event_id", "group_id", "payload"],
-        _ => &[
-            "order_id",
-            "customer_id",
-            "status",
-            "amount",
-            "created_at",
-            "detail",
-        ],
-    };
+    let expected = template.expected_columns();
     let objects: Vec<_> = observations
         .iter()
         .filter_map(|o| match o {

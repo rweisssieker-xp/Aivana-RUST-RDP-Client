@@ -79,6 +79,14 @@ pub struct PlanReport {
     pub limitations: Vec<&'static str>,
 }
 impl PlanReport {
+    pub(crate) fn with_live_metadata(mut self, digest: String) -> Result<Self> {
+        ensure!(
+            self.origin == PlanOrigin::LiveEstimate && crate::helper::evidence::is_digest(&digest),
+            "live plan metadata digest missing"
+        );
+        self.live_metadata_sha256 = Some(digest);
+        Ok(self)
+    }
     pub fn origin(&self) -> PlanOrigin {
         self.origin
     }

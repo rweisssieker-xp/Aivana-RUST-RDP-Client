@@ -29,6 +29,10 @@ const PROBE_COUNT: u32 = 8;
 type TdsClient = Client<Compat<TcpStream>>;
 type TdsFuture<'a, T> = Pin<Box<dyn Future<Output = std::result::Result<T, Failure>> + Send + 'a>>;
 
+#[path = "sql_server_plan.rs"]
+mod plan;
+pub(super) use plan::estimated_plan;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SqlServerReadProbe {
     Identity,
@@ -440,7 +444,6 @@ pub(super) struct VerifiedNativeSession {
     cancel: CancellationToken,
 }
 
-#[allow(dead_code)] // Consumed by the next SQL plan wave after branch integration.
 pub(super) async fn open_verified_native(
     request: &ProbeRequest,
     secrets: &dyn SecretResolver,
@@ -803,6 +806,7 @@ async fn collect_with(
         records,
         metrics: Vec::new(),
         sql_observations: observations,
+        sql_artifacts: Vec::new(),
         evidence_refs: Vec::new(),
         source_id: format!("sqlserver:{}:{}:{}", target.host, port, database).into_bytes(),
         source_observed_at: Utc::now(),

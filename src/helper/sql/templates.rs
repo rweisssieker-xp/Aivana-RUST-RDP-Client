@@ -138,6 +138,75 @@ impl ReviewedSelectTemplate {
             object: self.object(),
         })
     }
+
+    /// Closed SQL Server SELECTs are only available against the disposable loopback fixture.
+    /// SHOWPLAN mode is established on a separate verified session by sql_server.rs.
+    pub fn sql_server_statement(self, scope: &BoundScope) -> Result<TemplateStatement> {
+        scope.validate()?;
+        let BoundScope::Database {
+            target,
+            engine: DatabaseEngine::SqlServer,
+            database,
+            schema,
+            object,
+            credential,
+            ..
+        } = scope
+        else {
+            anyhow::bail!("SQL Server database scope required")
+        };
+        ensure!(
+            target
+                .host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback()),
+            "SQL Server fixture requires literal loopback endpoint"
+        );
+        ensure!(
+            database == FIXTURE_DATABASE
+                && schema.as_deref() == Some(FIXTURE_SCHEMA)
+                && object.as_deref() == Some(self.object()),
+            "SQL Server fixture database/object mismatch"
+        );
+        ensure!(
+            credential
+                .as_ref()
+                .is_some_and(|c| c.purpose == CredentialPurpose::Read),
+            "SQL Server read credential required"
+        );
+        let sql = match self {
+            Self::CustomerOrders { .. } => {
+                "SELECT TOP (100) [order_id] FROM [fixture].[orders] WHERE [customer_id] = @P1 ORDER BY [order_id]"
+            }
+            Self::StatusCount { .. } => {
+                "SELECT COUNT_BIG(*) FROM [fixture].[orders] WHERE [status] = @P1"
+            }
+            Self::OrderSort => {
+                "SELECT TOP (100) [event_id] FROM [fixture].[spill_events] ORDER BY [payload], [event_id]"
+            }
+        };
+        Ok(TemplateStatement {
+            sql,
+            explain_sql: sql,
+            bind: self.bind(),
+            fingerprint: self.fingerprint(scope)?,
+            object: self.object(),
+        })
+    }
+
+    pub fn expected_columns(self) -> &'static [&'static str] {
+        match self {
+            Self::OrderSort => &["event_id", "group_id", "payload"],
+            _ => &[
+                "order_id",
+                "customer_id",
+                "status",
+                "amount",
+                "created_at",
+                "detail",
+            ],
+        }
+    }
 }
 
 pub(crate) struct VerifiedPgSession {

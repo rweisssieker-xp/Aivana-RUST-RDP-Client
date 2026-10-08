@@ -304,6 +304,93 @@ fn fixture_scope(object: &str) -> BoundScope {
     scope
 }
 
+fn sqlserver_fixture_scope(object: &str) -> BoundScope {
+    let mut scope = fixture_scope(object);
+    if let BoundScope::Database {
+        engine,
+        port,
+        credential,
+        ..
+    } = &mut scope
+    {
+        *engine = DatabaseEngine::SqlServer;
+        *port = 1433;
+        *credential = None;
+    }
+    let resource = scope.resource_digest().unwrap();
+    if let BoundScope::Database { credential, .. } = &mut scope {
+        *credential = Some(CredentialScope {
+            reference: Uuid::new_v4(),
+            purpose: CredentialPurpose::Read,
+            generation: 1,
+            principal: "reader".into(),
+            context: "fixture".into(),
+            context_digest: resource,
+        });
+    }
+    scope
+}
+
+#[test]
+fn sql_server_showplan_templates_are_fixed_bound_and_loopback_only() {
+    let scope = sqlserver_fixture_scope("orders");
+    let customer = ReviewedSelectTemplate::CustomerOrders {
+        customer_id: 424242,
+    };
+    let statement = customer.sql_server_statement(&scope).unwrap();
+    assert!(statement.sql.contains("[fixture].[orders]"));
+    assert!(statement.sql.contains("@P1") && statement.sql.contains("TOP (100)"));
+    assert!(!statement.sql.contains("424242") && !statement.sql.contains("EXPLAIN"));
+    assert_eq!(customer.fingerprint(&scope).unwrap(), statement.fingerprint);
+    assert_eq!(
+        ReviewedSelectTemplate::from_fingerprint(&scope, &statement.fingerprint),
+        Some(customer)
+    );
+    let status = ReviewedSelectTemplate::StatusCount {
+        status: OrderStatus::Pending,
+    };
+    assert!(
+        status
+            .sql_server_statement(&scope)
+            .unwrap()
+            .sql
+            .contains("COUNT_BIG(*)")
+    );
+    let sort = ReviewedSelectTemplate::OrderSort;
+    assert!(
+        sort.sql_server_statement(&sqlserver_fixture_scope("spill_events"))
+            .unwrap()
+            .sql
+            .contains("ORDER BY [payload], [event_id]")
+    );
+    let mut remote = scope.clone();
+    if let BoundScope::Database {
+        target, credential, ..
+    } = &mut remote
+    {
+        target.host = "192.0.2.42".into();
+        *credential = None;
+    }
+    let resource = remote.resource_digest().unwrap();
+    if let BoundScope::Database { credential, .. } = &mut remote {
+        *credential = Some(CredentialScope {
+            reference: Uuid::new_v4(),
+            purpose: CredentialPurpose::Read,
+            generation: 1,
+            principal: "reader".into(),
+            context: "fixture".into(),
+            context_digest: resource,
+        });
+    }
+    assert!(remote.validate().is_ok());
+    assert!(customer.sql_server_statement(&remote).is_err());
+    assert!(
+        customer
+            .sql_server_statement(&fixture_scope("orders"))
+            .is_err()
+    );
+}
+
 #[test]
 fn reviewed_templates_are_closed_bound_and_fixture_only() {
     let customer = ReviewedSelectTemplate::CustomerOrders {

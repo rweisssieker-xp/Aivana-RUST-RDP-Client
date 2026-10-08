@@ -263,6 +263,20 @@ impl CapabilityRegistry {
                 )
                 .is_some_and(|template| template.reviewed_statement(&request.scope).is_ok()) => {}
             (
+                CapabilityId::SqlPlan,
+                ProbeParams::SqlPlan { query_digest },
+                BoundScope::Database {
+                    engine: super::scope::DatabaseEngine::SqlServer,
+                    credential: Some(credential),
+                    ..
+                },
+            ) if credential.purpose == super::scope::CredentialPurpose::Read
+                && super::sql::templates::ReviewedSelectTemplate::from_fingerprint(
+                    &request.scope,
+                    query_digest,
+                )
+                .is_some_and(|template| template.sql_server_statement(&request.scope).is_ok()) => {}
+            (
                 CapabilityId::SqlWorkloadBaseline,
                 ProbeParams::SqlWorkload {
                     workload_digest,

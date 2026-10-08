@@ -142,8 +142,62 @@ pub(super) fn show(
         } else {
             ui.label("Live collection requires an exact reviewed fixture table.");
         }
-    } else {
-        ui.label("Live SQL Server plan collection awaits a verified native SHOWPLAN session.");
+    } else if let BoundScope::Database {
+        engine: DatabaseEngine::SqlServer,
+        object,
+        ..
+    } = scope
+    {
+        ui.label("Native SQL Server SHOWPLAN uses a dedicated verified session. No live SQL Server fixture endpoint has been validated for this build.");
+        ui.label(
+            "The verified session currently supports matching SQL login and database-user names.",
+        );
+        let choice_id = egui::Id::new(("helper-tds-plan-template", case.id(), &digest));
+        let mut choice = ui
+            .ctx()
+            .data_mut(|d| d.get_temp::<u8>(choice_id).unwrap_or(0));
+        if object.as_deref() == Some("orders") {
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut choice, 0, "CustomerOrders");
+                ui.selectable_value(&mut choice, 1, "StatusCount");
+            });
+        }
+        ui.ctx().data_mut(|d| d.insert_temp(choice_id, choice));
+        let template = match object.as_deref() {
+            Some("orders") if choice == 0 => Some(ReviewedSelectTemplate::CustomerOrders {
+                customer_id: 424242,
+            }),
+            Some("orders") if choice == 1 => Some(ReviewedSelectTemplate::StatusCount {
+                status: OrderStatus::Pending,
+            }),
+            Some("spill_events") => Some(ReviewedSelectTemplate::OrderSort),
+            _ => None,
+        };
+        if let Some(template) =
+            template.filter(|template| template.sql_server_statement(scope).is_ok())
+        {
+            ui.label(format!("Reviewed synthetic template: {}", template.label()));
+            if ui
+                .button("Collect SQL Server estimated plan (local fixture)")
+                .clicked()
+            {
+                let outcome = template.fingerprint(scope).and_then(|query_digest| {
+                    state.try_collect_sql(
+                        case.id(),
+                        scope,
+                        profiles,
+                        CapabilityId::SqlPlan,
+                        ProbeParams::SqlPlan { query_digest },
+                    )
+                });
+                state.notice = outcome
+                    .map(|_| "SQL Server SHOWPLAN collection started".to_owned())
+                    .unwrap_or_else(|error| format!("SQL Server SHOWPLAN unavailable: {error}"));
+            }
+        } else {
+            ui.label("Native SHOWPLAN requires an exact disposable loopback fixture scope and read credential.");
+        }
+        ui.label("SQL Server workload sampling awaits an attested disposable fixture; imported plans remain unverified.");
     }
 
     let active: Vec<_> = state

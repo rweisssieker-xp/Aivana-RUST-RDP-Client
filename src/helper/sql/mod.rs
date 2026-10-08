@@ -28,7 +28,7 @@ impl ProbeAdapter for SqlPlanAdapter {
     fn collect<'a>(
         &'a self,
         request: &'a ProbeRequest,
-        _secrets: &'a dyn SecretResolver,
+        secrets: &'a dyn SecretResolver,
         cancel: CancellationToken,
     ) -> ProbeFuture<'a> {
         Box::pin(async move {
@@ -44,7 +44,23 @@ impl ProbeAdapter for SqlPlanAdapter {
             let template =
                 templates::ReviewedSelectTemplate::from_fingerprint(&request.scope, query_digest)
                     .ok_or_else(|| anyhow::anyhow!("Unregistered plan template"))?;
-            let report = plans::estimated_plan(&request.scope, &template, cancel).await?;
+            let (report, engine_source) = match &request.scope {
+                BoundScope::Database {
+                    engine: DatabaseEngine::Postgres,
+                    ..
+                } => (
+                    plans::estimated_plan(&request.scope, &template, cancel).await?,
+                    "pg",
+                ),
+                BoundScope::Database {
+                    engine: DatabaseEngine::SqlServer,
+                    ..
+                } => (
+                    sql_server::estimated_plan(request, secrets, cancel).await?,
+                    "sqlserver",
+                ),
+                _ => anyhow::bail!("SQL plan database scope required"),
+            };
             let artifact = PlanArtifact::from_report(&report, query_digest.clone())?;
             let now = chrono::Utc::now();
             Ok(ProbeOutput {
@@ -63,7 +79,7 @@ impl ProbeAdapter for SqlPlanAdapter {
                 sql_observations: vec![],
                 sql_artifacts: vec![SqlArtifact::Plan(artifact)],
                 evidence_refs: vec![],
-                source_id: format!("pg-plan-v1:{query_digest}").into_bytes(),
+                source_id: format!("{engine_source}-plan-v1:{query_digest}").into_bytes(),
                 source_observed_at: now,
                 parser_version: 1,
             })
