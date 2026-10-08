@@ -163,7 +163,7 @@ impl AivanaApp {
         }
     }
     fn ticket_view(&mut self, ui: &mut Ui) {
-        super::ticket_inbox_panel::view(&mut self.ticket_inbox, ui);
+        super::ticket_inbox_panel::view(&mut self.ticket_inbox, ui, &mut self.helper);
         let s = &mut self.recovery_extensions;
         ui.label("Read ticket → review content → associate recovery case → review outcome report and deliver separately.");
         ui.collapsing("Jira connection (API v3)",|ui|{

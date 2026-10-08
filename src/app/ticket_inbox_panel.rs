@@ -23,7 +23,7 @@ impl State {
         self.escalation = Default::default();
     }
 }
-pub(super) fn view(state: &mut State, ui: &mut Ui) {
+pub(super) fn view(state: &mut State, ui: &mut Ui, helper: &mut super::helper_panel::HelperState) {
     if let Some(receiver) = &state.pending {
         match receiver.try_recv() {
             Ok(result) => {
@@ -83,6 +83,10 @@ pub(super) fn view(state: &mut State, ui: &mut Ui) {
                     ui.label(format!("{} · {} · received {}",item.repository,item.action,item.received_utc));
                     ui.small("Receipt time is not proof of original event time. External ticket content is untrusted.");
                     ui.collapsing("Review description", |ui| { ui.label(&item.ticket.description); });
+                    if ui.button("Copy into IT Helper case for review").clicked() {
+                        helper.adopt_ticket(&item.ticket);
+                        state.notice = "Ticket copied into IT Helper. Open IT Helper to review and save.".into();
+                    }
                     if ui.button("Copy ticket JSON for import review").clicked() {
                         match serde_json::to_string(&item.ticket) {
                             Ok(json) => { ui.ctx().copy_text(json); state.notice="Ticket JSON copied. Paste into ticket import and review before saving.".into(); }

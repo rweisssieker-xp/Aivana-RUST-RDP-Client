@@ -12,6 +12,7 @@ mod equivalence;
 mod execution;
 mod repair_approval;
 mod health_suggestions;
+mod helper;
 mod application_checks;
 mod incident;
 mod integrations;

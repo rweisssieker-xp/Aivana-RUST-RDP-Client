@@ -57,6 +57,7 @@ mod contracts_panel;
 mod desktop;
 mod execution_panel;
 mod incident_panel;
+mod helper_panel;
 mod insights_panel;
 mod integrations_panel;
 mod intelligence_panel;
@@ -124,6 +125,7 @@ enum View {
     TestLab,
     Workflow,
     Incident,
+    Helper,
     Promotion,
     Recovery,
     RecoveryPlans,
@@ -224,6 +226,7 @@ pub struct AivanaApp {
     test_lab: test_lab_panel::TestLabState,
     workflow: workflow_panel::WorkflowState,
     incident: incident_panel::IncidentState,
+    helper: helper_panel::HelperState,
     promotion: promotion_panel::PromotionState,
     recovery: recovery_panel::RecoveryState,
     contracts: contracts_panel::ContractsState,
@@ -342,6 +345,7 @@ impl AivanaApp {
             test_lab: test_lab_panel::TestLabState::default(),
             workflow: workflow_panel::WorkflowState::default(),
             incident: incident_panel::IncidentState::default(),
+            helper: helper_panel::HelperState::load(),
             promotion: promotion_panel::PromotionState::default(),
             recovery: recovery_panel::RecoveryState::default(),
             contracts: contracts_panel::ContractsState::default(),
@@ -1222,6 +1226,7 @@ impl eframe::App for AivanaApp {
         self.poll_workflow(&ctx);
         self.poll_workflow_ocr();
         self.poll_promotion();
+        self.poll_helper();
         let _ = self.engine.take_manual_inputs();
         self.engine
             .set_manual_capture(self.teaching.teacher.is_recording());

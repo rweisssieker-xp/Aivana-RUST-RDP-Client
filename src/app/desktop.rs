@@ -293,6 +293,7 @@ impl AivanaApp {
                     View::TestLab => self.test_lab_view(ui),
                     View::Workflow => self.workflow_with_proof_view(ui),
                     View::Incident => self.incident_view(ui),
+                    View::Helper => self.helper_view(ui),
                     View::Promotion => self.promotion_view(ui),
                     View::Recovery => self.recovery_view(ui),
                     View::RecoveryPlans => self.contracts_view(ui),
@@ -364,6 +365,7 @@ impl AivanaApp {
         ui.label(RichText::new(crate::localization::tr(self.desktop.locale,"VERWALTEN")).size(11.0).color(MUTED));
         let recovery_notices = crate::recovery_daemon::unread_count();
         for (view, label) in [
+            (View::Helper, "IT Helper"),
             (View::Missions, "Mission Control"),
             (View::Setup, "Diagnostic setup"),
             (View::Operations, "Remote-Werkzeuge"),
@@ -1139,6 +1141,7 @@ impl AivanaApp {
                         ("Isolated test lab", View::TestLab),
                         ("Jobs & packages", View::Workflow),
                         ("Reconstruct an incident", View::Incident),
+                        ("IT Helper", View::Helper),
                         ("SSH-Terminal", View::Terminal),
                         ("Workspace", View::Sessions),
                         ("Connections", View::Connections),

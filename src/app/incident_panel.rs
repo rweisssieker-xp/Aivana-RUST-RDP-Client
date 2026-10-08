@@ -148,6 +148,12 @@ impl AivanaApp {
                         self.verification_handoff = None;
                         self.view = View::Intelligence;
                     }
+                    if let Some(source) = selected.and_then(|p| incident::Source::from_failure(r, &crate::mission::Target::from_profile(p)).ok()) {
+                        if ui.button("Copy into IT Helper case for review").clicked() {
+                            self.helper.adopt_incident(source);
+                            self.view = View::Helper;
+                        }
+                    }
                     if selected.is_none() {
                         ui.small(
                             "Choose the exact affected Windows profile to enable the handoff.",
