@@ -132,6 +132,43 @@ fn target(t: &Target, protocol: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+fn valid_aws_region(region: &str) -> bool {
+    let parts: Vec<_> = region.split('-').collect();
+    let number =
+        |s: &str| !s.is_empty() && !s.starts_with('0') && s.bytes().all(|b| b.is_ascii_digit());
+    let geography = |s: &str| {
+        matches!(
+            s,
+            "north"
+                | "south"
+                | "east"
+                | "west"
+                | "central"
+                | "northeast"
+                | "northwest"
+                | "southeast"
+                | "southwest"
+        )
+    };
+    match parts.as_slice() {
+        [partition, area, index] => {
+            matches!(
+                *partition,
+                "af" | "ap" | "ca" | "cn" | "eu" | "il" | "me" | "mx" | "sa" | "us"
+            ) && geography(area)
+                && number(index)
+        }
+        [
+            "us",
+            partition @ ("gov" | "iso" | "isob" | "isof"),
+            area,
+            index,
+        ] => !partition.is_empty() && geography(area) && number(index),
+        ["eu", "isoe", area, index] => geography(area) && number(index),
+        _ => false,
+    }
+}
+
 impl BoundScope {
     pub fn validate(&self) -> Result<()> {
         match self {
@@ -257,11 +294,7 @@ impl BoundScope {
                     "Invalid AWS account"
                 );
                 ensure!(
-                    region.len() <= 32
-                        && region.split('-').count() >= 3
-                        && region
-                            .bytes()
-                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+                    region.len() <= 32 && valid_aws_region(region),
                     "Invalid AWS region"
                 );
                 ensure!(

@@ -175,18 +175,21 @@ pub(super) fn show(
                     .take(12)
                     .collect::<String>()
             ));
-            if let Some(target) = scope.target() {
-                let current = profiles.iter().find(|p| p.id == target.profile_id);
-                ui.label(match current {
-                    Some(p) if scope.matches_profile(p) => "Exact profile bound",
-                    _ => "Profile changed or missing · review again",
-                });
+            if scope.target().is_some() {
+                ui.label(profile_review_status(scope, profiles));
             }
             if ui.button("Remove reviewed scope").clicked() {
                 let mut scopes = case.scopes().to_vec();
                 scopes.remove(index);
                 state.revise(CaseEdit::Scopes(scopes));
             }
+        });
+        ui.push_id(("reviewed-scope", index), |ui| {
+            ui.collapsing("Inspect exact reviewed identity", |ui| {
+                for line in review_details(scope) {
+                    ui.monospace(line);
+                }
+            });
         });
     }
     let mut pending_profile_ids = None;
@@ -308,14 +311,7 @@ pub(super) fn show(
         });
     }
     if ui.button("Review and add scope").clicked() {
-        match editor.build(profiles) {
-            Ok(scope) => {
-                let mut scopes = case.scopes().to_vec();
-                scopes.push(scope);
-                state.revise(CaseEdit::Scopes(scopes));
-            }
-            Err(error) => state.notice = format!("Scope review failed: {error}"),
-        }
+        review_from_editor(state, case, profiles);
     }
     if let Some(ids) = pending_profile_ids {
         state.revise(CaseEdit::Profiles(ids));
@@ -394,5 +390,266 @@ fn scope_kind(scope: &BoundScope) -> &'static str {
         BoundScope::Kubernetes { .. } => "Kubernetes",
         BoundScope::AzureVm { .. } => "Azure VM",
         BoundScope::AwsEc2 { .. } => "AWS EC2",
+    }
+}
+
+fn review_details(scope: &BoundScope) -> Vec<String> {
+    let mut details = vec![format!("Scope: {}", scope_kind(scope))];
+    if let Some(target) = scope.target() {
+        details.extend([
+            format!("Saved profile ID: {}", target.profile_id),
+            format!("Display name: {} (not identity)", target.name),
+            format!("Endpoint: {}:{}", target.host, target.port),
+            format!("Protocol: {}", target.protocol),
+            format!("Login: {}", target.username),
+            format!("Domain: {}", target.domain),
+            format!(
+                "Route: {}",
+                if target.route.is_empty() {
+                    "<direct>"
+                } else {
+                    &target.route
+                }
+            ),
+        ]);
+    }
+    match scope {
+        BoundScope::Database {
+            engine,
+            port,
+            database,
+            schema,
+            object,
+            ..
+        } => details.extend([
+            format!("Database engine: {engine:?}"),
+            format!("Database port: {port}"),
+            format!("Database: {database}"),
+            format!("Schema: {}", schema.as_deref().unwrap_or("<none>")),
+            format!("Object: {}", object.as_deref().unwrap_or("<none>")),
+        ]),
+        BoundScope::Http {
+            port, tls, path, ..
+        } => details.extend([
+            format!("HTTP port: {port}"),
+            format!("TLS: {tls}"),
+            format!("Path: {path}"),
+        ]),
+        BoundScope::Docker {
+            daemon_context,
+            container_id,
+            ..
+        } => details.extend([
+            format!("Daemon context: {daemon_context}"),
+            format!("Container ID: {container_id}"),
+        ]),
+        BoundScope::Kubernetes {
+            context,
+            cluster_fingerprint,
+            namespace,
+            resource_kind,
+            resource_name,
+            ..
+        } => details.extend([
+            format!("Kubernetes context: {context}"),
+            format!("Cluster fingerprint: {cluster_fingerprint}"),
+            format!("Namespace: {namespace}"),
+            format!("Resource kind: {resource_kind}"),
+            format!("Resource name: {resource_name}"),
+        ]),
+        BoundScope::AzureVm {
+            tenant,
+            subscription,
+            resource_id,
+            ..
+        } => details.extend([
+            format!("Tenant: {tenant}"),
+            format!("Subscription: {subscription}"),
+            format!("Resource ID: {resource_id}"),
+        ]),
+        BoundScope::AwsEc2 {
+            account,
+            region,
+            instance_id,
+            ..
+        } => details.extend([
+            format!("Account: {account}"),
+            format!("Region: {region}"),
+            format!("Instance ID: {instance_id}"),
+        ]),
+        BoundScope::Windows { .. } | BoundScope::Linux { .. } => {}
+    }
+    if let Some(credential) = scope.credential() {
+        details.extend([
+            format!("Credential reference: {}", credential.reference),
+            format!("Credential purpose: {:?}", credential.purpose),
+            format!("Credential generation: {}", credential.generation),
+            format!("Credential principal: {}", credential.principal),
+            format!("Credential context: {}", credential.context),
+            format!("Credential resource digest: {}", credential.context_digest),
+        ]);
+    } else if !matches!(scope, BoundScope::Http { .. }) {
+        details.push("Credential reference: <none>".into());
+    }
+    details
+}
+
+fn profile_review_status(scope: &BoundScope, profiles: &[ConnectionProfile]) -> &'static str {
+    match scope
+        .target()
+        .and_then(|t| profiles.iter().find(|p| p.id == t.profile_id))
+    {
+        Some(profile) if scope.matches_profile(profile) => "Exact profile bound",
+        _ => "Profile changed or missing · review again",
+    }
+}
+
+fn review_from_editor(state: &mut HelperState, case: &HelperCase, profiles: &[ConnectionProfile]) {
+    match state.scope_editor.build(profiles) {
+        Ok(scope) => {
+            let mut scopes = case.scopes().to_vec();
+            scopes.push(scope);
+            state.revise(CaseEdit::Scopes(scopes));
+        }
+        Err(error) => state.notice = format!("Scope review failed: {error}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_editor_variants_are_reviewable_inspectable_persisted_and_inert() {
+        let ctx = egui::Context::default();
+        let mut app = AivanaApp::from_context(&ctx);
+        let dir = std::env::temp_dir().join(format!("relayne-scope-editor-{}", Uuid::new_v4()));
+        app.helper = HelperState::at_path(dir.join("cases.dpapi"));
+        app.helper.create();
+        let mut rdp = ConnectionProfile::sample("RDP", "rdp.local", "", false);
+        rdp.options.gateway.enabled = true;
+        rdp.options.gateway.host = "gateway.example".into();
+        rdp.options.gateway.port = 444;
+        let mut ssh = ConnectionProfile::sample("SSH", "ssh.local", "", false);
+        ssh.protocol = crate::models::Protocol::Ssh;
+        ssh.port = 22;
+        app.profiles.extend([rdp.clone(), ssh.clone()]);
+        app.helper.revise(CaseEdit::Profiles(vec![rdp.id, ssh.id]));
+        let subscription = Uuid::new_v4().to_string();
+        let mut scopes = Vec::new();
+        for kind in 0..8 {
+            let mut editor = Editor {
+                kind,
+                profile: Some(if kind == 1 { ssh.id } else { rdp.id }),
+                port: "5432".into(),
+                database: "CaseDB".into(),
+                schema: "Public".into(),
+                object: "Orders".into(),
+                tls: true,
+                path: "/Health".into(),
+                daemon_context: "daemon-A".into(),
+                container_id: "Container-A".into(),
+                context: "cluster-A".into(),
+                cluster_fingerprint: "fingerprint-A".into(),
+                namespace: "NS-A".into(),
+                resource_kind: "Deployment".into(),
+                resource_name: "API-A".into(),
+                tenant: Uuid::new_v4().to_string(),
+                subscription: subscription.clone(),
+                resource_id: format!(
+                    "/subscriptions/{subscription}/resourceGroups/Group-A/providers/Microsoft.Compute/virtualMachines/VM-A"
+                ),
+                account: "123456789012".into(),
+                region: "us-gov-west-1".into(),
+                instance_id: "i-12345678".into(),
+                credential_ref: Uuid::new_v4().to_string(),
+                credential_purpose: 1,
+                credential_generation: "7".into(),
+                credential_principal: "principal-A".into(),
+                credential_context: "tenant-A".into(),
+                ..Default::default()
+            };
+            if kind == 3 {
+                editor.credential_ref.clear();
+            }
+            let scope = editor.build(&app.profiles).unwrap();
+            let details = review_details(&scope).join("\n");
+            if kind != 3 {
+                for expected in [
+                    format!("Credential reference: {}", editor.credential_ref),
+                    "Credential purpose: Diagnose".into(),
+                    "Credential generation: 7".into(),
+                    "Credential principal: principal-A".into(),
+                    "Credential context: tenant-A".into(),
+                ] {
+                    assert!(
+                        details.contains(&expected),
+                        "kind {kind} missing {expected}"
+                    );
+                }
+            }
+            if kind <= 3 {
+                assert!(details.contains("Saved profile ID:"));
+                assert!(details.contains("Endpoint:"));
+                assert!(details.contains(if kind == 1 {
+                    "Route: <direct>"
+                } else {
+                    "Route: gateway.example:444"
+                }));
+                assert_eq!(
+                    profile_review_status(&scope, &app.profiles),
+                    "Exact profile bound"
+                );
+                let mut drifted = app.profiles.clone();
+                let profile = drifted
+                    .iter_mut()
+                    .find(|p| p.id == scope.target().unwrap().profile_id)
+                    .unwrap();
+                profile.host.push_str("-changed");
+                assert_eq!(
+                    profile_review_status(&scope, &drifted),
+                    "Profile changed or missing · review again"
+                );
+            }
+            for expected in match kind {
+                0 => vec!["rdp.local", "RDP", "principal-A", "generation: 7"],
+                1 => vec!["ssh.local", "SSH", "principal-A", "generation: 7"],
+                2 => vec!["CaseDB", "Public", "Orders", "5432"],
+                3 => vec!["/Health", "TLS", "5432"],
+                4 => vec!["daemon-A", "Container-A"],
+                5 => vec!["cluster-A", "fingerprint-A", "NS-A", "API-A"],
+                6 => vec!["Group-A", "VM-A", &subscription],
+                _ => vec!["123456789012", "us-gov-west-1", "i-12345678"],
+            } {
+                assert!(details.contains(expected), "kind {kind} missing {expected}");
+            }
+            scopes.push(scope);
+        }
+        let mut invalid = Editor {
+            kind: 7,
+            account: "123456789012".into(),
+            region: "---".into(),
+            instance_id: "i-12345678".into(),
+            ..Default::default()
+        };
+        assert!(invalid.build(&app.profiles).is_err());
+        invalid.region = "eu-central-1".into();
+        assert!(invalid.build(&app.profiles).is_ok());
+        invalid.region = "---".into();
+        app.helper.scope_editor = invalid;
+        let case = app.helper.current().unwrap().clone();
+        review_from_editor(&mut app.helper, &case, &app.profiles);
+        assert!(app.helper.notice.starts_with("Scope review failed:"));
+        assert!(app.helper.current().unwrap().scopes().is_empty());
+        app.helper.revise(CaseEdit::Scopes(scopes));
+        app.helper.save();
+        app.helper.reload();
+        assert_eq!(app.helper.current().unwrap().scopes().len(), 8);
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| app.helper_view(ui));
+        });
+        app.poll_helper();
+        assert!(app.operations.queue.jobs.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

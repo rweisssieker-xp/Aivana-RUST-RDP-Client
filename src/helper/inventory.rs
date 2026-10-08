@@ -69,7 +69,22 @@ pub fn derive_inventory(
     for edge in &telemetry.edges {
         let status = telemetry.dependency_status(edge, &targets, now);
         let profile_drift = !status.source_matches || !status.destination_matches;
-        let freshness = if profile_drift {
+        let captures_complete = match edge.evidence.as_slice() {
+            [source_id, destination_id] => {
+                let source = telemetry
+                    .observations
+                    .iter()
+                    .find(|o| o.id == *source_id && o.target.same_endpoint(&edge.source));
+                let destination = telemetry
+                    .observations
+                    .iter()
+                    .find(|o| o.id == *destination_id && o.target.same_endpoint(&edge.destination));
+                matches!(source, Some(o) if o.payload.events_available && !o.payload.truncated)
+                    && matches!(destination, Some(o) if o.payload.events_available && !o.payload.truncated)
+            }
+            _ => false,
+        };
+        let freshness = if profile_drift || !captures_complete {
             InventoryFreshness::Unknown
         } else {
             match status.observation_freshness {

@@ -158,6 +158,38 @@ fn scope_variants_validate_and_bind_without_port_inference() {
         .validate()
         .is_err()
     );
+    for region in ["---", "us--1", "us-east-x", "x-east-1"] {
+        assert!(
+            BoundScope::AwsEc2 {
+                account: "123456789012".into(),
+                region: region.into(),
+                instance_id: "i-12345678".into(),
+                credential: None
+            }
+            .validate()
+            .is_err(),
+            "{region}"
+        );
+    }
+    for region in [
+        "eu-central-1",
+        "us-gov-west-1",
+        "us-iso-east-1",
+        "us-isob-east-1",
+        "eu-isoe-west-1",
+    ] {
+        assert!(
+            BoundScope::AwsEc2 {
+                account: "123456789012".into(),
+                region: region.into(),
+                instance_id: "i-12345678".into(),
+                credential: None
+            }
+            .validate()
+            .is_ok(),
+            "{region}"
+        );
+    }
 }
 
 #[test]
@@ -248,6 +280,25 @@ fn inventory_requires_two_captures_and_exact_current_profiles() {
         read(&[source.clone(), destination.clone()], &telemetry),
         (InventoryFreshness::Recent, false)
     );
+    // A newer complete capture must not hide a partial capture referenced by this edge.
+    telemetry.observations[0].payload.truncated = true;
+    telemetry.observations.push(Observation {
+        id: Uuid::new_v4(),
+        target: telemetry.observations[0].target.clone(),
+        received: now,
+        payload: payload("10.0.0.1"),
+    });
+    assert_eq!(
+        read(&[source.clone(), destination.clone()], &telemetry),
+        (InventoryFreshness::Unknown, false)
+    );
+    telemetry.observations[0].payload.truncated = false;
+    telemetry.observations[1].payload.events_available = false;
+    assert_eq!(
+        read(&[source.clone(), destination.clone()], &telemetry),
+        (InventoryFreshness::Unknown, false)
+    );
+    telemetry.observations[1].payload.events_available = true;
     let mut changed = destination.clone();
     changed.host = "replacement.local".into();
     assert_eq!(
@@ -264,16 +315,30 @@ fn all_variant_resource_fields_change_digest() {
         (
             BoundScope::Windows {
                 target: target("RDP"),
-                credential: None,
+                credential: Some(cred()),
             },
-            vec![("target.host", serde_json::json!("other"))],
+            vec![
+                ("target.profile_id", serde_json::json!(Uuid::new_v4())),
+                ("target.host", serde_json::json!("other")),
+                ("target.port", serde_json::json!(3390)),
+                ("target.username", serde_json::json!("other-user")),
+                ("target.domain", serde_json::json!("other-domain")),
+                ("target.route", serde_json::json!("other-gateway:443")),
+            ],
         ),
         (
             BoundScope::Linux {
                 target: target("SSH"),
                 credential: Some(cred()),
             },
-            vec![("credential.generation", serde_json::json!(2))],
+            vec![
+                ("target.profile_id", serde_json::json!(Uuid::new_v4())),
+                ("target.host", serde_json::json!("other")),
+                ("target.port", serde_json::json!(23)),
+                ("target.username", serde_json::json!("other-user")),
+                ("target.domain", serde_json::json!("other-domain")),
+                ("target.route", serde_json::json!("other-gateway:443")),
+            ],
         ),
         (
             BoundScope::Http {
@@ -283,6 +348,13 @@ fn all_variant_resource_fields_change_digest() {
                 path: "/Health".into(),
             },
             vec![
+                ("target.profile_id", serde_json::json!(Uuid::new_v4())),
+                ("target.host", serde_json::json!("other")),
+                ("target.port", serde_json::json!(3390)),
+                ("target.protocol", serde_json::json!("SSH")),
+                ("target.username", serde_json::json!("other-user")),
+                ("target.domain", serde_json::json!("other-domain")),
+                ("target.route", serde_json::json!("other-gateway:443")),
                 ("port", serde_json::json!(8443)),
                 ("tls", serde_json::json!(false)),
                 ("path", serde_json::json!("/health")),
@@ -352,6 +424,7 @@ fn all_variant_resource_fields_change_digest() {
     for (scope, edits) in cases {
         let scope = scope.bind_credential_context().unwrap();
         let digest = scope.digest().unwrap();
+        let resource_digest = scope.resource_digest().unwrap();
         for (path, replacement) in edits {
             let mut value = serde_json::to_value(&scope).unwrap();
             let mut node = &mut value;
@@ -366,9 +439,52 @@ fn all_variant_resource_fields_change_digest() {
                     altered.digest().is_err(),
                     "resource edit must stale credential context: {path}"
                 );
+                let rebound = altered.bind_credential_context().unwrap();
+                assert_ne!(
+                    rebound.resource_digest().unwrap(),
+                    resource_digest,
+                    "{path}"
+                );
+                assert_ne!(rebound.digest().unwrap(), digest, "{path}");
+            } else if path.starts_with("credential.") {
+                assert_eq!(
+                    altered.resource_digest().unwrap(),
+                    resource_digest,
+                    "{path}"
+                );
+                assert_ne!(altered.digest().unwrap(), digest, "{path}");
             } else {
+                assert_ne!(
+                    altered.resource_digest().unwrap(),
+                    resource_digest,
+                    "{path}"
+                );
                 assert_ne!(altered.digest().unwrap(), digest, "{path}");
             }
+        }
+        if scope.credential().is_some() {
+            for (field, replacement) in [
+                ("reference", serde_json::json!(Uuid::new_v4())),
+                ("purpose", serde_json::json!("controlled_change")),
+                ("generation", serde_json::json!(17)),
+                ("principal", serde_json::json!("other-principal")),
+                ("context", serde_json::json!("other-context")),
+            ] {
+                let mut value = serde_json::to_value(&scope).unwrap();
+                value["credential"][field] = replacement;
+                let altered: BoundScope = serde_json::from_value(value).unwrap();
+                assert_eq!(
+                    altered.resource_digest().unwrap(),
+                    resource_digest,
+                    "{field}"
+                );
+                assert_ne!(altered.digest().unwrap(), digest, "{field}");
+            }
+            let mut value = serde_json::to_value(&scope).unwrap();
+            value["credential"] = serde_json::Value::Null;
+            let without: BoundScope = serde_json::from_value(value).unwrap();
+            assert_eq!(without.resource_digest().unwrap(), resource_digest);
+            assert_ne!(without.digest().unwrap(), digest);
         }
     }
     let old = BoundScope::AzureVm {
@@ -431,4 +547,33 @@ fn ambiguous_address_does_not_create_inferred_relationship() {
         capture(target("RDP"), "10.0.0.2", vec![]),
     ];
     assert!(discover(&captures).is_empty());
+}
+
+#[test]
+fn persisted_scope_with_stale_credential_context_is_rejected_on_load() {
+    let mut store = crate::helper::store::HelperStore::default();
+    let id = store.create(ProblemIntake::default()).unwrap();
+    let scoped = BoundScope::Windows {
+        target: target("RDP"),
+        credential: Some(cred()),
+    }
+    .bind_credential_context()
+    .unwrap();
+    store
+        .revise(
+            id,
+            1,
+            CaseEdit::Profiles(vec![scoped.target().unwrap().profile_id]),
+        )
+        .unwrap();
+    store.revise(id, 2, CaseEdit::Scopes(vec![scoped])).unwrap();
+    let mut value = serde_json::to_value(&store).unwrap();
+    value["cases"][0]["scopes"][0]["target"]["host"] = serde_json::json!("replacement.local");
+    let dir = std::env::temp_dir().join(format!("relayne-stale-scope-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("cases.dpapi");
+    let bytes = serde_json::to_vec(&value).unwrap();
+    std::fs::write(&path, crate::security::protect_secret(&bytes).unwrap()).unwrap();
+    assert!(crate::helper::store::HelperStore::load(&path).is_err());
+    std::fs::remove_dir_all(dir).unwrap();
 }
