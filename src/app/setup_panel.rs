@@ -1,6 +1,6 @@
 //! Local, non-executing setup guidance for the first diagnostic check.
 
-use super::{tw, AivanaApp, View};
+use super::{AivanaApp, View, tw};
 use crate::diagnostic_lab::{self, Case, Mode};
 use crate::incident::Source;
 use crate::mission::Target;
@@ -19,6 +19,56 @@ pub(super) struct Snapshot {
     pub store_error: bool,
     pub awaiting_approval: bool,
     pub running: bool,
+}
+
+struct ActiveConfig<'a> {
+    incident: &'a str,
+    service: &'a str,
+    application: &'a str,
+    dependency: &'a str,
+    mode: Mode,
+    source: Option<&'a Source>,
+    saved_case: bool,
+}
+
+fn active_config(snapshot: &Snapshot) -> ActiveConfig<'_> {
+    if let Some(case) = snapshot.selected_case.as_ref() {
+        ActiveConfig {
+            incident: &case.config.incident,
+            service: &case.config.service,
+            application: &case.config.application,
+            dependency: &case.config.dependency,
+            mode: case.config.mode,
+            source: case.source.as_ref(),
+            saved_case: true,
+        }
+    } else {
+        ActiveConfig {
+            incident: &snapshot.incident,
+            service: &snapshot.service,
+            application: &snapshot.application,
+            dependency: &snapshot.dependency,
+            mode: snapshot.mode,
+            source: snapshot.source.as_ref(),
+            saved_case: false,
+        }
+    }
+}
+
+fn same_source(left: &Source, right: &Source) -> bool {
+    left.record_id == right.record_id
+        && left.profile_id == right.profile_id
+        && left.endpoint == right.endpoint
+        && left.observed_at == right.observed_at
+}
+
+fn service_ready(service: &str) -> bool {
+    !service.is_empty()
+        && service.len() <= 128
+        && service
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_- .".contains(&byte))
+        && !service.eq_ignore_ascii_case("ExampleService")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,6 +146,12 @@ fn local_powershell_present() -> bool {
 
 fn assess(profile: Option<&ConnectionProfile>, snapshot: &Snapshot, powershell: bool) -> Vec<Item> {
     let mut checks = Vec::new();
+    let active = active_config(snapshot);
+    let case_action = if active.saved_case {
+        "Review / create corrected case"
+    } else {
+        "Edit diagnostic draft"
+    };
     let target = profile.map(Target::from_profile);
     let direct = profile.is_some_and(|profile| {
         profile.protocol == Protocol::Rdp
@@ -154,13 +210,19 @@ fn assess(profile: Option<&ConnectionProfile>, snapshot: &Snapshot, powershell: 
         None,
     ));
 
-    let source = snapshot.source.as_ref().or_else(|| {
-        snapshot
-            .selected_case
-            .as_ref()
-            .and_then(|case| case.source.as_ref())
-    });
-    checks.push(match (source, target.as_ref()) {
+    let source_conflict = active.saved_case
+        && snapshot.source.as_ref().is_some_and(|draft_source| {
+            !active
+                .source
+                .is_some_and(|case_source| same_source(case_source, draft_source))
+        });
+    checks.push(match (active.source, target.as_ref()) {
+        _ if source_conflict => item(
+            "Incident handoff",
+            Status::NeedsInput,
+            "The unsaved incident handoff differs from the selected saved case's source. Review the case or create one from the active failure.",
+            Some((View::Intelligence, "Review case and handoff")),
+        ),
         (Some(_), _) if snapshot.store_error => item(
             "Incident handoff",
             Status::Unknown,
@@ -189,27 +251,21 @@ fn assess(profile: Option<&ConnectionProfile>, snapshot: &Snapshot, powershell: 
 
     checks.push(item(
         "Incident description",
-        if !snapshot.incident.trim().is_empty() && snapshot.incident.len() <= 4096 {
+        if !active.incident.trim().is_empty() && active.incident.len() <= 4096 {
             Status::Ready
         } else {
             Status::NeedsInput
         },
-        if snapshot.incident.trim().is_empty() {
+        if active.incident.trim().is_empty() {
             "Describe the observed failure in Diagnostic Lab."
-        } else if snapshot.incident.len() > 4096 {
+        } else if active.incident.len() > 4096 {
             "Shorten the incident description to at most 4096 bytes."
         } else {
             "Description entered; its accuracy has not been verified."
         },
-        Some((View::Intelligence, "Edit diagnostic case")),
+        Some((View::Intelligence, case_action)),
     ));
-    let service_valid = !snapshot.service.is_empty()
-        && snapshot.service.len() <= 128
-        && snapshot
-            .service
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"_- .".contains(&byte))
-        && !snapshot.service.eq_ignore_ascii_case("ExampleService");
+    let service_valid = service_ready(active.service);
     checks.push(item(
         "Application service",
         if service_valid {
@@ -222,11 +278,11 @@ fn assess(profile: Option<&ConnectionProfile>, snapshot: &Snapshot, powershell: 
         } else {
             "Enter the actual Windows service name; the sample value is not a live prerequisite."
         },
-        Some((View::Intelligence, "Edit diagnostic case")),
+        Some((View::Intelligence, case_action)),
     ));
     for (title, value, https_only) in [
-        ("Application URL", snapshot.application.as_str(), true),
-        ("Dependency URL", snapshot.dependency.as_str(), false),
+        ("Application URL", active.application, true),
+        ("Dependency URL", active.dependency, false),
     ] {
         let ready = url_ready(value, https_only);
         checks.push(item(
@@ -237,7 +293,7 @@ fn assess(profile: Option<&ConnectionProfile>, snapshot: &Snapshot, powershell: 
             } else {
                 "Enter a real, approved URL. Reserved/example hosts cannot establish live readiness."
             },
-            Some((View::Intelligence, "Edit diagnostic case")),
+            Some((View::Intelligence, case_action)),
         ));
     }
 
@@ -246,6 +302,8 @@ fn assess(profile: Option<&ConnectionProfile>, snapshot: &Snapshot, powershell: 
         !snapshot.store_error
             && case.validate().is_ok()
             && case.config.mode == Mode::ReadOnly
+            && !source_conflict
+            && service_ready(&case.config.service)
             && profile.is_some_and(|profile| {
                 case.config
                     .target
@@ -265,7 +323,7 @@ fn assess(profile: Option<&ConnectionProfile>, snapshot: &Snapshot, powershell: 
         if valid_case { Status::Ready } else { Status::NeedsInput },
         if valid_case {
             "A saved read-only case matches this exact profile. Saving a case does not run a check."
-        } else if snapshot.mode == Mode::Simulation || case.is_some_and(|case| case.config.mode == Mode::Simulation) {
+        } else if active.mode == Mode::Simulation {
             "Simulation is the default/example path. Choose read-only explicitly, review real inputs, then save a matching case."
         } else {
             "No valid saved read-only case matches this profile and its current configuration."
@@ -284,15 +342,14 @@ fn assess(profile: Option<&ConnectionProfile>, snapshot: &Snapshot, powershell: 
         },
         Some((View::Intelligence, "Review read-only check")),
     ));
-    let live_observations = valid_case
-        .then(|| {
-            case.unwrap()
-                .observations
-                .iter()
-                .filter(|observation| observation.mode == Mode::ReadOnly)
-                .count()
-        })
-        .unwrap_or(0);
+    let live_observations = match (valid_case, case) {
+        (true, Some(case)) => case
+            .observations
+            .iter()
+            .filter(|observation| observation.mode == Mode::ReadOnly)
+            .count(),
+        _ => 0,
+    };
     checks.push(item(
         "Diagnostic evidence",
         Status::Unknown,
@@ -318,9 +375,17 @@ impl AivanaApp {
     pub(super) fn setup_view(&mut self, ui: &mut Ui) {
         ui.heading("First diagnostic check");
         ui.label("Review local setup and exact incident context before choosing any live read-only check.");
+        let snapshot = self.intelligence.diagnostic.setup_snapshot();
+        if let Some(case) = snapshot.selected_case.as_ref() {
+            ui.strong(format!(
+                "Showing saved case {} · {}. The unsaved new-case draft is separate.",
+                case.id, case.config.incident
+            ));
+        } else {
+            ui.strong("Showing the unsaved new-case draft. No saved diagnostic case is selected.");
+        }
         ui.small("Opening this page and following its links run no check or connection and change no Windows setting.");
         ui.add_space(12.0);
-        let snapshot = self.intelligence.diagnostic.setup_snapshot();
         let profile = self.selected_profile();
         let checks = assess(profile, &snapshot, local_powershell_present());
         for check in checks {
@@ -335,10 +400,10 @@ impl AivanaApp {
                     ui.label(RichText::new(check.status.label()).color(color));
                 });
                 ui.label(check.detail);
-                if let Some((view, label)) = check.next {
-                    if ui.button(label).clicked() {
-                        self.view = view;
-                    }
+                if let Some((view, label)) = check.next
+                    && ui.button(label).clicked()
+                {
+                    self.view = view;
                 }
             });
             ui.add_space(5.0);
@@ -377,6 +442,22 @@ mod tests {
 
     fn status<'a>(checks: &'a [Item], title: &str) -> &'a Item {
         checks.iter().find(|item| item.title == title).unwrap()
+    }
+
+    fn saved_case(profile: &ConnectionProfile) -> Case {
+        Case::new(
+            Config {
+                mode: Mode::ReadOnly,
+                scenario: None,
+                target: Some(Target::from_profile(profile)),
+                incident: "Saved case failure".into(),
+                service: "RealService".into(),
+                application: "https://app.contoso.com/".into(),
+                dependency: "https://api.contoso.com/health".into(),
+            },
+            Utc::now(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -475,9 +556,11 @@ mod tests {
             status(&checks, "Diagnostic evidence").status,
             Status::Unknown
         );
-        assert!(status(&checks, "Diagnostic evidence")
-            .detail
-            .contains("could not be read"));
+        assert!(
+            status(&checks, "Diagnostic evidence")
+                .detail
+                .contains("could not be read")
+        );
         assert_eq!(
             status(&checks, "Diagnostic mode and saved case").status,
             Status::NeedsInput
@@ -496,7 +579,7 @@ mod tests {
             title: "Application unreachable".into(),
             evidence: vec!["Observed failure".into()],
         };
-        let case = Case::new(
+        let mut case = Case::new(
             Config {
                 mode: Mode::ReadOnly,
                 scenario: None,
@@ -509,6 +592,7 @@ mod tests {
             Utc::now(),
         )
         .unwrap();
+        case.source = Some(source.clone());
         let mut inputs = snapshot();
         inputs.mode = Mode::ReadOnly;
         inputs.source = Some(source);
@@ -544,6 +628,80 @@ mod tests {
         assert_eq!(
             status(&checks, "Diagnostic evidence").status,
             Status::Unknown
+        );
+    }
+
+    #[test]
+    fn selected_saved_case_inputs_override_unrelated_example_draft() {
+        let profile = ConnectionProfile::sample("Lab", "server.contoso.com", "Test", false);
+        let mut inputs = snapshot();
+        inputs.incident = "Unsaved draft failure".into();
+        inputs.service = "ExampleService".into();
+        inputs.application = "https://app.example.invalid/".into();
+        inputs.dependency = "https://dependency.example.invalid/health".into();
+        inputs.selected_case = Some(saved_case(&profile));
+        let active = active_config(&inputs);
+        assert!(active.saved_case);
+        assert_eq!(active.incident, "Saved case failure");
+        let checks = assess(Some(&profile), &inputs, true);
+        for title in [
+            "Application service",
+            "Application URL",
+            "Dependency URL",
+            "Diagnostic mode and saved case",
+        ] {
+            assert_eq!(status(&checks, title).status, Status::Ready, "{title}");
+        }
+    }
+
+    #[test]
+    fn selected_saved_case_example_inputs_override_real_draft_and_block_readiness() {
+        let profile = ConnectionProfile::sample("Lab", "server.contoso.com", "Test", false);
+        let mut inputs = snapshot();
+        let mut case = saved_case(&profile);
+        case.config.service = "ExampleService".into();
+        case.config.application = "https://app.example.invalid/".into();
+        inputs.selected_case = Some(case);
+        let checks = assess(Some(&profile), &inputs, true);
+        for title in [
+            "Application service",
+            "Application URL",
+            "Diagnostic mode and saved case",
+        ] {
+            assert_eq!(status(&checks, title).status, Status::NeedsInput, "{title}");
+        }
+        assert_eq!(status(&checks, "Dependency URL").status, Status::Ready);
+    }
+
+    #[test]
+    fn different_incidents_on_same_profile_cannot_share_handoff_readiness() {
+        let profile = ConnectionProfile::sample("Lab", "server.contoso.com", "Test", false);
+        let target = Target::from_profile(&profile);
+        let source = Source {
+            record_id: "failure-1".into(),
+            profile_id: profile.id,
+            endpoint: crate::incident::endpoint_key(&target),
+            observed_at: Utc::now(),
+            title: "First failure".into(),
+            evidence: vec![],
+        };
+        let mut case = saved_case(&profile);
+        case.source = Some(source.clone());
+        let mut inputs = snapshot();
+        inputs.selected_case = Some(case);
+        inputs.source = Some(Source {
+            record_id: "failure-2".into(),
+            title: "Second failure".into(),
+            ..source
+        });
+        let checks = assess(Some(&profile), &inputs, true);
+        assert_eq!(
+            status(&checks, "Incident handoff").status,
+            Status::NeedsInput
+        );
+        assert_eq!(
+            status(&checks, "Diagnostic mode and saved case").status,
+            Status::NeedsInput
         );
     }
 }
