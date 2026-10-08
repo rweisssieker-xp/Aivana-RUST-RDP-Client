@@ -1,3 +1,4 @@
+pub mod adapters;
 pub mod advisory;
 pub mod capability;
 pub mod catalog;

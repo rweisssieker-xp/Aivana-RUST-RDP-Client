@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum CapabilityId {
     NetworkReachability,
+    NetworkDns,
+    NetworkTls,
     HttpHealth,
     SystemResources,
     ServiceStatus,
@@ -43,13 +45,36 @@ pub enum Prerequisite {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProbeParams {
-    Network { port: u16 },
+    Network {
+        port: u16,
+    },
+    Dns,
+    Tls,
     Http,
+    HttpAssert {
+        expected_status: u16,
+        body_sha256: Option<String>,
+    },
     System,
-    Service { service_digest: String },
-    SqlRead { query_digest: String },
-    SqlPlan { query_digest: String },
-    SqlWorkload { workload_digest: String },
+    SystemSelected {
+        mount: Option<String>,
+        interface: Option<String>,
+    },
+    Service {
+        service_digest: String,
+    },
+    ServiceName {
+        name: String,
+    },
+    SqlRead {
+        query_digest: String,
+    },
+    SqlPlan {
+        query_digest: String,
+    },
+    SqlWorkload {
+        workload_digest: String,
+    },
     Container,
     CloudInstance,
 }
@@ -88,17 +113,11 @@ impl CapabilityManifest {
                 Diagnostic,
                 vec![ReviewedScope, NetworkAccess],
             ),
+            declaration(NetworkDns, Diagnostic, vec![ReviewedScope, NetworkAccess]),
+            declaration(NetworkTls, Diagnostic, vec![ReviewedScope, NetworkAccess]),
             declaration(HttpHealth, Diagnostic, vec![ReviewedScope, NetworkAccess]),
-            declaration(
-                SystemResources,
-                Diagnostic,
-                vec![ReviewedScope, ReadCredential],
-            ),
-            declaration(
-                ServiceStatus,
-                Diagnostic,
-                vec![ReviewedScope, ReadCredential],
-            ),
+            declaration(SystemResources, Diagnostic, vec![ReviewedScope]),
+            declaration(ServiceStatus, Diagnostic, vec![ReviewedScope]),
             declaration(
                 SqlRead,
                 Diagnostic,

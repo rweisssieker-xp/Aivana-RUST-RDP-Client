@@ -11,6 +11,21 @@ const MAX_TOOL_STDOUT: usize = 128 * 1024;
 const MAX_TOOL_STDERR: usize = 4 * 1024;
 
 pub(crate) enum FixedToolOperation {
+    WindowsCollector {
+        host: String,
+        port: u16,
+        service: Option<String>,
+        mount: Option<String>,
+        interface: Option<String>,
+    },
+    LinuxCollector {
+        host: String,
+        user: String,
+        port: u16,
+        service: Option<String>,
+        mount: Option<String>,
+        interface: Option<String>,
+    },
     DockerContainerInspect {
         container_id: String,
     },
@@ -156,8 +171,35 @@ fn trusted_aws_program() -> Result<OsString, ProcessFailure> {
 }
 
 impl FixedToolOperation {
+    fn script_input(&self) -> Result<Option<Vec<u8>>, ProcessFailure> {
+        match self {
+            Self::LinuxCollector {
+                service,
+                mount,
+                interface,
+                ..
+            } => {
+                let service = crate::helper::adapters::safe_service(service.as_deref())?;
+                let mount = crate::helper::adapters::safe_linux_mount(mount.as_deref())?;
+                let interface =
+                    crate::helper::adapters::safe_identifier(interface.as_deref(), false)?;
+                let prelude =
+                    format!("service='{service}'\nmount='{mount}'\ninterface='{interface}'\n");
+                Ok(Some(
+                    [
+                        prelude.as_bytes(),
+                        include_str!("adapters/linux.sh").as_bytes(),
+                    ]
+                    .concat(),
+                ))
+            }
+            _ => Ok(None),
+        }
+    }
     fn argv(self) -> Result<(OsString, Vec<OsString>), ProcessFailure> {
         let program = match &self {
+            Self::WindowsCollector { .. } => "powershell.exe",
+            Self::LinuxCollector { .. } => "ssh.exe",
             Self::DockerContainerInspect { .. } | Self::DockerContainerStats { .. } => "docker.exe",
             Self::KubernetesWorkloadGet { .. } | Self::KubernetesEvents { .. } => "kubectl.exe",
             Self::AzureVmShow { .. } | Self::AzureVmInstanceView { .. } => "az.exe",
@@ -188,6 +230,65 @@ impl FixedToolOperation {
             OsString::from(program)
         };
         let args: Vec<OsString> = match self {
+            Self::WindowsCollector {
+                host,
+                port,
+                service,
+                mount,
+                interface,
+            } => {
+                use base64::Engine as _;
+                let host = crate::helper::adapters::safe_host(&host)?;
+                if !matches!(port, 5985 | 5986) {
+                    return Err(ProcessFailure::InvalidInvocation);
+                }
+                let service = crate::helper::adapters::safe_service(service.as_deref())?;
+                let mount = crate::helper::adapters::safe_windows_mount(mount.as_deref())?;
+                let interface =
+                    crate::helper::adapters::safe_identifier(interface.as_deref(), false)?;
+                let script = include_str!("adapters/windows.ps1")
+                    .replace("__HOST__", &host)
+                    .replace("__PORT__", &port.to_string())
+                    .replace("__SERVICE__", &service)
+                    .replace("__MOUNT__", &mount)
+                    .replace("__INTERFACE__", &interface);
+                let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+                let encoded = base64::engine::general_purpose::STANDARD.encode(utf16);
+                vec![
+                    "-NoLogo".into(),
+                    "-NoProfile".into(),
+                    "-NonInteractive".into(),
+                    "-EncodedCommand".into(),
+                    encoded.into(),
+                ]
+            }
+            Self::LinuxCollector {
+                host, user, port, ..
+            } => {
+                let host = crate::helper::adapters::safe_host(&host)?;
+                let user = crate::helper::adapters::safe_identifier(Some(&user), true)?;
+                if port == 0 {
+                    return Err(ProcessFailure::InvalidInvocation);
+                }
+                vec![
+                    "-F".into(),
+                    "none".into(),
+                    "-o".into(),
+                    "BatchMode=yes".into(),
+                    "-o".into(),
+                    "StrictHostKeyChecking=yes".into(),
+                    "-o".into(),
+                    "ConnectTimeout=10".into(),
+                    "-o".into(),
+                    "ConnectionAttempts=1".into(),
+                    "-p".into(),
+                    port.to_string().into(),
+                    "--".into(),
+                    format!("{user}@{host}").into(),
+                    "sh".into(),
+                    "-s".into(),
+                ]
+            }
             Self::DockerContainerInspect { container_id } => {
                 vec!["container".into(), "inspect".into(), value(&container_id)?]
             }
@@ -477,12 +578,20 @@ async fn run_with_limit(
         FixedToolOperation::TestPipeParent { pid_file } => Some(pid_file.clone()),
         _ => None,
     };
+    let ssh_profile = matches!(&operation, FixedToolOperation::LinuxCollector { .. })
+        .then(|| std::env::var_os("USERPROFILE"))
+        .flatten();
+    let script_input = operation.script_input()?;
     let (program, args) = operation.argv()?;
     let mut command = Command::new(program);
     command
         .args(args)
         .env_clear()
-        .stdin(Stdio::null())
+        .stdin(if script_input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -503,6 +612,9 @@ async fn run_with_limit(
             command.env("AWS_SESSION_TOKEN", session_token);
         }
     }
+    if let Some(profile) = ssh_profile.filter(|p| std::path::Path::new(p).is_absolute()) {
+        command.env("USERPROFILE", profile);
+    }
     #[cfg(test)]
     if let Some(path) = pipe_pid_file {
         command
@@ -519,6 +631,13 @@ async fn run_with_limit(
     }
     let expires_at = tokio::time::Instant::now() + deadline;
     let mut child = command.spawn().map_err(|_| ProcessFailure::Spawn)?;
+    if let Some(input) = script_input {
+        use tokio::io::AsyncWriteExt;
+        let mut stdin = child.stdin.take().ok_or(ProcessFailure::Spawn)?;
+        tokio::spawn(async move {
+            let _ = stdin.write_all(&input).await;
+        });
+    }
     #[cfg(windows)]
     let job = match child
         .id()
@@ -569,6 +688,82 @@ async fn run_with_limit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fixed_system_collectors_bind_endpoint_and_reject_selectors() {
+        let windows = FixedToolOperation::WindowsCollector {
+            host: "host.example".into(),
+            port: 5986,
+            service: Some("Spooler".into()),
+            mount: Some("C:".into()),
+            interface: Some("Ethernet_1".into()),
+        };
+        let (program, args) = windows.argv().unwrap();
+        assert_eq!(program, "powershell.exe");
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(args.last().unwrap().to_str().unwrap())
+            .unwrap();
+        let script = String::from_utf16(
+            &bytes
+                .chunks_exact(2)
+                .map(|p| u16::from_le_bytes([p[0], p[1]]))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert!(script.contains("https://host.example:5986/wsman"));
+        assert!(script.contains("-Authentication Negotiate"));
+        assert!(
+            FixedToolOperation::WindowsCollector {
+                host: "host;id".into(),
+                port: 5985,
+                service: None,
+                mount: None,
+                interface: None
+            }
+            .argv()
+            .is_err()
+        );
+        assert!(
+            FixedToolOperation::WindowsCollector {
+                host: "host".into(),
+                port: 3389,
+                service: None,
+                mount: None,
+                interface: None
+            }
+            .argv()
+            .is_err()
+        );
+
+        let linux = FixedToolOperation::LinuxCollector {
+            host: "linux.example".into(),
+            user: "deploy".into(),
+            port: 2222,
+            service: Some("sshd".into()),
+            mount: Some("/var/lib/data".into()),
+            interface: Some("eth0".into()),
+        };
+        let input = linux.script_input().unwrap().unwrap();
+        let script = std::str::from_utf8(&input).unwrap();
+        assert!(script.starts_with("service='sshd'\nmount='/var/lib/data'\ninterface='eth0'\n"));
+        let (_, args) = linux.argv().unwrap();
+        assert_eq!(&args[..2], &[OsString::from("-F"), OsString::from("none")]);
+        assert!(args.iter().any(|arg| arg == "StrictHostKeyChecking=yes"));
+        assert!(args.iter().any(|arg| arg == "deploy@linux.example"));
+        assert!(
+            FixedToolOperation::LinuxCollector {
+                host: "linux.example".into(),
+                user: "a;id".into(),
+                port: 22,
+                service: None,
+                mount: None,
+                interface: None
+            }
+            .argv()
+            .is_err()
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn aws_program_does_not_follow_mutated_programfiles_environment() {
@@ -779,7 +974,6 @@ mod tests {
                 CancellationToken::new(),
                 Duration::from_secs(5),
                 1,
-                None,
             )
             .await;
             assert!(matches!(result, Err(ProcessFailure::OutputLimit)));

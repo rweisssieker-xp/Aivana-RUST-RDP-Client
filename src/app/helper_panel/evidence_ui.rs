@@ -52,6 +52,21 @@ pub(super) fn show(ui: &mut Ui, case: &HelperCase, store: &HelperStore) {
                     "Metadata retention: {:?}",
                     case.evidence_retention(item.id, now)
                 ));
+                for metric in &item.metrics {
+                    let value = metric
+                        .value
+                        .map(|v| format!("{v:.2} {:?}", metric.unit))
+                        .unwrap_or_else(|| format!("unknown ({:?})", metric.missing_reason));
+                    ui.label(format!(
+                        "{:?}: {value} · sample {} to {}",
+                        metric.kind,
+                        metric.sample_window.started_at.format("%H:%M:%S%.3f"),
+                        metric.sample_window.ended_at.format("%H:%M:%S%.3f")
+                    ));
+                }
+                for record in &item.records {
+                    ui.label(format!("{:?}: {:?}", record.kind, record.observation));
+                }
                 if item.origin != Origin::Live {
                     ui.label("Unverified import/fixture; cannot establish live proof.");
                 }

@@ -521,6 +521,64 @@ fn real_loopback_tcp_and_http_produce_schema_two_evidence() {
 }
 
 #[test]
+fn http_assertion_distinguishes_status_and_body_from_transport() {
+    use sha2::{Digest, Sha256};
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0u8; 1024];
+        let _ = stream.read(&mut request);
+        stream
+            .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 2\r\n\r\nOK")
+            .unwrap();
+    });
+    let (case, scope) = setup(port, true);
+    let mut probe = request(&case, &scope, true);
+    probe.params = ProbeParams::HttpAssert {
+        expected_status: 503,
+        body_sha256: Some(format!("{:x}", Sha256::digest(b"OK"))),
+    };
+    let mut worker = HelperWorker::new(
+        Arc::new(built_in_registry().unwrap()),
+        Arc::new(NoSecrets),
+        authority_for(&case, &scope),
+    )
+    .unwrap();
+    worker.registry().validate_request(&case, &probe).unwrap();
+    worker.submit(probe).unwrap();
+    let event = poll_one(&mut worker);
+    let WorkerOutcome::Complete(envelope) = event.outcome else {
+        panic!("HTTP assertion failed")
+    };
+    assert_eq!(envelope.records[0].observation, Observation::Healthy);
+    server.join().unwrap();
+}
+
+#[test]
+fn dns_check_resolves_only_reviewed_http_host() {
+    let (case, scope) = setup(443, true);
+    let mut probe = request(&case, &scope, true);
+    probe.capability_id = CapabilityId::NetworkDns;
+    probe.params = ProbeParams::Dns;
+    let mut worker = HelperWorker::new(
+        Arc::new(built_in_registry().unwrap()),
+        Arc::new(NoSecrets),
+        authority_for(&case, &scope),
+    )
+    .unwrap();
+    worker.registry().validate_request(&case, &probe).unwrap();
+    worker.submit(probe).unwrap();
+    let event = poll_one(&mut worker);
+    let WorkerOutcome::Complete(envelope) = event.outcome else {
+        panic!("DNS check failed")
+    };
+    assert_eq!(envelope.status, EvidenceStatus::Complete);
+    assert_eq!(envelope.records[0].observation, Observation::Healthy);
+}
+
+#[test]
 fn oversized_output_and_deadline_are_terminal_without_raw_error() {
     let (case, scope) = setup(9999, false);
     let mut registry = CapabilityRegistry::new();

@@ -17,6 +17,15 @@ use eframe::egui;
 use std::sync::Arc;
 use uuid::Uuid;
 
+#[derive(Default)]
+pub(super) struct SystemInputs {
+    mount: String,
+    interface: String,
+    service: String,
+    http_status: String,
+    http_body_sha256: String,
+}
+
 fn current_profile_matches(scope: &BoundScope, profiles: &[ConnectionProfile]) -> bool {
     if matches!(
         scope,
@@ -24,15 +33,27 @@ fn current_profile_matches(scope: &BoundScope, profiles: &[ConnectionProfile]) -
     ) {
         return true;
     }
-    scope
+    let profile_matches = scope
         .target()
-        .is_some_and(|target| profiles.iter().any(|profile| target.matches(profile)))
+        .is_some_and(|target| profiles.iter().any(|profile| target.matches(profile)));
+    profile_matches
+        && match scope {
+            BoundScope::WindowsWinRm { identity, .. } => {
+                crate::helper::scope::current_windows_identity()
+                    .is_ok_and(|current| current == *identity)
+            }
+            _ => true,
+        }
 }
 
 fn supported(scope: &BoundScope) -> Option<(CapabilityId, ProbeParams)> {
     match scope {
         BoundScope::Http { .. } => Some((CapabilityId::HttpHealth, ProbeParams::Http)),
-        BoundScope::Windows { target, .. } | BoundScope::Linux { target, .. } => Some((
+        BoundScope::WindowsWinRm { .. }
+        | BoundScope::Linux {
+            credential: None, ..
+        } => Some((CapabilityId::SystemResources, ProbeParams::System)),
+        BoundScope::Windows { target, .. } => Some((
             CapabilityId::NetworkReachability,
             ProbeParams::Network { port: target.port },
         )),
@@ -138,15 +159,22 @@ pub(super) fn show(
                 engine: crate::helper::scope::DatabaseEngine::SqlServer,
                 ..
             } => "SQL Server read diagnostics",
-            BoundScope::Windows { .. } | BoundScope::Linux { .. } => "Host TCP reachability",
+            BoundScope::Windows { .. } => "Host TCP reachability",
             BoundScope::AzureVm { .. } => "Azure VM resource health (live ARM read)",
             BoundScope::AwsEc2 { .. } => "AWS EC2 status (live scoped read)",
+            BoundScope::WindowsWinRm { .. } => "Windows WinRM resources",
+            BoundScope::Linux {
+                credential: None, ..
+            } => "Linux SSH resources",
+            BoundScope::Linux { .. } => {
+                "Linux SSH requires a current-identity scope without saved credential"
+            }
             _ => "No executable adapter in this wave",
         };
         ui.horizontal(|ui| {
             ui.label(format!("Scope {}: {name}", index + 1));
             if !profile_current {
-                ui.label("Current saved profile endpoint differs or is missing");
+                ui.label("Current profile or reviewed identity differs or is missing");
             }
             if scope.credential().is_some() {
                 ui.label("Credential rechecked at dispatch");
@@ -170,6 +198,126 @@ pub(super) fn show(
                 state.collect(case.id(), index, profiles);
             }
         });
+        if matches!(
+            scope,
+            BoundScope::WindowsWinRm { .. }
+                | BoundScope::Linux {
+                    credential: None,
+                    ..
+                }
+        ) {
+            ui.label("Supported: CPU two samples, memory, selected disk, process count, selected interface RX/TX rates, selected service. Missing counters stay unknown. Remote permission and live coverage are measured only after capture.");
+            ui.label("WinRM uses current Windows identity; Linux uses the current default OpenSSH identity. Saved passwords are not sent.");
+            ui.horizontal(|ui| {
+                ui.label("Mount/volume");
+                ui.text_edit_singleline(&mut state.system_inputs.mount);
+                ui.label("Interface");
+                ui.text_edit_singleline(&mut state.system_inputs.interface);
+            });
+            ui.horizontal(|ui| {
+                ui.label("Service");
+                ui.text_edit_singleline(&mut state.system_inputs.service);
+                if ui
+                    .add_enabled(
+                        profile_current,
+                        egui::Button::new("Collect selected system metrics"),
+                    )
+                    .clicked()
+                {
+                    let mount = (!state.system_inputs.mount.is_empty())
+                        .then(|| state.system_inputs.mount.clone());
+                    let interface = (!state.system_inputs.interface.is_empty())
+                        .then(|| state.system_inputs.interface.clone());
+                    state.collect_with(
+                        case.id(),
+                        index,
+                        profiles,
+                        CapabilityId::SystemResources,
+                        ProbeParams::SystemSelected { mount, interface },
+                    );
+                }
+                if ui
+                    .add_enabled(
+                        profile_current && !state.system_inputs.service.is_empty(),
+                        egui::Button::new("Check service"),
+                    )
+                    .clicked()
+                {
+                    let name = state.system_inputs.service.clone();
+                    state.collect_with(
+                        case.id(),
+                        index,
+                        profiles,
+                        CapabilityId::ServiceStatus,
+                        ProbeParams::ServiceName { name },
+                    );
+                }
+            });
+        }
+        if let BoundScope::Http { tls, .. } = scope {
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        profile_current,
+                        egui::Button::new("Resolve DNS from Relayne"),
+                    )
+                    .clicked()
+                {
+                    state.collect_with(
+                        case.id(),
+                        index,
+                        profiles,
+                        CapabilityId::NetworkDns,
+                        ProbeParams::Dns,
+                    );
+                }
+                if ui
+                    .add_enabled(
+                        profile_current && *tls,
+                        egui::Button::new("Check TLS from Relayne"),
+                    )
+                    .clicked()
+                {
+                    state.collect_with(
+                        case.id(),
+                        index,
+                        profiles,
+                        CapabilityId::NetworkTls,
+                        ProbeParams::Tls,
+                    );
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Expected HTTP status");
+                ui.text_edit_singleline(&mut state.system_inputs.http_status);
+                ui.label("Expected body SHA-256 (optional)");
+                ui.text_edit_singleline(&mut state.system_inputs.http_body_sha256);
+                if ui
+                    .add_enabled(
+                        profile_current && !state.system_inputs.http_status.is_empty(),
+                        egui::Button::new("Check HTTP assertion"),
+                    )
+                    .clicked()
+                {
+                    if let Ok(expected_status) = state.system_inputs.http_status.parse() {
+                        let body_sha256 = (!state.system_inputs.http_body_sha256.is_empty())
+                            .then(|| state.system_inputs.http_body_sha256.clone());
+                        state.collect_with(
+                            case.id(),
+                            index,
+                            profiles,
+                            CapabilityId::HttpHealth,
+                            ProbeParams::HttpAssert {
+                                expected_status,
+                                body_sha256,
+                            },
+                        );
+                    } else {
+                        state.notice = "HTTP status must be 100..599".into();
+                    }
+                }
+            });
+        }
     }
     let jobs: Vec<_> = state
         .collect_jobs
@@ -190,6 +338,21 @@ pub(super) fn show(
 }
 
 impl HelperState {
+    fn collect_with(
+        &mut self,
+        case_id: Uuid,
+        index: usize,
+        profiles: &[ConnectionProfile],
+        capability_id: CapabilityId,
+        params: ProbeParams,
+    ) {
+        self.notice = match self.try_collect_with(case_id, index, profiles, capability_id, params) {
+            Ok(id) => format!("Capture {id} accepted"),
+            Err(_) => {
+                "Capture unavailable: review exact scope, selectors, permissions and storage".into()
+            }
+        };
+    }
     fn collect(&mut self, case_id: Uuid, index: usize, profiles: &[ConnectionProfile]) {
         self.notice = match self.try_collect(case_id, index, profiles) {
             Ok(id) => format!("Capture {id} accepted"),
@@ -205,6 +368,25 @@ impl HelperState {
         case_id: Uuid,
         index: usize,
         profiles: &[ConnectionProfile],
+    ) -> Result<Uuid> {
+        let scope = self
+            .store
+            .as_ref()
+            .and_then(|store| store.case(case_id))
+            .and_then(|case| case.scopes().get(index))
+            .ok_or_else(|| anyhow::anyhow!("Scope missing"))?;
+        let (capability_id, params) =
+            supported(scope).ok_or_else(|| anyhow::anyhow!("No executable adapter"))?;
+        self.try_collect_with(case_id, index, profiles, capability_id, params)
+    }
+
+    fn try_collect_with(
+        &mut self,
+        case_id: Uuid,
+        index: usize,
+        profiles: &[ConnectionProfile],
+        capability_id: CapabilityId,
+        params: ProbeParams,
     ) -> Result<Uuid> {
         let case = self
             .store
@@ -230,8 +412,6 @@ impl HelperState {
             current_profile_matches(&scope, profiles),
             "Saved endpoint changed"
         );
-        let (capability_id, params) =
-            supported(&scope).ok_or_else(|| anyhow::anyhow!("No executable adapter"))?;
         self.authority.publish(
             self.store
                 .as_ref()

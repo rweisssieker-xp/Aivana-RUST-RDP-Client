@@ -92,6 +92,12 @@ impl SnapshotProbeAuthority {
 
 impl CurrentProbeAuthority for SnapshotProbeAuthority {
     fn validate_current(&self, request: &ProbeRequest) -> Result<()> {
+        if let BoundScope::WindowsWinRm { identity, .. } = &request.scope {
+            ensure!(
+                super::scope::current_windows_identity()? == *identity,
+                "Windows identity changed since review"
+            );
+        }
         let current = self
             .current
             .read()
@@ -414,6 +420,12 @@ pub fn built_in_registry() -> Result<CapabilityRegistry> {
             CapabilityId::AwsEc2Inventory | CapabilityId::AwsEc2Status => {
                 registry.register(descriptor, Arc::new(super::cloud::AwsEc2Adapter))?
             }
+            CapabilityId::NetworkDns | CapabilityId::NetworkTls => {
+                registry.register(descriptor, Arc::new(super::adapters::NetworkAdapter))?
+            }
+            CapabilityId::SystemResources | CapabilityId::ServiceStatus => {
+                registry.register(descriptor, Arc::new(super::adapters::SystemAdapter))?
+            }
             _ => {}
         }
     }
@@ -496,6 +508,14 @@ impl ProbeAdapter for HttpProbe {
         cancel: CancellationToken,
     ) -> super::capability::ProbeFuture<'a> {
         Box::pin(async move {
+            let (expected_status, body_sha256) = match &request.params {
+                ProbeParams::Http => (None, None),
+                ProbeParams::HttpAssert {
+                    expected_status,
+                    body_sha256,
+                } => (Some(*expected_status), body_sha256.as_deref()),
+                _ => anyhow::bail!("Invalid HTTP parameters"),
+            };
             let BoundScope::Http {
                 target,
                 port,
@@ -526,9 +546,10 @@ impl ProbeAdapter for HttpProbe {
                 _ = cancel.cancelled() => anyhow::bail!("Canceled"),
                 response = client.get(&url).send() => response?,
             };
-            let healthy = response.status().is_success();
+            let actual_status = response.status();
             let mut response = response;
             let mut consumed = 0usize;
+            let mut body_hash = Sha256::new();
             loop {
                 let chunk = tokio::select! {
                     _ = cancel.cancelled() => anyhow::bail!("Canceled"),
@@ -539,7 +560,13 @@ impl ProbeAdapter for HttpProbe {
                     .checked_add(chunk.len())
                     .ok_or_else(|| anyhow::anyhow!("Body limit"))?;
                 ensure!(consumed <= 64 * 1024, "HTTP response exceeds limit");
+                body_hash.update(&chunk);
             }
+            let healthy = expected_status.map_or(actual_status.is_success(), |code| {
+                actual_status.as_u16() == code
+            }) && body_sha256.is_none_or(|hash| {
+                format!("{:x}", body_hash.finalize()).eq_ignore_ascii_case(hash)
+            });
             let end = Utc::now();
             Ok(ProbeOutput {
                 status: EvidenceStatus::Complete,

@@ -98,6 +98,27 @@ impl CapabilityRegistry {
             "Invalid request ID"
         );
         request.scope.validate()?;
+        if let BoundScope::WindowsWinRm { identity, .. } = &request.scope {
+            ensure!(
+                super::scope::current_windows_identity()? == *identity,
+                "Windows identity changed since review"
+            );
+        }
+        if matches!(
+            request.capability_id,
+            CapabilityId::SystemResources | CapabilityId::ServiceStatus
+        ) && let BoundScope::Linux { target, .. } = &request.scope
+        {
+            ensure!(
+                target.route.is_empty(),
+                "SSH collector requires direct reviewed endpoint"
+            );
+            ensure!(
+                super::adapters::safe_host(&target.host).is_ok()
+                    && super::adapters::safe_identifier(Some(&target.username), true).is_ok(),
+                "Unsupported SSH endpoint/principal"
+            );
+        }
         ensure!(
             request.binding.scope_sha256 == request.scope.digest()?
                 && request.binding.credential_scope_sha256
@@ -142,10 +163,48 @@ impl CapabilityRegistry {
             }
             (CapabilityId::HttpHealth, ProbeParams::Http, BoundScope::Http { .. }) => {}
             (
+                CapabilityId::HttpHealth,
+                ProbeParams::HttpAssert {
+                    expected_status,
+                    body_sha256,
+                },
+                BoundScope::Http { .. },
+            ) if (100..=599).contains(expected_status)
+                && body_sha256
+                    .as_ref()
+                    .is_none_or(|hash| super::evidence::is_digest(hash)) => {}
+            (CapabilityId::NetworkDns, ProbeParams::Dns, BoundScope::Http { .. }) => {}
+            (CapabilityId::NetworkTls, ProbeParams::Tls, BoundScope::Http { tls: true, .. }) => {}
+            (
                 CapabilityId::SystemResources,
                 ProbeParams::System,
-                BoundScope::Windows { .. } | BoundScope::Linux { .. },
+                BoundScope::WindowsWinRm { .. }
+                | BoundScope::Linux {
+                    credential: None, ..
+                },
             ) => {}
+            (
+                CapabilityId::SystemResources,
+                ProbeParams::SystemSelected { mount, interface },
+                BoundScope::WindowsWinRm { .. },
+            ) if super::adapters::safe_windows_mount(mount.as_deref()).is_ok()
+                && super::adapters::safe_identifier(interface.as_deref(), false).is_ok() => {}
+            (
+                CapabilityId::SystemResources,
+                ProbeParams::SystemSelected { mount, interface },
+                BoundScope::Linux {
+                    credential: None, ..
+                },
+            ) if super::adapters::safe_linux_mount(mount.as_deref()).is_ok()
+                && super::adapters::safe_identifier(interface.as_deref(), false).is_ok() => {}
+            (
+                CapabilityId::ServiceStatus,
+                ProbeParams::ServiceName { name },
+                BoundScope::WindowsWinRm { .. }
+                | BoundScope::Linux {
+                    credential: None, ..
+                },
+            ) if !name.is_empty() && super::adapters::safe_service(Some(name)).is_ok() => {}
             (
                 CapabilityId::ServiceStatus,
                 ProbeParams::Service { service_digest },

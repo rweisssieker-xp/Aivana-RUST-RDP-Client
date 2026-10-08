@@ -44,6 +44,13 @@ pub enum BoundScope {
         target: Target,
         credential: Option<CredentialScope>,
     },
+    /// WSMan endpoint reviewed separately from the saved RDP profile port.
+    WindowsWinRm {
+        target: Target,
+        winrm_port: u16,
+        identity: String,
+        credential: Option<CredentialScope>,
+    },
     Linux {
         target: Target,
         credential: Option<CredentialScope>,
@@ -178,6 +185,27 @@ impl BoundScope {
             } => {
                 target(t, Some("RDP"))?;
                 credential(c)?;
+            }
+            Self::WindowsWinRm {
+                target: t,
+                winrm_port,
+                identity,
+                credential: c,
+            } => {
+                target(t, Some("RDP"))?;
+                ensure!(matches!(winrm_port, 5985 | 5986), "Unsupported WSMan port");
+                ensure!(c.is_none(), "WinRM uses current Windows identity");
+                field(identity)?;
+                ensure!(
+                    t.route.is_empty(),
+                    "WinRM collector requires a direct reviewed endpoint"
+                );
+                ensure!(
+                    t.host
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-')),
+                    "Invalid WinRM host"
+                );
             }
             Self::Linux {
                 target: t,
@@ -324,6 +352,7 @@ impl BoundScope {
     pub fn credential(&self) -> Option<&CredentialScope> {
         match self {
             Self::Windows { credential, .. }
+            | Self::WindowsWinRm { credential, .. }
             | Self::Linux { credential, .. }
             | Self::Database { credential, .. }
             | Self::Docker { credential, .. }
@@ -340,6 +369,7 @@ impl BoundScope {
         let digest = self.unchecked_resource_digest()?;
         match &mut self {
             Self::Windows { credential, .. }
+            | Self::WindowsWinRm { credential, .. }
             | Self::Linux { credential, .. }
             | Self::Database { credential, .. }
             | Self::Docker { credential, .. }
@@ -359,6 +389,7 @@ impl BoundScope {
     pub fn target(&self) -> Option<&Target> {
         match self {
             Self::Windows { target, .. }
+            | Self::WindowsWinRm { target, .. }
             | Self::Linux { target, .. }
             | Self::Database { target, .. }
             | Self::Http { target, .. } => Some(target),
@@ -412,6 +443,30 @@ impl BoundScope {
             b"relayne-helper-credential-scope-v1\0",
             &serde_json::to_value(self.credential())?,
         )
+    }
+}
+
+/// The OS process token, never a saved RDP username or environment variable.
+pub fn current_windows_identity() -> Result<String> {
+    #[cfg(windows)]
+    {
+        #[link(name = "secur32")]
+        unsafe extern "system" {
+            fn GetUserNameExW(format: u32, buffer: *mut u16, size: *mut u32) -> u8;
+        }
+        let mut buffer = [0u16; 1024];
+        let mut size = buffer.len() as u32;
+        ensure!(
+            unsafe { GetUserNameExW(2, buffer.as_mut_ptr(), &mut size) } != 0
+                && size > 0
+                && (size as usize) < buffer.len(),
+            "Windows identity unavailable"
+        );
+        Ok(String::from_utf16(&buffer[..size as usize])?)
+    }
+    #[cfg(not(windows))]
+    {
+        anyhow::bail!("WinRM requires Windows")
     }
 }
 

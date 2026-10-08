@@ -12,7 +12,7 @@ use crate::{
     telemetry,
 };
 
-const KINDS: [&str; 8] = [
+const KINDS: [&str; 9] = [
     "Windows",
     "Linux",
     "Database",
@@ -21,6 +21,7 @@ const KINDS: [&str; 8] = [
     "Kubernetes",
     "Azure VM",
     "AWS EC2",
+    "Windows WinRM",
 ];
 
 #[derive(Default)]
@@ -202,7 +203,11 @@ impl Editor {
         }))
     }
     fn build(&self, profiles: &[ConnectionProfile]) -> anyhow::Result<BoundScope> {
-        let credential = self.credential()?;
+        let credential = if self.kind == 8 {
+            None
+        } else {
+            self.credential()?
+        };
         let target = || -> anyhow::Result<Target> {
             let id = self
                 .profile
@@ -260,10 +265,16 @@ impl Editor {
                 resource_id: self.resource_id.clone(),
                 credential,
             },
-            _ => BoundScope::AwsEc2 {
+            7 => BoundScope::AwsEc2 {
                 account: self.account.clone(),
                 region: self.region.clone(),
                 instance_id: self.instance_id.clone(),
+                credential,
+            },
+            _ => BoundScope::WindowsWinRm {
+                target: target()?,
+                winrm_port: self.port.parse()?,
+                identity: crate::helper::scope::current_windows_identity()?,
                 credential,
             },
         };
@@ -398,7 +409,7 @@ pub(super) fn show(
                 ui.selectable_value(&mut editor.kind, i, *kind);
             }
         });
-    if editor.kind <= 3 {
+    if editor.kind <= 3 || editor.kind == 8 {
         let label = editor
             .profile
             .and_then(|id| profiles.iter().find(|p| p.id == id))
@@ -484,9 +495,15 @@ pub(super) fn show(
             field(ui, "Region", &mut editor.region);
             field(ui, "Instance ID", &mut editor.instance_id);
         }
+        8 => {
+            ui.label(
+                "WinRM uses current Windows identity. Review the WSMan port separately from RDP.",
+            );
+            field(ui, "WSMan port (5985 or 5986)", &mut editor.port);
+        }
         _ => {}
     }
-    if editor.kind != 3 {
+    if editor.kind != 3 && editor.kind != 8 {
         ui.collapsing("Credential reference (metadata only)", |ui| {
             field(ui, "Reference UUID (optional)", &mut editor.credential_ref);
             if !editor.credential_ref.is_empty() {
@@ -580,6 +597,7 @@ fn field(ui: &mut Ui, label: &str, value: &mut String) {
 fn scope_kind(scope: &BoundScope) -> &'static str {
     match scope {
         BoundScope::Windows { .. } => "Windows",
+        BoundScope::WindowsWinRm { .. } => "Windows WinRM",
         BoundScope::Linux { .. } => "Linux",
         BoundScope::Database { .. } => "Database",
         BoundScope::Http { .. } => "HTTP",
@@ -674,6 +692,13 @@ fn review_details(scope: &BoundScope) -> Vec<String> {
             format!("Region: {region}"),
             format!("Instance ID: {instance_id}"),
         ]),
+        BoundScope::WindowsWinRm {
+            winrm_port,
+            identity,
+            ..
+        } => details.push(format!(
+            "WSMan port: {winrm_port}; Windows identity: {identity}"
+        )),
         BoundScope::Windows { .. } | BoundScope::Linux { .. } => {}
     }
     if let Some(credential) = scope.credential() {

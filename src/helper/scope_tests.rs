@@ -25,6 +25,55 @@ fn cred() -> CredentialScope {
 }
 
 #[test]
+#[cfg(windows)]
+fn winrm_review_binds_separate_wsman_port_and_current_identity() {
+    let mut direct = target("RDP");
+    direct.route.clear();
+    let scope = BoundScope::WindowsWinRm {
+        target: direct,
+        winrm_port: 5985,
+        identity: current_windows_identity().unwrap(),
+        credential: None,
+    };
+    scope.validate().unwrap();
+    let digest = scope.digest().unwrap();
+    let other = BoundScope::WindowsWinRm {
+        target: scope.target().unwrap().clone(),
+        winrm_port: 5986,
+        identity: current_windows_identity().unwrap(),
+        credential: None,
+    };
+    assert_ne!(digest, other.digest().unwrap());
+    let changed_identity = BoundScope::WindowsWinRm {
+        target: scope.target().unwrap().clone(),
+        winrm_port: 5985,
+        identity: "OTHER\\operator".into(),
+        credential: None,
+    };
+    assert_ne!(digest, changed_identity.digest().unwrap());
+    assert!(
+        BoundScope::WindowsWinRm {
+            target: scope.target().unwrap().clone(),
+            winrm_port: 3389,
+            identity: current_windows_identity().unwrap(),
+            credential: None
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        BoundScope::WindowsWinRm {
+            target: scope.target().unwrap().clone(),
+            winrm_port: 5985,
+            identity: current_windows_identity().unwrap(),
+            credential: Some(cred())
+        }
+        .bind_credential_context()
+        .is_err()
+    );
+}
+
+#[test]
 fn digest_binds_exact_identity_and_credential_metadata() {
     let scope = BoundScope::Database {
         target: target("RDP"),
