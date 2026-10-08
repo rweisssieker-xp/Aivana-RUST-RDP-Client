@@ -27,9 +27,9 @@ An initial evidence worker reported unavailable filesystem tools without inspect
 
 The prior disposable PostgreSQL sandbox has actual raw measurements in C:\tmp\Aivana-RUST-RDP-Client\promo-video\sql-sandbox. Customer lookup: 42.049 ms before, 0.238 ms after the index. Sort: 196.981 ms before, 140.094 ms after session work_mem; observed disk spill versus RAM. Separate selectivity: 1,292 estimated versus 40,600 actual before ANALYZE, 40,607 estimated afterward. Actual blocking and lock timeout were observed, followed by zero blocked sessions. These were externally executed PostgreSQL tests, not Relayne feature acceptance, repeated benchmarks or proof of production performance.
 
-## Proposed architecture
+## Accepted architecture and implementation plan
 
-See ../specs/2026-10-08-generic-helper-design.md. It covers the ten requested capability areas in six waves and preserves existing journals, production/rehearsal separation, current approval semantics and restoration paths. Status is proposed for user review. Product implementation has not begun.
+The architecture in ../specs/2026-10-08-generic-helper-design.md was accepted by the user's request to continue and include the missing waves. The detailed plan in ../plans/2026-10-08-generic-helper.md covers 18 independently reviewable waves. It preserves existing journals, production/rehearsal separation, approval semantics and restoration paths. Product implementation has not begun; written-plan review is the remaining workflow gate.
 
 ## Review and validation status
 
@@ -39,4 +39,10 @@ Independent architectural/security review initially requested six corrections: e
 
 Independent coverage review requested concrete intake/diagnosis scenarios, operation/prerequisite scopes, adapter/UI acceptance, retention and backward-compatibility gates. These were added. Focused re-review found all material gaps addressed and no new material contradiction. Its original malformed Wave 3 Markdown row finding was explicitly withdrawn after raw-source verification; it was transformed tool output, not a source defect. All six wave rows have three columns.
 
-The specification and German review summary are complete for user review. Implementation planning and code execution remain pending the written-spec approval required by the selected architectural workflow. The user has already selected waves with subagents; do not ask them to choose the execution method again.
+The architecture is accepted. The detailed 18-wave implementation plan and German overview are complete. Implementation remains pending the user's review of the written plan. The user already selected waves with subagents; do not ask them to choose the execution method again.
+
+## Detailed implementation-plan review
+
+Self-review verified 18 sequential task/wave headings, dependency ordering and the ownership-marker amendment. Independent Sol security/interface review: PASS for v2 authority, final dispatch coordination, actual isolated SQL rehearsal, protected production receipt, index restoration ownership and separate fixture roots/databases/ports. These are document reviews, not product build or live acceptance results.
+
+Independent Luna coverage review confirmed the sequential 18 tasks and complete dependency table. Its material finding about phase/wave naming was corrected: the spec now names six architectural phases, and the plan maps each phase gate to its constituent implementation waves (1–5, 6–8, 9–11, 12–15, 16–17, 18). Final raw-source checks verified task numbering and Markdown table column counts.

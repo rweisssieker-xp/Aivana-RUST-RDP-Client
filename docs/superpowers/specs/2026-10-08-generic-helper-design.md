@@ -2,7 +2,7 @@
 
 Date: 2026-10-08
 
-Status: proposed architecture for user review; no implementation authorized by this document alone.
+Status: architecture accepted by the user's “go on da fehlen noch Waves”; detailed implementation plan pending review. No implementation started for this expansion.
 
 Base: `671080c`, following the completed six product improvements. Working branch: `codex/relayne-generic-helper` in the existing attached isolated worktree. Previous branch and original checkout remain intact.
 
@@ -127,6 +127,8 @@ Initially executable repair kinds are the existing single-service start/stop/res
 
 The initial SQL action grammar is exactly: PostgreSQL nonunique B-tree `CREATE INDEX` on one verified base table with one to four verified plain columns and typed ASC/DESC directions; PostgreSQL `ANALYZE` of that one table; SQL Server nonunique nonclustered rowstore `CREATE INDEX` on one verified base table with one to four verified plain columns and typed ASC/DESC directions; SQL Server `UPDATE STATISTICS` of that one table using engine defaults. Reject expressions, predicates/partial indexes, INCLUDE/options/storage clauses, concurrent/online creation, unique constraints, arbitrary hints, cross-database names, DML, query text, custom statistics arguments and other grammar. More forms require a future registered action version.
 
+CreateIndex includes a fixed, approval-bound run-ownership metadata marker on that just-created index in the same transaction (PostgreSQL comment or SQL Server index extended property). Its scheme/nonce/run/scope/action identity is part of the reviewed binding; marker privilege is a declared prerequisite. This private substep cannot write arbitrary comments/properties. It is required because SQL Server can reuse an index_id after replacement; name, definition and index_id alone do not prove that the helper still owns the created index. Failed/missing marker verification blocks creation or restoration rather than weakening ownership checks.
+
 Resolve each schema/table/column/index identifier against same-database metadata and object identity; recheck type, definition, existing index names and privileges before dispatch. Apply engine-correct identifier escaping (PostgreSQL double-quote escaping, SQL Server bracket escaping), engine identifier length limits and control-character rejection. Identifiers are never appended from model/free text without this resolution. Bind all supported data values; identifiers are handled only through the verified quoting builder. SQL reads and changes use separate credential capability scopes. PostgreSQL ownership/schema privileges and SQL Server table ALTER privileges must be checked, not silently granted. Set a 30-second action statement deadline and a five-second lock deadline where the engine supports it; apply client cancellation and reconciliation if timeout/connection loss leaves outcome uncertain. PostgreSQL index creation uses an explicit transaction with postcondition verification before commit. SQL Server uses an explicit transaction where supported. Statistics maintenance remains explicitly non-restorable to the original statistics. No retries after an ambiguous commit; re-observe exact object/action state first. Test identifier injection/length, same-database identity, rejected grammar/options, privilege denial, blocked DDL, deadline, commit ambiguity and exact-index rollback ownership.
 
 Generic action authority must carry a versioned digest of case/revision/run, exact target and scope, connector/action ID/version, normalized parameters, credential scope, before/precondition evidence, plan, functional/performance checks, rehearsal proof, restoration recipe, and restoration limits. The team server understands supported action schemas, validates them, retains requester/approver separation, and atomically consumes an exact one-use binding. Backward-compatible service v1 requests cannot authorize generic actions. Unknown versions fail closed.
@@ -161,9 +163,11 @@ Display metrics with units, sample windows and provenance; separate observed/inf
 
 Use existing asynchronous pollers and protected persistence. App frame rendering contains no blocking remote/database work. Target changes clear transient handoff and pending approvals while retaining post-launch restoration reconciliation. Exports are redacted bounded JSON/Markdown, include schema/revision/time/bindings/coverage and do not contain credentials, private keys, raw unrestricted provider output or query literals. Cap serialized export at 5 MiB and indicate truncation.
 
-## 8. Six implementation waves
+## 8. Six architectural phases and eighteen implementation waves
 
-| Wave | Deliverable | Exit gate |
+The six rows below group the architecture. The user's request for missing waves is addressed by eighteen separately testable implementation waves in `../plans/2026-10-08-generic-helper.md`: intake; scope/inventory; evidence/retention/export; hypothesis/LLM planning; connector/credential runtime; PostgreSQL; SQL Server; plan analysis/workloads; OS/network; containers; cloud; catalog; generic authority; actual SQL execution/isolated rehearsal; production promotion/restoration; functional/performance verification; knowledge/reports; unified desktop/live acceptance. This decomposition does not reduce any approved capability or gate.
+
+| Architectural phase | Deliverable | Exit gate |
 |---|---|---|
 | 1 — Common helper foundation | Intake/clarification, shared case/scope/provenance, derived inventory and capability registry | Persistence, exact binding, stale/unknown semantics, no side effects, independent interface review |
 | 2 — SQL diagnosis | Executable PostgreSQL/SQL Server read adapters, metadata/waits/statistics, bounded plan parser and evidence-based suggestions | Real PostgreSQL sandbox collection from Relayne; SQL Server fixture/loopback path and clearly reported live coverage |
@@ -174,7 +178,7 @@ Use existing asynchronous pollers and protected persistence. App frame rendering
 
 Audit parallelism already used twelve workers. During implementation, maximize independent design/test/doc work up to twelve children, but sequence shared-core and integration edits. After interfaces are frozen, disjoint adapter work may be parallelized only with explicit file ownership and an integration gate; otherwise fresh implementer plus independent reviewer runs sequentially. Use Luna low/medium for mechanical/docs/fixtures and Sol medium/high for integration, database, concurrency and authorization. Astra requires a demonstrated unresolved Sol-level problem; none is currently established.
 
-Vertical-slice rule: every wave includes the minimum usable shared desktop path for its own delivered capabilities. Wave 1 provides intake/scope/registry; Wave 2 adds real SQL collection and plan inspection; Wave 3 exposes each system/container/cloud adapter with its exact capabilities and readiness/error states; Wave 4 adds generic action review/approval/results; Wave 5 adds verification/lessons. Wave 6 completes the coherent guided flow, native dynamic-state acceptance, documentation and whole-branch review. Adapter implementation cannot be declared complete before its real dispatch/parser, shared UI entry and family-specific acceptance gate are integrated.
+Vertical-slice rule: every implementation wave includes the minimum usable shared desktop path for its own delivered capabilities. Phase 1 provides intake/scope/registry; Phase 2 adds real SQL collection and plan inspection; Phase 3 exposes each system/container/cloud adapter with its exact capabilities and readiness/error states; Phase 4 adds generic action review/approval/results; Phase 5 adds verification/lessons. Phase 6 completes the coherent guided flow, native dynamic-state acceptance, documentation and whole-branch review. Adapter implementation cannot be declared complete before its real dispatch/parser, shared UI entry and family-specific acceptance gate are integrated.
 
 ## 9. Acceptance and truthful completion
 
@@ -196,7 +200,7 @@ Named desktop/SQL acceptance scenarios:
 6. Change a target/criterion before dispatch and show approval invalidation; change diagnostic UI context after launch and show reconciliation/restoration remains available. Service-v1 recorded fixtures still load; unknown generic-action versions and mismatched catalog versions fail closed.
 7. Save a reviewed lesson from actual verified run evidence, reproduce a context drift or later failed verification, and observe blocked/stale reuse across restart. Export redacted JSON/Markdown showing source times, coverage and exact references without credentials or query literals.
 
-Native screenshots show these dynamic helper/approval/verification states where available, not only isolated empty panels. These named scenarios define the Wave 6 user-outcome gate. Wave 1 must pass scenarios 1 and the pure intake/diagnosis/registry/retention negatives; Wave 3 must pass every listed adapter dispatch/parser negative and shared-UI coverage; Wave 4 must pass schema migration/version/catalog and dispatch/restoration gates before later scenarios depend on it.
+Native screenshots show these dynamic helper/approval/verification states where available, not only isolated empty panels. These named scenarios define the Phase 6 user-outcome gate. Phase 1 must pass scenarios 1 and the pure intake/diagnosis/registry/retention negatives; Phase 3 must pass every listed adapter dispatch/parser negative and shared-UI coverage; Phase 4 must pass schema migration/version/catalog and dispatch/restoration gates before later scenarios depend on it.
 
 The branch is kept reviewable and isolated. No merge, push, publication, deployment, unsolicited notification or customer connection is part of this implementation request. Existing promotional files in the original checkout and previous committed review evidence remain intact.
 
@@ -204,4 +208,4 @@ The branch is kept reviewable and isolated. No merge, push, publication, deploym
 
 The recommended approach is the shared typed helper workflow extending existing journals and gates. Alternatives are (a) a proposal-only assistant, which does not satisfy complete executable helper delivery, or (b) unrestricted agent shell/SQL control, which loses reviewable target/action/proof binding and is rejected.
 
-Confirm this concrete specification before the detailed implementation plan. The user has selected wave-based subagent execution; the implementation plan must preserve that selection, enumerate file ownership/dependencies/tests, and receive its own review before code dispatch.
+This concrete specification has been accepted. The user has selected wave-based subagent execution; the detailed eighteen-wave plan preserves that selection and enumerates file ownership/dependencies/tests. Its written-plan review remains required before code dispatch; do not ask again for the execution method.
