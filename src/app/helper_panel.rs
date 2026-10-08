@@ -4,8 +4,10 @@ use crate::helper::{
     case::{Answer, CaseEdit, HelperCase, ProblemIntake},
     store::HelperStore,
 };
+use std::collections::HashMap;
 use std::path::PathBuf;
 
+mod connectors_ui;
 mod evidence_ui;
 mod intake_ui;
 mod planning_ui;
@@ -15,6 +17,8 @@ pub(super) struct HelperState {
     store: Option<HelperStore>,
     path: Option<PathBuf>,
     selected: Option<Uuid>,
+    worker: Option<crate::helper::worker::HelperWorker>,
+    collect_jobs: HashMap<Uuid, Uuid>,
     editor: intake_ui::Editor,
     scope_editor: scope_ui::Editor,
     advisory_rx: Option<
@@ -36,6 +40,8 @@ impl HelperState {
                 store: None,
                 path: None,
                 selected: None,
+                worker: None,
+                collect_jobs: HashMap::new(),
                 editor: Default::default(),
                 scope_editor: Default::default(),
                 advisory_rx: None,
@@ -50,24 +56,38 @@ impl HelperState {
     }
     fn at_path(path: PathBuf) -> Self {
         match HelperStore::load(&path) {
-            Ok(store) => Self {
-                store: Some(store),
-                path: Some(path),
-                selected: None,
-                editor: Default::default(),
-                scope_editor: Default::default(),
-                advisory_rx: None,
-                advisory_cancel: None,
-                advisory_candidate: None,
-                confirmation_actor: String::new(),
-                confirmation_rationale: String::new(),
-                confirmation_kind: None,
-                notice: "Case workspace loaded".into(),
-            },
+            Ok(mut store) => {
+                if store.cancel_abandoned_pending_captures() {
+                    if let Err(error) = store.save(&path) {
+                        return Self::unavailable(
+                            path,
+                            format!("Pending capture recovery failed: {error}"),
+                        );
+                    }
+                }
+                Self {
+                    store: Some(store),
+                    path: Some(path),
+                    selected: None,
+                    worker: None,
+                    collect_jobs: HashMap::new(),
+                    editor: Default::default(),
+                    scope_editor: Default::default(),
+                    advisory_rx: None,
+                    advisory_cancel: None,
+                    advisory_candidate: None,
+                    confirmation_actor: String::new(),
+                    confirmation_rationale: String::new(),
+                    confirmation_kind: None,
+                    notice: "Case workspace loaded".into(),
+                }
+            }
             Err(e) => Self {
                 store: None,
                 path: Some(path),
                 selected: None,
+                worker: None,
+                collect_jobs: HashMap::new(),
                 editor: Default::default(),
                 scope_editor: Default::default(),
                 advisory_rx: None,
@@ -139,6 +159,10 @@ impl HelperState {
         };
     }
     fn reload(&mut self) {
+        if !self.collect_jobs.is_empty() {
+            self.notice = "Wait for or cancel captures before reloading cases".into();
+            return;
+        }
         if let Some(cancel) = self.advisory_cancel.take() {
             cancel.cancel();
         }
@@ -148,6 +172,24 @@ impl HelperState {
                 replacement.select(id);
             }
             *self = replacement;
+        }
+    }
+    fn unavailable(path: PathBuf, notice: String) -> Self {
+        Self {
+            store: None,
+            path: Some(path),
+            selected: None,
+            worker: None,
+            collect_jobs: HashMap::new(),
+            editor: Default::default(),
+            scope_editor: Default::default(),
+            advisory_rx: None,
+            advisory_cancel: None,
+            advisory_candidate: None,
+            confirmation_actor: String::new(),
+            confirmation_rationale: String::new(),
+            confirmation_kind: None,
+            notice,
         }
     }
     pub(super) fn adopt_incident(&mut self, source: crate::incident::Source) {
@@ -187,6 +229,7 @@ impl HelperState {
 impl AivanaApp {
     pub(super) fn poll_helper(&mut self) {
         self.helper.poll_advisory();
+        self.helper.poll_collect(&self.profiles);
     }
     pub(super) fn helper_view(&mut self, ui: &mut Ui) {
         ui.heading("IT Helper · Describe");
@@ -253,6 +296,7 @@ impl AivanaApp {
                 &self.profiles,
                 &self.insights.store,
             );
+            connectors_ui::show(&mut self.helper, ui, &case, &self.profiles);
             if let Some(store) = self.helper.store.as_ref() {
                 evidence_ui::show(ui, &case, store);
             }

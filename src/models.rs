@@ -160,11 +160,37 @@ pub struct CredentialRef {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct SecretCredential {
     pub username: String,
     pub password: String,
     pub domain: String,
+}
+
+impl std::fmt::Debug for SecretCredential {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SecretCredential")
+            .field("username", &"[REDACTED]")
+            .field("password", &"[REDACTED]")
+            .field("domain", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Metadata for a purpose- and resource-bound helper secret. The secret is stored separately.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ScopedCredentialRef {
+    pub id: Uuid,
+    pub scope_digest: String,
+    pub purpose: crate::helper::scope::CredentialPurpose,
+    pub generation: u64,
+    pub principal: String,
+    pub context: String,
+    pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub revoked: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]

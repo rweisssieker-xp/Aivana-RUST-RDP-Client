@@ -30,7 +30,7 @@ cpal = "0.16"
 cap-std = "4"
 
 ironrdp-mstsgu = { version = "0.0.1", features = ["native-tls"] }
-tokio = { version = "1", features = ["rt-multi-thread", "io-util", "time", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "io-util", "time", "net", "process"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 csv = "1.4"
 base64 = "0.22"

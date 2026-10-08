@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum CapabilityId {
     NetworkReachability,
+    HttpHealth,
     SystemResources,
     ServiceStatus,
     SqlRead,
@@ -39,6 +40,7 @@ pub enum Prerequisite {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProbeParams {
     Network { port: u16 },
+    Http,
     System,
     Service { service_digest: String },
     SqlRead { query_digest: String },
@@ -82,6 +84,7 @@ impl CapabilityManifest {
                 Diagnostic,
                 vec![ReviewedScope, NetworkAccess],
             ),
+            declaration(HttpHealth, Diagnostic, vec![ReviewedScope, NetworkAccess]),
             declaration(
                 SystemResources,
                 Diagnostic,

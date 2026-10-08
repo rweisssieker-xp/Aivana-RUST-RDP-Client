@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::models::{ConnectionProfile, CredentialRef, SecretCredential};
@@ -99,9 +100,34 @@ pub struct PersistentCredentialStore {
     path: PathBuf,
     refs: HashMap<Uuid, CredentialRef>,
     records: HashMap<Uuid, ProtectedCredentialRecord>,
+    source_digest: Option<[u8; 32]>,
 }
 
 impl PersistentCredentialStore {
+    // Scoped authoring is surfaced by later platform connector waves.
+    #[allow(dead_code)]
+    pub fn save_scoped(
+        &mut self,
+        scope_digest: &str,
+        purpose: crate::helper::scope::CredentialPurpose,
+        secret: SecretCredential,
+    ) -> Result<crate::models::ScopedCredentialRef> {
+        crate::helper::credentials::save_scoped_at(
+            &self.path.with_extension("scoped.dpapi"),
+            scope_digest,
+            purpose,
+            secret,
+        )
+    }
+
+    #[allow(dead_code)]
+    pub fn revoke_scoped(&mut self, reference: Uuid) -> Result<()> {
+        crate::helper::credentials::revoke_scoped_at(
+            &self.path.with_extension("scoped.dpapi"),
+            reference,
+        )
+    }
+
     pub fn new() -> Result<Self> {
         Self::at(app_data_file("credentials.json")?)
     }
@@ -116,27 +142,88 @@ impl PersistentCredentialStore {
                 path,
                 refs: HashMap::new(),
                 records: HashMap::new(),
+                source_digest: None,
             });
         }
 
-        let json = fs::read_to_string(&path).context("read credential store")?;
+        let json = read_credential_file(&path)?.context("credential store disappeared")?;
         let persisted: PersistedCredentialStore =
-            serde_json::from_str(&json).context("parse credential store")?;
+            serde_json::from_slice(&json).context("parse credential store")?;
+        anyhow::ensure!(
+            persisted.refs.len() == persisted.records.len()
+                && persisted.refs.iter().all(|reference| persisted
+                    .refs
+                    .iter()
+                    .filter(|other| other.id == reference.id)
+                    .count()
+                    == 1
+                    && persisted
+                        .records
+                        .iter()
+                        .filter(|record| record.id == reference.id)
+                        .count()
+                        == 1),
+            "Credential store invalid"
+        );
         Ok(Self {
             path,
             refs: persisted.refs.into_iter().map(|r| (r.id, r)).collect(),
             records: persisted.records.into_iter().map(|r| (r.id, r)).collect(),
+            source_digest: Some(Sha256::digest(&json).into()),
         })
     }
 
-    fn persist(&self) -> Result<()> {
+    fn persist(&mut self) -> Result<()> {
         let persisted = PersistedCredentialStore {
             refs: self.refs.values().cloned().collect(),
             records: self.records.values().cloned().collect(),
         };
         let json = serde_json::to_string_pretty(&persisted).context("serialize credentials")?;
-        atomic_write(&self.path, json.as_bytes()).context("write credential store")
+        anyhow::ensure!(
+            json.len() <= MAX_CREDENTIAL_FILE_BYTES,
+            "Credential store capacity reached"
+        );
+        let _guard = lock_credential_file(&self.path)?;
+        let current = read_credential_file(&self.path)?
+            .as_deref()
+            .map(|bytes| -> [u8; 32] { Sha256::digest(bytes).into() });
+        anyhow::ensure!(
+            current == self.source_digest,
+            "Credential store changed on disk; reload before saving"
+        );
+        atomic_write(&self.path, json.as_bytes()).context("write credential store")?;
+        self.source_digest = Some(Sha256::digest(json.as_bytes()).into());
+        Ok(())
     }
+}
+
+const MAX_CREDENTIAL_FILE_BYTES: usize = 64 * 1024 * 1024;
+fn read_credential_file(path: &std::path::Path) -> Result<Option<Vec<u8>>> {
+    use std::io::Read;
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take((MAX_CREDENTIAL_FILE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    anyhow::ensure!(
+        bytes.len() <= MAX_CREDENTIAL_FILE_BYTES,
+        "Credential store capacity reached"
+    );
+    Ok(Some(bytes))
+}
+fn lock_credential_file(path: &std::path::Path) -> Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.create(true).read(true).write(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.share_mode(0);
+    }
+    Ok(options.open(path.with_extension("lock"))?)
 }
 
 impl CredentialStore for PersistentCredentialStore {
@@ -231,12 +318,14 @@ impl CredentialStore for PersistentCredentialStore {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct PersistedCredentialStore {
     refs: Vec<CredentialRef>,
     records: Vec<ProtectedCredentialRecord>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct ProtectedCredentialRecord {
     id: Uuid,
     protected_hex: String,
@@ -474,9 +563,7 @@ mod tests {
                 .username,
             "before"
         );
-        fs::remove_file(path).unwrap();
-        fs::remove_dir(bad).unwrap();
-        fs::remove_dir(root).unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

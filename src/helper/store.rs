@@ -210,7 +210,7 @@ impl HelperStore {
     }
     /// Called by the worker after a real request has been accepted. UI/import paths cannot
     /// create a live observation by simply supplying a self-consistent envelope.
-    pub(crate) fn register_pending_capture(
+    fn register_pending_capture_inner(
         &mut self,
         case_id: Uuid,
         request_id: Uuid,
@@ -264,6 +264,65 @@ impl HelperStore {
             registered_at: chrono::Utc::now(),
         });
         Ok(binding)
+    }
+
+    /// Production registration takes the exact accepted typed registry request.
+    pub(crate) fn register_accepted_capture(
+        &mut self,
+        registry: &super::capability::CapabilityRegistry,
+        request: &super::capability::ProbeRequest,
+    ) -> Result<EvidenceBinding> {
+        let case = self
+            .case(request.binding.case_id)
+            .ok_or_else(|| anyhow::anyhow!("Helper case missing"))?;
+        registry.validate_request(case, request)?;
+        let binding = self.register_pending_capture_inner(
+            request.binding.case_id,
+            request.binding.request_id,
+            &request.binding.scope_sha256,
+            request.binding.run_id,
+            request.capability_id,
+            request.capability_version,
+        )?;
+        ensure!(
+            binding == request.binding,
+            "Accepted request binding changed"
+        );
+        Ok(binding)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn register_pending_capture(
+        &mut self,
+        case_id: Uuid,
+        request_id: Uuid,
+        scope_sha256: &str,
+        run_id: Option<Uuid>,
+        capability_id: CapabilityId,
+        capability_version: u16,
+    ) -> Result<EvidenceBinding> {
+        self.register_pending_capture_inner(
+            case_id,
+            request_id,
+            scope_sha256,
+            run_id,
+            capability_id,
+            capability_version,
+        )
+    }
+
+    /// Remove durable intent when a submitted capture is canceled, rejected, or times out.
+    pub(crate) fn cancel_pending_capture(&mut self, request_id: Uuid) -> Result<()> {
+        ensure!(self.opened, "Helper store unavailable");
+        self.pending_captures
+            .retain(|pending| pending.binding.request_id != request_id);
+        Ok(())
+    }
+
+    pub(crate) fn cancel_abandoned_pending_captures(&mut self) -> bool {
+        let had_pending = !self.pending_captures.is_empty();
+        self.pending_captures.clear();
+        had_pending
     }
     pub fn attach_evidence(&mut self, case_id: Uuid, envelope: EvidenceEnvelope) -> Result<()> {
         ensure!(
