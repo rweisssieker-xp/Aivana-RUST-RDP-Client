@@ -35,12 +35,7 @@ pub(super) fn show(
         .button("Prune expired unheld SQL artifacts (90 days) and save")
         .clicked()
     {
-        let result = match (&mut state.store, &state.path) {
-            (Some(store), Some(path)) => {
-                store.maintain_sql_artifacts(path, case.id(), chrono::Utc::now())
-            }
-            _ => Err(anyhow::anyhow!("Helper store unavailable")),
-        };
+        let result = maintain_sql_artifacts(state, case.id());
         state.notice = result
             .map(|count| {
                 format!("SQL artifact maintenance saved; {count} expired artifact(s) pruned")
@@ -363,6 +358,20 @@ pub(super) fn show(
     }
 }
 
+fn maintain_sql_artifacts(state: &mut HelperState, case_id: Uuid) -> anyhow::Result<usize> {
+    anyhow::ensure!(
+        state.store.is_some() && state.path.is_some(),
+        "Helper store unavailable"
+    );
+    state.suspend_action_authority(case_id)?;
+    match (&mut state.store, &state.path) {
+        (Some(store), Some(path)) => {
+            store.maintain_sql_artifacts(path, case_id, chrono::Utc::now())
+        }
+        _ => Err(anyhow::anyhow!("Helper store unavailable")),
+    }
+}
+
 fn import_plan(
     state: &mut HelperState,
     case: &HelperCase,
@@ -445,8 +454,94 @@ fn import_plan(
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Store unavailable"))?
         .clone();
+    state.suspend_action_authority(case.id())?;
     evidence::import_evidence(&mut store, case.id(), envelope)?;
     store.save(path)?;
     state.store = Some(store);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{helper::case::CaseEdit, mission::Target, models::ConnectionProfile};
+
+    fn reviewed_case() -> (HelperState, HelperCase, BoundScope, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("relayne-plan-admission-{}", Uuid::new_v4()));
+        let mut state = HelperState::at_path(dir.join("cases.dpapi"));
+        state.create();
+        let profile = ConnectionProfile::sample("sql", "127.0.0.1", "Default", false);
+        let scope = BoundScope::Database {
+            target: Target::from_profile(&profile),
+            engine: DatabaseEngine::Postgres,
+            port: 5432,
+            database: "app".into(),
+            schema: None,
+            object: None,
+            credential: None,
+        };
+        state.revise(CaseEdit::Profiles(vec![profile.id]));
+        state.revise(CaseEdit::Scopes(vec![scope.clone()]));
+        state.save();
+        let case = state.current().unwrap().clone();
+        let blocker = dir.join("not-a-directory");
+        std::fs::write(&blocker, b"blocked").unwrap();
+        state.path = Some(blocker.join("cases.dpapi"));
+        (state, case, scope, dir)
+    }
+
+    #[test]
+    fn failed_suspension_blocks_plan_import_without_case_mutation() {
+        let (mut state, case, scope, dir) = reviewed_case();
+        let before = serde_json::to_value(state.store.as_ref().unwrap()).unwrap();
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/helper/sql/reference-sort-before.psql");
+        assert!(fixture.is_file());
+        let error = import_plan(
+            &mut state,
+            &case,
+            &scope,
+            fixture.to_str().unwrap(),
+            PlanImportFormat::PsqlAlignedExplainJson,
+        )
+        .unwrap_err();
+        assert!(error.downcast_ref::<std::io::Error>().is_some());
+        assert_eq!(
+            serde_json::to_value(state.store.as_ref().unwrap()).unwrap(),
+            before
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn failed_suspension_blocks_artifact_maintenance_without_case_mutation() {
+        let (mut state, case, _, dir) = reviewed_case();
+        let before = serde_json::to_value(state.store.as_ref().unwrap()).unwrap();
+        let error = maintain_sql_artifacts(&mut state, case.id()).unwrap_err();
+        assert!(error.downcast_ref::<std::io::Error>().is_some());
+        assert_eq!(
+            serde_json::to_value(state.store.as_ref().unwrap()).unwrap(),
+            before
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn current_case_can_import_and_maintain_plan_after_suspension() {
+        let (mut state, case, scope, dir) = reviewed_case();
+        state.path = Some(dir.join("cases.dpapi"));
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/helper/sql/reference-sort-before.psql");
+        import_plan(
+            &mut state,
+            &case,
+            &scope,
+            fixture.to_str().unwrap(),
+            PlanImportFormat::PsqlAlignedExplainJson,
+        )
+        .unwrap();
+        assert_eq!(state.current().unwrap().evidence().len(), 1);
+        assert_eq!(maintain_sql_artifacts(&mut state, case.id()).unwrap(), 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

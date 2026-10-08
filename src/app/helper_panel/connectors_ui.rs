@@ -747,20 +747,6 @@ impl HelperState {
             current_profile_matches(scope, profiles),
             "Saved endpoint changed"
         );
-        self.authority.publish(
-            self.store
-                .as_ref()
-                .map(|store| store.cases())
-                .unwrap_or(&[]),
-            profiles,
-        );
-        if self.worker.is_none() {
-            self.worker = Some(worker::HelperWorker::new(
-                Arc::new(worker::built_in_registry()?),
-                Arc::new(PersistentSecretResolver::new()?),
-                self.authority.clone(),
-            )?);
-        }
         let id = Uuid::new_v4();
         let mut request = ProbeRequest {
             binding: EvidenceBinding {
@@ -778,8 +764,34 @@ impl HelperState {
             requested_at: Utc::now(),
             deadline_secs: Some(30),
         };
+        let new_registry = if self.worker.is_none() {
+            Some(Arc::new(worker::built_in_registry()?))
+        } else {
+            None
+        };
+        let registry = self
+            .worker
+            .as_ref()
+            .map(|worker| worker.registry())
+            .or_else(|| new_registry.as_deref())
+            .expect("existing or new registry");
+        registry.validate_request(&case, &request)?;
+        self.suspend_action_authority(case_id)?;
+        self.authority.publish(
+            self.store
+                .as_ref()
+                .map(|store| store.cases())
+                .unwrap_or(&[]),
+            profiles,
+        );
+        if self.worker.is_none() {
+            self.worker = Some(worker::HelperWorker::new(
+                new_registry.expect("validated new registry"),
+                Arc::new(PersistentSecretResolver::new()?),
+                self.authority.clone(),
+            )?);
+        }
         let worker = self.worker.as_mut().expect("created worker");
-        worker.registry().validate_request(&case, &request)?;
         let store = self
             .store
             .as_mut()
@@ -1150,5 +1162,88 @@ mod tests {
         drop(listener);
         drop(state);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod suspension_tests {
+    use super::*;
+    use crate::{
+        helper::{
+            case::CaseEdit,
+            scope::{CredentialPurpose, CredentialScope},
+        },
+        mission::Target,
+    };
+
+    #[test]
+    fn failed_suspension_rejects_sql_capture_before_pending_or_worker() {
+        let dir = std::env::temp_dir().join(format!("relayne-sql-admission-{}", Uuid::new_v4()));
+        let mut state = HelperState::at_path(dir.join("cases.dpapi"));
+        state.create();
+        let profile = ConnectionProfile::sample("sql", "127.0.0.1", "Default", false);
+        let mut scope = BoundScope::Database {
+            target: Target::from_profile(&profile),
+            engine: crate::helper::scope::DatabaseEngine::Postgres,
+            port: 5432,
+            database: "app".into(),
+            schema: None,
+            object: None,
+            credential: None,
+        };
+        let resource = scope.resource_digest().unwrap();
+        if let BoundScope::Database { credential, .. } = &mut scope {
+            *credential = Some(CredentialScope {
+                reference: Uuid::new_v4(),
+                purpose: CredentialPurpose::Read,
+                generation: 1,
+                principal: "reader".into(),
+                context: "fixture".into(),
+                context_digest: resource,
+            });
+        }
+        state.revise(CaseEdit::Profiles(vec![profile.id]));
+        state.revise(CaseEdit::Scopes(vec![scope.clone()]));
+        state.save();
+        let case = state.current().unwrap().clone();
+        let params = ProbeParams::SqlRead {
+            query_digest: crate::helper::sql::postgres::template_digest(),
+        };
+        let request = ProbeRequest {
+            binding: EvidenceBinding {
+                case_id: case.id(),
+                case_revision: case.revision(),
+                request_id: Uuid::new_v4(),
+                scope_sha256: scope.digest().unwrap(),
+                credential_scope_sha256: scope.credential_scope_digest().unwrap(),
+                run_id: None,
+            },
+            scope: scope.clone(),
+            capability_id: CapabilityId::SqlRead,
+            capability_version: 1,
+            params: params.clone(),
+            requested_at: Utc::now(),
+            deadline_secs: Some(30),
+        };
+        worker::built_in_registry()
+            .unwrap()
+            .validate_request(&case, &request)
+            .unwrap();
+        let before = serde_json::to_value(state.store.as_ref().unwrap()).unwrap();
+        let blocker = dir.join("not-a-directory");
+        std::fs::write(&blocker, b"blocked").unwrap();
+        state.path = Some(blocker.join("cases.dpapi"));
+
+        let error = state
+            .try_collect_sql(case.id(), &scope, &[profile], CapabilityId::SqlRead, params)
+            .unwrap_err();
+        assert!(error.downcast_ref::<std::io::Error>().is_some());
+        assert!(state.worker.is_none());
+        assert!(state.collect_jobs.is_empty());
+        assert_eq!(
+            serde_json::to_value(state.store.as_ref().unwrap()).unwrap(),
+            before
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

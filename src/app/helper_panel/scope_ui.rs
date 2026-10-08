@@ -61,6 +61,52 @@ pub(super) struct Editor {
     cloud_session_token: String,
 }
 
+#[cfg(test)]
+mod suspension_tests {
+    use super::*;
+
+    #[test]
+    fn failed_suspension_leaves_cloud_draft_and_vault_unprepared() {
+        let dir = std::env::temp_dir().join(format!("relayne-cloud-admission-{}", Uuid::new_v4()));
+        let mut state = HelperState::at_path(dir.join("cases.dpapi"));
+        state.create();
+        let case_id = state.current().unwrap().id();
+        let scope = BoundScope::AwsEc2 {
+            account: "123456789012".into(),
+            region: "eu-central-1".into(),
+            instance_id: "i-0123456789abcdef0".into(),
+            credential: None,
+        };
+        state.revise(CaseEdit::Scopes(vec![scope]));
+        state.save();
+        let case = state.current().unwrap().clone();
+        state
+            .scope_editor
+            .prepare_cloud(case_id, &case.scopes()[0])
+            .unwrap();
+        state.scope_editor.cloud_principal = "arn:aws:iam::123456789012:user/read".into();
+        state.scope_editor.cloud_access_key = "AKIA1234567890123456".into();
+        state.scope_editor.cloud_secret = "secret-sentinel".into();
+        let vault_path = dir.join("credentials.json");
+        let mut vault = PersistentCredentialStore::at(vault_path.clone()).unwrap();
+        let before = serde_json::to_value(state.store.as_ref().unwrap()).unwrap();
+        let blocker = dir.join("not-a-directory");
+        std::fs::write(&blocker, b"blocked").unwrap();
+        state.path = Some(blocker.join("cases.dpapi"));
+
+        let error = save_cloud_credential_case(&mut state, &case, 0, &mut vault).unwrap_err();
+        assert!(error.downcast_ref::<std::io::Error>().is_some());
+        assert_eq!(
+            serde_json::to_value(state.store.as_ref().unwrap()).unwrap(),
+            before
+        );
+        assert!(!vault_path.exists());
+        assert!(!vault_path.with_extension("scoped.dpapi").exists());
+        assert_eq!(state.scope_editor.cloud_secret, "secret-sentinel");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 fn optional(value: &str) -> Option<String> {
     if value.is_empty() {
         None
@@ -785,6 +831,7 @@ fn save_cloud_credential_case(
     let old_id = case.scopes()[index]
         .credential()
         .map(|credential| credential.reference);
+    state.suspend_action_authority(case.id())?;
     let updated = state.scope_editor.provision_cloud(
         case.id(),
         case.revision(),
