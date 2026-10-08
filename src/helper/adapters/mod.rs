@@ -817,6 +817,7 @@ mod tests;
 
 pub mod containers;
 mod docker_native;
+mod docker_peer;
 mod kube_native;
 
 #[cfg(test)]

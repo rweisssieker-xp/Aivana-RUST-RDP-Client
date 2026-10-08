@@ -97,8 +97,28 @@ pub(super) fn pipe_path(uri: &str) -> Result<String> {
     Ok(format!(r"\\.\pipe\{name}"))
 }
 
+pub(super) fn reviewed_context(input: &str) -> Result<(&str, &str, &str)> {
+    let mut parts = input.split('|');
+    let (Some(uri), Some(daemon_id), Some(peer_sha), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        anyhow::bail!("Reviewed Docker pipe, daemon and peer required");
+    };
+    pipe_path(uri)?;
+    ensure!(
+        !daemon_id.is_empty() && daemon_id.len() <= 128,
+        "Invalid daemon ID"
+    );
+    ensure!(
+        peer_sha.len() == 64 && peer_sha.bytes().all(|b| b.is_ascii_hexdigit()),
+        "Invalid peer image digest"
+    );
+    Ok((uri, daemon_id, peer_sha))
+}
+
 #[cfg(windows)]
 pub(super) fn process_sid_digest() -> Result<String> {
+    super::docker_peer::reject_thread_impersonation()?;
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use windows_sys::Win32::{
         Security::{GetLengthSid, GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser},
@@ -149,12 +169,20 @@ pub(super) fn process_sid_digest() -> Result<String> {
 
 pub(super) struct PipeHttp {
     io: NamedPipeClient,
+    _peer: std::os::windows::io::OwnedHandle,
     pending: Vec<u8>,
 }
 impl PipeHttp {
-    pub(super) async fn open(path: &str) -> Result<Self> {
+    pub(super) async fn open(path: &str, reviewed_image_sha256: &str) -> Result<Self> {
+        super::docker_peer::reject_thread_impersonation()?;
+        let mut options = ClientOptions::new();
+        options
+            .security_qos_flags(windows_sys::Win32::Storage::FileSystem::SECURITY_IDENTIFICATION);
+        let io = options.open(path)?;
+        let peer = super::docker_peer::verify_pipe_peer(&io, path, reviewed_image_sha256)?;
         Ok(Self {
-            io: ClientOptions::new().open(path)?,
+            io,
+            _peer: peer,
             pending: Vec::new(),
         })
     }
@@ -199,6 +227,7 @@ impl PipeHttp {
         path: &str,
         cancel: &CancellationToken,
     ) -> Result<(u16, Vec<u8>)> {
+        super::docker_peer::reject_thread_impersonation()?;
         ensure!(
             path.starts_with('/')
                 && path.len() <= 256
@@ -213,6 +242,11 @@ impl PipeHttp {
             result = self.io.write_all(request.as_bytes()) => result?,
         }
         let status = self.line(cancel).await?;
+        let mut header_bytes = status
+            .len()
+            .checked_add(2)
+            .ok_or_else(|| anyhow::anyhow!("Docker headers overflow"))?;
+        ensure!(header_bytes <= MAX_HEADERS, "Docker headers overflow");
         let status = std::str::from_utf8(&status)?;
         let mut words = status.split_ascii_whitespace();
         ensure!(
@@ -227,6 +261,10 @@ impl PipeHttp {
         let mut chunked = false;
         loop {
             let line = self.line(cancel).await?;
+            header_bytes = header_bytes
+                .checked_add(line.len() + 2)
+                .ok_or_else(|| anyhow::anyhow!("Docker headers overflow"))?;
+            ensure!(header_bytes <= MAX_HEADERS, "Docker headers overflow");
             if line.is_empty() {
                 break;
             }
@@ -321,9 +359,9 @@ pub(super) async fn collect_from_root(
     let cred = credential
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Credential missing"))?;
-    let (reviewed_uri, reviewed_id) = match cred.context.split_once('|') {
-        Some(v) => v,
-        None => return Ok(unavailable(&subject, EvidenceStatus::Unavailable)),
+    let (reviewed_uri, reviewed_id, reviewed_peer_sha256) = match reviewed_context(&cred.context) {
+        Ok(v) => v,
+        Err(_) => return Ok(unavailable(&subject, EvidenceStatus::Unavailable)),
     };
     let actual_uri = match load_context(root, daemon_context) {
         Ok(v) => v,
@@ -343,7 +381,7 @@ pub(super) async fn collect_from_root(
     if sid != cred.principal || secret.username() != cred.principal {
         return Ok(unavailable(&subject, EvidenceStatus::Unavailable));
     }
-    let mut pipe = match PipeHttp::open(&path).await {
+    let mut pipe = match PipeHttp::open(&path, reviewed_peer_sha256).await {
         Ok(v) => v,
         Err(_) => return Ok(unavailable(&subject, EvidenceStatus::Unavailable)),
     };

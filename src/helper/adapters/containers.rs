@@ -39,8 +39,10 @@ fn local_readiness_detail(scope: &BoundScope) -> (&'static str, bool) {
             let Some(credential) = credential else {
                 return ("Credential reference missing", false);
             };
-            let Some((reviewed_uri, _)) = credential.context.split_once('|') else {
-                return ("Reviewed pipe identity missing", false);
+            let Ok((reviewed_uri, _, _)) =
+                super::docker_native::reviewed_context(&credential.context)
+            else {
+                return ("Reviewed pipe, daemon or peer image digest missing", false);
             };
             let configured = super::docker_native::context_meta_root()
                 .and_then(|root| super::docker_native::load_context(&root, daemon_context));
@@ -53,7 +55,7 @@ fn local_readiness_detail(scope: &BoundScope) -> (&'static str, bool) {
                 return ("Local process identity differs", false);
             }
             (
-                "Local pipe and process identity verified; vault and remote access unverified",
+                "Local context and process identity verified; peer, vault and remote access checked at capture",
                 true,
             )
         }
@@ -102,11 +104,7 @@ pub(crate) fn validate_scoped_operation(scope: &BoundScope, id: CapabilityId) ->
             let credential = credential
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("Read credential missing"))?;
-            let (uri, daemon_id) = credential
-                .context
-                .split_once('|')
-                .ok_or_else(|| anyhow::anyhow!("Reviewed pipe and daemon ID required"))?;
-            super::docker_native::pipe_path(uri)?;
+            let (_, daemon_id, _) = super::docker_native::reviewed_context(&credential.context)?;
             atom(daemon_id, 128)?;
             ensure!(
                 crate::helper::evidence::is_digest(&credential.principal),
@@ -204,6 +202,7 @@ fn record(subject: &str, observation: Observation) -> NormalizedRecord {
         kind: RecordKind::Container,
         observation,
         subject_sha256: source_id_digest(subject.as_bytes()),
+        detail: None,
     }
 }
 fn metric(
@@ -241,6 +240,7 @@ fn output(
         },
         records,
         metrics,
+        sql_observations: Vec::new(),
         evidence_refs: Vec::new(),
         source_id: subject.as_bytes().to_vec(),
         source_observed_at: now,

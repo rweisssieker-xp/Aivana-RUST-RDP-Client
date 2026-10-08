@@ -39,6 +39,10 @@ fn scratch() -> PathBuf {
     fs::create_dir_all(&path).unwrap();
     path
 }
+
+fn fixture_peer_sha256() -> String {
+    super::docker_peer::image_sha256(&std::env::current_exe().unwrap()).unwrap()
+}
 fn pem_der(pem: &str) -> Vec<u8> {
     let encoded: String = pem
         .lines()
@@ -241,7 +245,10 @@ fn changed_docker_context_causes_zero_pipe_contact() {
             purpose: CredentialPurpose::Read,
             generation: 1,
             principal: "a".repeat(64),
-            context: format!("npipe:////./pipe/{pipe_name}|daemon-a"),
+            context: format!(
+                "npipe:////./pipe/{pipe_name}|daemon-a|{}",
+                fixture_peer_sha256()
+            ),
             context_digest: String::new(),
         }),
     }
@@ -448,7 +455,7 @@ fn docker_capture_keeps_one_pipe_when_context_changes() {
             purpose: CredentialPurpose::Read,
             generation: 1,
             principal: sid.clone(),
-            context: format!("{uri}|daemon-a"),
+            context: format!("{uri}|daemon-a|{}", fixture_peer_sha256()),
             context_digest: String::new(),
         }),
     }
@@ -636,7 +643,9 @@ fn named_pipe_fixture_exercises_real_framing_cancel_and_limits() {
                 server.write_all(body).await.unwrap();
             }
         });
-        let mut client = docker_native::PipeHttp::open(&path).await.unwrap();
+        let mut client = docker_native::PipeHttp::open(&path, &fixture_peer_sha256())
+            .await
+            .unwrap();
         for _ in 0..2 {
             assert_eq!(
                 client
@@ -652,13 +661,15 @@ fn named_pipe_fixture_exercises_real_framing_cancel_and_limits() {
         let fixture = tokio::spawn(async move {
             server.connect().await.unwrap();
             let mut request = [0_u8; 1024];
-            server.read(&mut request).await.unwrap();
+            assert!(server.read(&mut request).await.unwrap() > 0);
             server
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 999999\r\n\r\n")
                 .await
                 .unwrap();
         });
-        let mut client = docker_native::PipeHttp::open(&path).await.unwrap();
+        let mut client = docker_native::PipeHttp::open(&path, &fixture_peer_sha256())
+            .await
+            .unwrap();
         assert!(
             client
                 .get("/info", &CancellationToken::new())
@@ -671,10 +682,12 @@ fn named_pipe_fixture_exercises_real_framing_cancel_and_limits() {
         let fixture = tokio::spawn(async move {
             server.connect().await.unwrap();
             let mut b = [0_u8; 1024];
-            server.read(&mut b).await.unwrap();
+            assert!(server.read(&mut b).await.unwrap() > 0);
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         });
-        let mut client = docker_native::PipeHttp::open(&path).await.unwrap();
+        let mut client = docker_native::PipeHttp::open(&path, &fixture_peer_sha256())
+            .await
+            .unwrap();
         let cancel = CancellationToken::new();
         let trigger = cancel.clone();
         tokio::spawn(async move {
@@ -688,10 +701,12 @@ fn named_pipe_fixture_exercises_real_framing_cancel_and_limits() {
         let fixture = tokio::spawn(async move {
             server.connect().await.unwrap();
             let mut b = [0_u8; 1024];
-            server.read(&mut b).await.unwrap();
+            assert!(server.read(&mut b).await.unwrap() > 0);
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         });
-        let mut client = docker_native::PipeHttp::open(&path).await.unwrap();
+        let mut client = docker_native::PipeHttp::open(&path, &fixture_peer_sha256())
+            .await
+            .unwrap();
         assert!(
             tokio::time::timeout(
                 std::time::Duration::from_millis(25),
@@ -701,5 +716,156 @@ fn named_pipe_fixture_exercises_real_framing_cancel_and_limits() {
             .is_err()
         );
         fixture.await.unwrap();
+    });
+}
+
+#[test]
+fn docker_rejects_thread_impersonation_before_identity_binding() {
+    std::thread::spawn(|| unsafe {
+        use windows_sys::Win32::Security::{ImpersonateSelf, RevertToSelf, SecurityImpersonation};
+        assert_ne!(ImpersonateSelf(SecurityImpersonation), 0);
+        let refused = docker_native::process_sid_digest().is_err();
+        assert_ne!(RevertToSelf(), 0);
+        assert!(
+            refused,
+            "thread token must not be treated as process identity"
+        );
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn docker_rejects_unreviewed_pipe_peer_before_http() {
+    use tokio::{io::AsyncReadExt, net::windows::named_pipe::ServerOptions};
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let path = format!(r"\\.\pipe\relayne-fixture-{}", Uuid::new_v4());
+        let mut server = ServerOptions::new().create(&path).unwrap();
+        let result = docker_native::PipeHttp::open(&path, &"0".repeat(64)).await;
+        assert!(result.is_err(), "unreviewed peer must be rejected");
+        tokio::time::timeout(std::time::Duration::from_secs(1), server.connect())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut bytes = [0_u8; 16];
+        let read = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            server.read(&mut bytes),
+        )
+        .await;
+        assert!(
+            matches!(read, Ok(Ok(0)) | Err(_)),
+            "unreviewed peer received HTTP bytes"
+        );
+    });
+}
+
+#[test]
+fn docker_rejects_many_small_headers_within_one_response() {
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::windows::named_pipe::ServerOptions,
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let path = format!(r"\\.\pipe\relayne-fixture-{}", Uuid::new_v4());
+        let mut server = ServerOptions::new().create(&path).unwrap();
+        let fixture = tokio::spawn(async move {
+            server.connect().await.unwrap();
+            let mut request = [0_u8; 1024];
+            assert!(server.read(&mut request).await.unwrap() > 0);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n{}Content-Length: 2\r\n\r\n{{}}",
+                "X: a\r\n".repeat(2000)
+            );
+            let _ = server.write_all(response.as_bytes()).await;
+        });
+        let mut client = docker_native::PipeHttp::open(&path, &fixture_peer_sha256())
+            .await
+            .unwrap();
+        assert!(
+            client
+                .get("/info", &CancellationToken::new())
+                .await
+                .is_err()
+        );
+        fixture.await.unwrap();
+    });
+}
+
+#[test]
+fn docker_pipe_exposes_identification_only_token_to_server() {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::windows::named_pipe::ServerOptions,
+    };
+    use windows_sys::Win32::{
+        Security::{
+            GetTokenInformation, RevertToSelf, SecurityIdentification, TOKEN_QUERY,
+            TokenImpersonationLevel,
+        },
+        System::{
+            Pipes::ImpersonateNamedPipeClient,
+            Threading::{GetCurrentThread, OpenThreadToken},
+        },
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let path = format!(r"\\.\pipe\relayne-fixture-{}", Uuid::new_v4());
+        let mut server = ServerOptions::new().create(&path).unwrap();
+        let fixture = tokio::spawn(async move {
+            server.connect().await.unwrap();
+            let mut request = [0_u8; 1024];
+            assert!(server.read(&mut request).await.unwrap() > 0);
+            let level = unsafe {
+                assert_ne!(ImpersonateNamedPipeClient(server.as_raw_handle()), 0);
+                let mut raw = std::ptr::null_mut();
+                assert_ne!(
+                    OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &mut raw),
+                    0
+                );
+                let token = OwnedHandle::from_raw_handle(raw);
+                let mut level = 0_i32;
+                let mut size = 0_u32;
+                let ok = GetTokenInformation(
+                    token.as_raw_handle(),
+                    TokenImpersonationLevel,
+                    (&mut level as *mut i32).cast(),
+                    std::mem::size_of::<i32>() as u32,
+                    &mut size,
+                );
+                assert_ne!(RevertToSelf(), 0);
+                assert_ne!(ok, 0);
+                level
+            };
+            server
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+                .await
+                .unwrap();
+            level
+        });
+        let mut client = docker_native::PipeHttp::open(&path, &fixture_peer_sha256())
+            .await
+            .unwrap();
+        assert_eq!(
+            client
+                .get("/info", &CancellationToken::new())
+                .await
+                .unwrap()
+                .0,
+            200
+        );
+        assert_eq!(fixture.await.unwrap(), SecurityIdentification);
     });
 }

@@ -4,7 +4,7 @@ use crate::{
     helper::{
         capability::ProbeRequest,
         credentials::{PersistentSecretResolver, SecretResolver},
-        evidence::{EvidenceBinding, EvidenceEnvelope, Origin},
+        evidence::{EvidenceBinding, EvidenceEnvelope, EvidenceStatus, Origin},
         manifest::{CapabilityId, ProbeParams},
         scope::{BoundScope, CredentialPurpose},
         worker::{self, WorkerOutcome},
@@ -188,6 +188,55 @@ pub(super) fn collect_enabled(
         && cloud_credential_ready(scope, resolver)
 }
 
+fn remote_status(status: EvidenceStatus, observed: bool) -> (&'static str, bool) {
+    match status {
+        EvidenceStatus::Complete | EvidenceStatus::Partial if observed => (
+            "last live read succeeded; remote read permission observed for that capture",
+            true,
+        ),
+        EvidenceStatus::Complete | EvidenceStatus::Partial => (
+            "last live read returned no usable observation; permission unknown",
+            false,
+        ),
+        EvidenceStatus::Denied => ("last live read denied", false),
+        EvidenceStatus::Unavailable => ("last live read unavailable; permission unknown", false),
+        EvidenceStatus::Truncated => (
+            "last live read exceeded output limit; permission unknown",
+            false,
+        ),
+        EvidenceStatus::Canceled => ("last live read canceled; permission unknown", false),
+        EvidenceStatus::Failed => ("last live read failed; permission unknown", false),
+    }
+}
+
+fn remote_readiness(
+    state: &HelperState,
+    case: &crate::helper::case::HelperCase,
+    scope: &BoundScope,
+) -> (&'static str, bool) {
+    let Ok(digest) = scope.digest() else {
+        return ("scope invalid; permission unknown", false);
+    };
+    if let Some(attempt) = state.collect_attempts.get(&(case.id(), digest.clone())) {
+        return *attempt;
+    }
+    case.evidence()
+        .iter()
+        .filter(|item| item.origin == Origin::Live && item.binding.scope_sha256 == digest)
+        .filter(|item| {
+            matches!(
+                item.capability_id,
+                CapabilityId::DockerContainerInspect
+                    | CapabilityId::DockerContainerStats
+                    | CapabilityId::KubernetesWorkloadStatus
+                    | CapabilityId::KubernetesEvents
+            )
+        })
+        .max_by_key(|item| item.retrieved_at)
+        .map(|item| remote_status(item.status, !item.records.is_empty()))
+        .unwrap_or(("unknown; no current-scope live read yet", false))
+}
+
 pub(super) fn show(
     state: &mut HelperState,
     ui: &mut egui::Ui,
@@ -272,8 +321,18 @@ pub(super) fn show(
                     format!("Kubernetes context: {context}; namespace: {namespace}; selected {resource_kind}: {resource_name}; native HTTPS. {}", readiness.label),
                 _ => unreachable!(),
             });
-            ui.small("Prerequisites: reviewed scope, current scoped read credential, target identity and remote read permission. Remote permission: not verified; fixture-tested transport, live interoperability not verified.");
-        } else if executable.is_none() {
+            let (remote, succeeded_live) = if profile_current {
+                remote_readiness(state, case, scope)
+            } else {
+                ("reviewed profile changed; permission unknown", false)
+            };
+            ui.small(format!("Prerequisites: reviewed scope, current scoped read credential, target identity and remote read permission. Remote permission: {remote}."));
+            ui.small(if succeeded_live {
+                "Transport: fixture verified; successful live read observed for this reviewed scope."
+            } else {
+                "Transport: fixture verified; successful live interoperability not yet verified."
+            });
+        } else if supported(scope).is_none() {
             ui.small("Unsupported: no executable read adapter for this scope.");
         }
         let local_ready = container_readiness
@@ -299,7 +358,7 @@ pub(super) fn show(
                             .as_ref()
                             .map(|resolver| resolver as &dyn SecretResolver),
                     ) && tool_ready
-                        && executable.is_some()
+                        && supported(scope).is_some()
                         && local_ready
                         && (scope.credential().is_some()
                             || !matches!(
@@ -650,6 +709,10 @@ impl HelperState {
             let _ = store.save(path);
             return Err(error);
         }
+        self.collect_attempts.insert(
+            (case_id, job.scope_digest.clone()),
+            ("capture pending; permission unknown", false),
+        );
         self.collect_jobs.insert(id, job);
         Ok(id)
     }
@@ -672,11 +735,15 @@ impl HelperState {
                 continue;
             };
             let case_id = job.case_id;
+            let scope_digest = job.scope_digest.clone();
             let Some(store) = self.store.as_mut() else {
                 continue;
             };
+            let mut readiness = ("last capture failed; permission unknown", false);
             let status = match event.outcome {
                 WorkerOutcome::Complete(envelope) => {
+                    let evidence_status = envelope.status;
+                    let observed = !envelope.records.is_empty();
                     let current = store.case(case_id).and_then(|case| {
                         case.scopes().iter().find(|scope| {
                             scope.digest().ok().as_deref() == Some(&envelope.binding.scope_sha256)
@@ -685,6 +752,7 @@ impl HelperState {
                     if current.is_some_and(|scope| current_profile_matches(scope, profiles))
                         && store.attach_evidence(case_id, *envelope).is_ok()
                     {
+                        readiness = remote_status(evidence_status, observed);
                         "Capture attached"
                     } else {
                         let _ = store.cancel_pending_capture(event.request_id);
@@ -692,14 +760,17 @@ impl HelperState {
                     }
                 }
                 WorkerOutcome::Canceled => {
+                    readiness = ("last capture canceled; permission unknown", false);
                     let _ = store.cancel_pending_capture(event.request_id);
                     "Capture canceled"
                 }
                 WorkerOutcome::TimedOut => {
+                    readiness = ("last capture timed out; permission unknown", false);
                     let _ = store.cancel_pending_capture(event.request_id);
                     "Capture timed out"
                 }
                 WorkerOutcome::Failed(failure) => {
+                    readiness = ("last capture failed; permission unknown", false);
                     let _ = store.cancel_pending_capture(event.request_id);
                     match failure {
                         worker::WorkerFailure::AdapterUnavailable => {
@@ -720,11 +791,15 @@ impl HelperState {
                 if store.save(path).is_ok() {
                     status.into()
                 } else {
+                    readiness = ("last capture could not be saved; permission unknown", false);
                     "Capture state could not be saved".into()
                 }
             } else {
+                readiness = ("last capture store unavailable; permission unknown", false);
                 "Capture store unavailable".into()
             };
+            self.collect_attempts
+                .insert((case_id, scope_digest), readiness);
         }
     }
 }
@@ -837,6 +912,68 @@ mod tests {
     }
 
     #[test]
+    fn remote_labels_separate_success_denial_and_unknown() {
+        assert!(remote_status(EvidenceStatus::Partial, true).1);
+        assert!(!remote_status(EvidenceStatus::Partial, false).1);
+        assert_eq!(
+            remote_status(EvidenceStatus::Denied, false),
+            ("last live read denied", false)
+        );
+        assert!(
+            remote_status(EvidenceStatus::Unavailable, false)
+                .0
+                .contains("permission unknown")
+        );
+    }
+
+    #[test]
+    fn last_capture_readiness_is_bound_to_case_and_scope() {
+        let dir = std::env::temp_dir().join(format!("relayne-readiness-ui-{}", Uuid::new_v4()));
+        let mut state = HelperState::at_path(dir.join("cases.dpapi"));
+        let first = state
+            .store
+            .as_mut()
+            .unwrap()
+            .create(ProblemIntake::default())
+            .unwrap();
+        let second = state
+            .store
+            .as_mut()
+            .unwrap()
+            .create(ProblemIntake::default())
+            .unwrap();
+        let scope = BoundScope::Docker {
+            daemon_context: "default".into(),
+            container_id: "a".repeat(64),
+            credential: None,
+        };
+        let other_scope = BoundScope::Docker {
+            daemon_context: "other".into(),
+            container_id: "a".repeat(64),
+            credential: None,
+        };
+        state.collect_attempts.insert(
+            (first, scope.digest().unwrap()),
+            remote_status(EvidenceStatus::Denied, false),
+        );
+        let store = state.store.as_ref().unwrap();
+        assert_eq!(
+            remote_readiness(&state, store.case(first).unwrap(), &scope).0,
+            "last live read denied"
+        );
+        assert!(
+            remote_readiness(&state, store.case(second).unwrap(), &scope)
+                .0
+                .contains("unknown")
+        );
+        assert!(
+            remote_readiness(&state, store.case(first).unwrap(), &other_scope)
+                .0
+                .contains("unknown")
+        );
+    }
+
+    #[test]
     fn selection_keeps_launched_capture_bound_to_original_case() {
         let dir = std::env::temp_dir().join(format!("relayne-collect-ui-{}", Uuid::new_v4()));
         let mut state = HelperState::at_path(dir.join("cases.dpapi"));
@@ -872,14 +1009,12 @@ mod tests {
             .revise(first, 2, CaseEdit::Scopes(vec![scope]))
             .unwrap();
         let request_id = state
-            .try_collect(
+            .try_collect_with(
                 first,
                 0,
                 &[profile.clone()],
-                Some((
-                    CapabilityId::NetworkReachability,
-                    ProbeParams::Network { port: profile.port },
-                )),
+                CapabilityId::NetworkReachability,
+                ProbeParams::Network { port: profile.port },
             )
             .unwrap();
         state.select(second);

@@ -542,7 +542,7 @@ pub(super) fn show(
                 field(
                     ui,
                     if editor.kind == 4 {
-                        "Reviewed pipe URI | daemon ID"
+                        "Reviewed pipe URI | daemon ID | Docker server image SHA-256"
                     } else if editor.kind == 5 {
                         "Reviewed Kubernetes context"
                     } else {
