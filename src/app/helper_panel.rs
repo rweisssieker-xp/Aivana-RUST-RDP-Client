@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 mod evidence_ui;
 mod intake_ui;
+mod planning_ui;
 mod scope_ui;
 
 pub(super) struct HelperState {
@@ -16,6 +17,14 @@ pub(super) struct HelperState {
     selected: Option<Uuid>,
     editor: intake_ui::Editor,
     scope_editor: scope_ui::Editor,
+    advisory_rx: Option<
+        std::sync::mpsc::Receiver<anyhow::Result<crate::helper::advisory::AdvisoryProposal>>,
+    >,
+    advisory_cancel: Option<tokio_util::sync::CancellationToken>,
+    advisory_candidate: Option<crate::helper::planner::HelperPlan>,
+    confirmation_actor: String,
+    confirmation_rationale: String,
+    confirmation_kind: Option<crate::helper::planner::HypothesisKind>,
     notice: String,
 }
 
@@ -29,6 +38,12 @@ impl HelperState {
                 selected: None,
                 editor: Default::default(),
                 scope_editor: Default::default(),
+                advisory_rx: None,
+                advisory_cancel: None,
+                advisory_candidate: None,
+                confirmation_actor: String::new(),
+                confirmation_rationale: String::new(),
+                confirmation_kind: None,
                 notice: format!("Helper storage unavailable: {e}"),
             },
         }
@@ -41,6 +56,12 @@ impl HelperState {
                 selected: None,
                 editor: Default::default(),
                 scope_editor: Default::default(),
+                advisory_rx: None,
+                advisory_cancel: None,
+                advisory_candidate: None,
+                confirmation_actor: String::new(),
+                confirmation_rationale: String::new(),
+                confirmation_kind: None,
                 notice: "Case workspace loaded".into(),
             },
             Err(e) => Self {
@@ -49,6 +70,12 @@ impl HelperState {
                 selected: None,
                 editor: Default::default(),
                 scope_editor: Default::default(),
+                advisory_rx: None,
+                advisory_cancel: None,
+                advisory_candidate: None,
+                confirmation_actor: String::new(),
+                confirmation_rationale: String::new(),
+                confirmation_kind: None,
                 notice: format!(
                     "Helper store could not be loaded: {e}. Repair or restore the file before editing."
                 ),
@@ -60,6 +87,12 @@ impl HelperState {
         self.store.as_ref()?.case(id)
     }
     fn select(&mut self, id: Uuid) {
+        if let Some(cancel) = self.advisory_cancel.take() {
+            cancel.cancel();
+        }
+        self.advisory_rx = None;
+        self.advisory_candidate = None;
+        self.confirmation_kind = None;
         self.selected = Some(id);
         self.editor = self
             .current()
@@ -81,6 +114,11 @@ impl HelperState {
         }
     }
     fn revise(&mut self, edit: CaseEdit) {
+        if let Some(cancel) = self.advisory_cancel.take() {
+            cancel.cancel();
+        }
+        self.advisory_rx = None;
+        self.advisory_candidate = None;
         let result = self
             .current()
             .map(|c| (c.id(), c.revision()))
@@ -101,6 +139,9 @@ impl HelperState {
         };
     }
     fn reload(&mut self) {
+        if let Some(cancel) = self.advisory_cancel.take() {
+            cancel.cancel();
+        }
         if let Some(path) = self.path.clone() {
             let mut replacement = Self::at_path(path);
             if let Some(id) = self.selected {
@@ -144,7 +185,8 @@ impl HelperState {
 }
 
 impl AivanaApp {
-    pub(super) fn poll_helper(&mut self) { /* Intake has no worker or remote queue. */
+    pub(super) fn poll_helper(&mut self) {
+        self.helper.poll_advisory();
     }
     pub(super) fn helper_view(&mut self, ui: &mut Ui) {
         ui.heading("IT Helper · Describe");
@@ -214,6 +256,7 @@ impl AivanaApp {
             if let Some(store) = self.helper.store.as_ref() {
                 evidence_ui::show(ui, &case, store);
             }
+            planning_ui::show(&mut self.helper, ui, &case);
         } else if self.helper.store.is_some() {
             ui.label("Create or select a case to begin.");
         }
@@ -280,5 +323,48 @@ mod tests {
         assert_eq!(app.helper.current().unwrap().scopes().len(), 1);
         assert!(app.operations.queue.jobs.is_empty());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn changed_case_discards_late_advice_and_navigation_dispatches_zero_jobs() {
+        use crate::helper::advisory::{AdvisoryPreview, AdvisoryProposal, PreviewField};
+        let ctx = egui::Context::default();
+        let mut app = AivanaApp::from_context(&ctx);
+        let dir =
+            std::env::temp_dir().join(format!("relayne-helper-planning-ui-{}", Uuid::new_v4()));
+        app.helper = HelperState::at_path(dir.join("cases.dpapi"));
+        app.helper.create();
+        let case = app.helper.current().unwrap().clone();
+        let preview = AdvisoryPreview::from_case(&case, &[PreviewField::Description]).unwrap();
+        let proposal = AdvisoryProposal {
+            case_id: case.id(),
+            case_revision: case.revision(),
+            evidence_revision: case.evidence_revision(),
+            preview_digest: preview.digest().unwrap(),
+            preview_fields: preview.fields,
+            questions: vec![],
+            hypotheses: vec![],
+            steps: vec![],
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.helper.advisory_rx = Some(rx);
+        app.helper
+            .store
+            .as_mut()
+            .unwrap()
+            .revise(
+                case.id(),
+                case.revision(),
+                CaseEdit::Description(Answer::Known("Changed while AI worked".into())),
+            )
+            .unwrap();
+        tx.send(Ok(proposal)).unwrap();
+        app.poll_helper();
+        assert!(app.helper.advisory_candidate.is_none());
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| app.helper_view(ui));
+        });
+        assert!(app.operations.queue.jobs.is_empty());
+        std::fs::remove_dir_all(dir).ok();
     }
 }

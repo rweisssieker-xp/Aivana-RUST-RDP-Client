@@ -170,6 +170,44 @@ impl HelperStore {
             .ok_or_else(|| anyhow::anyhow!("Helper case missing"))?;
         case.revise(expected_revision, edit)
     }
+    pub fn refresh_derived_plan(
+        &mut self,
+        id: Uuid,
+        plan: super::planner::HelperPlan,
+    ) -> Result<()> {
+        let case = self
+            .cases
+            .iter_mut()
+            .find(|case| case.id() == id)
+            .ok_or_else(|| anyhow::anyhow!("Helper case missing"))?;
+        case.refresh_plan(plan)
+    }
+    pub fn prune_expired_plan(
+        &mut self,
+        id: Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        let case = self
+            .cases
+            .iter_mut()
+            .find(|case| case.id() == id)
+            .ok_or_else(|| anyhow::anyhow!("Helper case missing"))?;
+        case.prune_expired_plan(now)
+    }
+    pub fn confirm_hypothesis(
+        &mut self,
+        id: Uuid,
+        expected_revision: u64,
+        kind: super::planner::HypothesisKind,
+        confirmation: super::planner::HumanConfirmation,
+    ) -> Result<u64> {
+        let case = self
+            .cases
+            .iter_mut()
+            .find(|case| case.id() == id)
+            .ok_or_else(|| anyhow::anyhow!("Helper case missing"))?;
+        case.confirm_hypothesis(expected_revision, kind, confirmation)
+    }
     /// Called by the worker after a real request has been accepted. UI/import paths cannot
     /// create a live observation by simply supplying a self-consistent envelope.
     pub(crate) fn register_pending_capture(

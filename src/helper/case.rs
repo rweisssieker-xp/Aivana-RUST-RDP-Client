@@ -2,6 +2,7 @@
 use super::evidence::{
     EvidenceEnvelope, EvidenceHold, MAX_ENVELOPES_PER_CASE, METADATA_RETENTION_DAYS, RetentionState,
 };
+use super::planner::{HelperPlan, HumanConfirmation, HypothesisKind};
 use super::scope::BoundScope;
 use anyhow::{Result, ensure};
 use chrono::{DateTime, Utc};
@@ -256,6 +257,8 @@ pub struct HelperCase {
     evidence: Vec<EvidenceEnvelope>,
     #[serde(default)]
     evidence_holds: Vec<EvidenceHold>,
+    #[serde(default)]
+    plan: Option<HelperPlan>,
     source: Option<crate::incident::Source>,
     mission_id: Option<Uuid>,
     ticket_ref: Option<TicketReference>,
@@ -278,6 +281,7 @@ pub enum CaseEdit {
     SuccessCriterion(usize, Option<SuccessCriterion>),
     Profiles(Vec<Uuid>),
     Scopes(Vec<BoundScope>),
+    PlanIntent(HelperPlan),
 }
 
 fn edit_list(list: &mut Vec<String>, index: usize, value: Option<String>) -> Result<()> {
@@ -323,6 +327,21 @@ impl HelperCase {
     }
     pub fn evidence_holds(&self) -> &[EvidenceHold] {
         &self.evidence_holds
+    }
+    pub fn plan(&self) -> Option<&HelperPlan> {
+        self.plan.as_ref()
+    }
+    pub fn plan_retention(&self, now: DateTime<Utc>) -> Option<RetentionState> {
+        let plan = self.plan.as_ref()?;
+        if now.signed_duration_since(plan.generated_at)
+            <= chrono::Duration::days(super::evidence::PLAN_ARTIFACT_RETENTION_DAYS)
+        {
+            Some(RetentionState::WithinWindow)
+        } else if !self.evidence_holds.is_empty() {
+            Some(RetentionState::ExpiredHeld)
+        } else {
+            Some(RetentionState::ExpiredUnheld)
+        }
     }
     pub fn evidence_retention(&self, id: Uuid, now: DateTime<Utc>) -> Option<RetentionState> {
         let item = self.evidence.iter().find(|e| e.id == id)?;
@@ -398,6 +417,7 @@ impl HelperCase {
             scopes: vec![],
             evidence: vec![],
             evidence_holds: vec![],
+            plan: None,
             source: None,
             mission_id: None,
             ticket_ref: None,
@@ -480,6 +500,21 @@ impl HelperCase {
                 "Missing held evidence"
             );
         }
+        if let Some(plan) = &self.plan {
+            ensure!(
+                plan.case_id == self.id
+                    && plan.case_revision <= self.revision
+                    && plan.evidence_revision <= self.evidence_revision
+                    && plan.hypotheses.len() <= 16
+                    && plan.steps.len() <= 16,
+                "Invalid stored plan binding"
+            );
+            if plan.case_revision == self.revision
+                && plan.evidence_revision == self.evidence_revision
+            {
+                plan.validate(self, &super::manifest::CapabilityManifest::built_in())?;
+            }
+        }
         ensure!(
             self.scopes.len() <= MAX_PROFILES,
             "Too many reviewed scopes"
@@ -555,6 +590,36 @@ impl HelperCase {
             }
             CaseEdit::Profiles(v) => next.profile_ids = v,
             CaseEdit::Scopes(v) => next.scopes = v,
+            CaseEdit::PlanIntent(mut plan) => {
+                ensure!(
+                    plan.case_id == next.id
+                        && plan.case_revision == next.revision
+                        && plan.evidence_revision == next.evidence_revision,
+                    "Stale plan intent"
+                );
+                plan.validate(&next, &super::manifest::CapabilityManifest::built_in())?;
+                plan.case_revision = next
+                    .revision
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow::anyhow!("Revision exhausted"))?;
+                for hypothesis in &mut plan.hypotheses {
+                    hypothesis.confirmation = None;
+                    if !hypothesis.support.is_empty() || !hypothesis.counterevidence.is_empty() {
+                        hypothesis
+                            .gaps
+                            .push("Recollect evidence under the adopted plan revision".into());
+                    }
+                    hypothesis.support.clear();
+                    hypothesis.counterevidence.clear();
+                }
+                for step in &mut plan.steps {
+                    step.evidence_refs.clear();
+                }
+                plan.rationale =
+                    "Reviewed plan intent; earlier evidence needs recollection under this revision"
+                        .into();
+                next.plan = Some(plan);
+            }
         }
         next.intake = next.intake.sanitized()?;
         next.revision = next
@@ -566,6 +631,112 @@ impl HelperCase {
         *self = next;
         Ok(self.revision)
     }
+    /// Recompute derived assessment after evidence arrival without pretending the user edited intent.
+    pub(super) fn refresh_plan(&mut self, mut plan: HelperPlan) -> Result<()> {
+        if let Some(previous) = &self.plan
+            && previous.case_revision == self.revision
+        {
+            for hypothesis in &mut plan.hypotheses {
+                hypothesis.confirmation = previous
+                    .hypotheses
+                    .iter()
+                    .find(|h| h.kind == hypothesis.kind)
+                    .and_then(|h| h.confirmation.clone());
+            }
+        }
+        plan.validate(self, &super::manifest::CapabilityManifest::built_in())?;
+        let mut next = self.clone();
+        next.plan = Some(plan);
+        next.updated_at = Utc::now();
+        next.validate()?;
+        *self = next;
+        Ok(())
+    }
+    pub(super) fn prune_expired_plan(&mut self, now: DateTime<Utc>) -> Result<bool> {
+        if self.plan_retention(now) != Some(RetentionState::ExpiredUnheld) {
+            return Ok(false);
+        }
+        let mut next = self.clone();
+        next.plan = None;
+        next.updated_at = Utc::now();
+        next.validate()?;
+        *self = next;
+        Ok(true)
+    }
+
+    /// A human decision is recorded separately from an inferred hypothesis.
+    pub(super) fn confirm_hypothesis(
+        &mut self,
+        expected_revision: u64,
+        kind: HypothesisKind,
+        confirmation: HumanConfirmation,
+    ) -> Result<u64> {
+        ensure!(
+            self.revision == expected_revision && confirmation.case_revision == expected_revision,
+            "Stale confirmation context"
+        );
+        ensure!(
+            confirmation.confirmed_at <= Utc::now() + chrono::Duration::seconds(5),
+            "Invalid confirmation time"
+        );
+        ensure!(
+            !confirmation.evidence_refs.is_empty()
+                && confirmation
+                    .evidence_refs
+                    .iter()
+                    .all(|id| self.evidence.iter().any(|e| e.id == *id
+                        && e.binding.case_revision == expected_revision
+                        && e.eligibility(
+                            confirmation.confirmed_at,
+                            chrono::Duration::seconds(super::evidence::MAX_FRESHNESS_SECS)
+                        ) == super::evidence::Eligibility::Eligible)),
+            "Confirmation requires current live evidence"
+        );
+        let mut next = self.clone();
+        let plan = next
+            .plan
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("No reviewed plan"))?;
+        ensure!(
+            plan.case_revision == expected_revision
+                && plan.evidence_revision == next.evidence_revision,
+            "Plan needs refresh before confirmation"
+        );
+        let hypothesis = plan
+            .hypotheses
+            .iter_mut()
+            .find(|h| h.kind == kind)
+            .ok_or_else(|| anyhow::anyhow!("Unknown hypothesis"))?;
+        ensure!(
+            hypothesis.confirmation.is_none(),
+            "Hypothesis already confirmed"
+        );
+        ensure!(
+            confirmation
+                .evidence_refs
+                .iter()
+                .all(|id| hypothesis.support.contains(id)),
+            "Confirmation needs supporting plan evidence"
+        );
+        hypothesis.confirmation = Some(confirmation);
+        for h in &mut plan.hypotheses {
+            h.support.clear();
+            h.counterevidence.clear();
+        }
+        for step in &mut plan.steps {
+            step.evidence_refs.clear();
+        }
+        next.revision = next
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("Revision exhausted"))?;
+        plan.case_revision = next.revision;
+        next.updated_at = Utc::now();
+        next.validate()?;
+        *self = next;
+        Ok(self.revision)
+    }
+
     pub(super) fn append_evidence(&mut self, envelope: EvidenceEnvelope) -> Result<()> {
         ensure!(
             self.evidence.len() < MAX_ENVELOPES_PER_CASE,
