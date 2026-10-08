@@ -6,6 +6,7 @@ use crate::helper::{
 };
 use std::path::PathBuf;
 
+mod evidence_ui;
 mod intake_ui;
 mod scope_ui;
 
@@ -210,6 +211,9 @@ impl AivanaApp {
                 &self.profiles,
                 &self.insights.store,
             );
+            if let Some(store) = self.helper.store.as_ref() {
+                evidence_ui::show(ui, &case, store);
+            }
         } else if self.helper.store.is_some() {
             ui.label("Create or select a case to begin.");
         }

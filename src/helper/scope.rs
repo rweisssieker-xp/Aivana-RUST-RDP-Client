@@ -399,6 +399,14 @@ impl BoundScope {
         self.validate()?;
         hash(b"relayne-helper-scope-v1\0", &self.identity_value(true)?)
     }
+    /// Purpose-specific reviewed credential metadata, or a domain-separated absent marker.
+    pub fn credential_scope_digest(&self) -> Result<Digest> {
+        self.validate()?;
+        hash(
+            b"relayne-helper-credential-scope-v1\0",
+            &serde_json::to_value(self.credential())?,
+        )
+    }
 }
 
 fn hash(domain: &[u8], value: &serde_json::Value) -> Result<Digest> {

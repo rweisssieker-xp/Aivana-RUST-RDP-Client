@@ -1,4 +1,7 @@
 //! Reviewed problem facts. Unknown is an explicit answer, distinct from unanswered.
+use super::evidence::{
+    EvidenceEnvelope, EvidenceHold, MAX_ENVELOPES_PER_CASE, METADATA_RETENTION_DAYS, RetentionState,
+};
 use super::scope::BoundScope;
 use anyhow::{Result, ensure};
 use chrono::{DateTime, Utc};
@@ -249,6 +252,10 @@ pub struct HelperCase {
     profile_ids: Vec<Uuid>,
     #[serde(default)]
     scopes: Vec<BoundScope>,
+    #[serde(default)]
+    evidence: Vec<EvidenceEnvelope>,
+    #[serde(default)]
+    evidence_holds: Vec<EvidenceHold>,
     source: Option<crate::incident::Source>,
     mission_id: Option<Uuid>,
     ticket_ref: Option<TicketReference>,
@@ -311,6 +318,55 @@ impl HelperCase {
     pub fn scopes(&self) -> &[BoundScope] {
         &self.scopes
     }
+    pub fn evidence(&self) -> &[EvidenceEnvelope] {
+        &self.evidence
+    }
+    pub fn evidence_holds(&self) -> &[EvidenceHold] {
+        &self.evidence_holds
+    }
+    pub fn evidence_retention(&self, id: Uuid, now: DateTime<Utc>) -> Option<RetentionState> {
+        let item = self.evidence.iter().find(|e| e.id == id)?;
+        if now.signed_duration_since(item.retrieved_at)
+            <= chrono::Duration::days(METADATA_RETENTION_DAYS)
+        {
+            return Some(RetentionState::WithinWindow);
+        }
+        if self
+            .evidence_holds
+            .iter()
+            .any(|h| h.evidence_ids.contains(&id))
+        {
+            Some(RetentionState::ExpiredHeld)
+        } else if self.evidence.iter().any(|e| e.evidence_refs.contains(&id)) {
+            Some(RetentionState::ExpiredReferenced)
+        } else {
+            Some(RetentionState::ExpiredUnheld)
+        }
+    }
+    /// Explicit maintenance only. Collection/save never evicts evidence to make room.
+    pub(super) fn prune_expired_evidence_metadata(&mut self, now: DateTime<Utc>) -> Result<usize> {
+        ensure!(now >= self.created_at, "Retention time predates case");
+        let before = self.evidence.len();
+        let remove: std::collections::BTreeSet<_> = self
+            .evidence
+            .iter()
+            .filter(|e| self.evidence_retention(e.id, now) == Some(RetentionState::ExpiredUnheld))
+            .map(|e| e.id)
+            .collect();
+        if remove.is_empty() {
+            return Ok(0);
+        }
+        let mut next = self.clone();
+        next.evidence.retain(|e| !remove.contains(&e.id));
+        next.evidence_revision = next
+            .evidence_revision
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("Evidence revision exhausted"))?;
+        next.updated_at = now;
+        next.validate()?;
+        *self = next;
+        Ok(before - self.evidence.len())
+    }
     pub fn source(&self) -> Option<&crate::incident::Source> {
         self.source.as_ref()
     }
@@ -340,6 +396,8 @@ impl HelperCase {
             intake,
             profile_ids: vec![],
             scopes: vec![],
+            evidence: vec![],
+            evidence_holds: vec![],
             source: None,
             mission_id: None,
             ticket_ref: None,
@@ -397,6 +455,31 @@ impl HelperCase {
             "Invalid case target IDs"
         );
         self.intake.validate()?;
+        ensure!(
+            self.evidence.len() <= MAX_ENVELOPES_PER_CASE,
+            "Evidence capacity reached"
+        );
+        let mut evidence_ids = std::collections::BTreeSet::new();
+        for item in &self.evidence {
+            item.validate_shape()?;
+            ensure!(
+                item.binding.case_id == self.id
+                    && item.binding.case_revision <= self.revision
+                    && evidence_ids.insert(item.id),
+                "Invalid case evidence reference"
+            );
+        }
+        ensure!(
+            self.evidence_revision >= self.evidence.len() as u64,
+            "Invalid evidence revision"
+        );
+        for hold in &self.evidence_holds {
+            hold.validate()?;
+            ensure!(
+                hold.evidence_ids.iter().all(|id| evidence_ids.contains(id)),
+                "Missing held evidence"
+            );
+        }
         ensure!(
             self.scopes.len() <= MAX_PROFILES,
             "Too many reviewed scopes"
@@ -482,6 +565,49 @@ impl HelperCase {
         next.validate()?;
         *self = next;
         Ok(self.revision)
+    }
+    pub(super) fn append_evidence(&mut self, envelope: EvidenceEnvelope) -> Result<()> {
+        ensure!(
+            self.evidence.len() < MAX_ENVELOPES_PER_CASE,
+            "Evidence capacity reached; export or archive before collecting more"
+        );
+        let mut next = self.clone();
+        next.evidence.push(envelope);
+        next.evidence_revision = next
+            .evidence_revision
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("Evidence revision exhausted"))?;
+        next.updated_at = Utc::now();
+        next.validate()?;
+        *self = next;
+        Ok(())
+    }
+    pub(super) fn set_evidence_hold(&mut self, hold: EvidenceHold) -> Result<()> {
+        let mut next = self.clone();
+        if let Some(old) = next
+            .evidence_holds
+            .iter_mut()
+            .find(|h| h.run_id == hold.run_id)
+        {
+            *old = hold;
+        } else {
+            ensure!(
+                next.evidence_holds.len() < 64,
+                "Evidence hold capacity reached"
+            );
+            next.evidence_holds.push(hold);
+        }
+        next.validate()?;
+        *self = next;
+        Ok(())
+    }
+    pub(super) fn clear_evidence_hold(&mut self, run_id: Uuid) -> Result<()> {
+        ensure!(!run_id.is_nil(), "Invalid run identity");
+        let mut next = self.clone();
+        next.evidence_holds.retain(|h| h.run_id != run_id);
+        next.validate()?;
+        *self = next;
+        Ok(())
     }
 }
 
