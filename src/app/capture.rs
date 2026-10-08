@@ -2,7 +2,10 @@
 use super::*;
 
 pub(super) fn initial_view() -> View {
-    let args: Vec<String> = std::env::args().collect();
+    initial_view_from_args(&std::env::args().collect::<Vec<_>>())
+}
+
+fn initial_view_from_args(args: &[String]) -> View {
     if !args.iter().any(|a| a == "--gui-capture") {
         return View::Missions;
     }
@@ -26,7 +29,43 @@ pub(super) fn initial_view() -> View {
         Some("insights") => View::Insights,
         Some("teaching") => View::Teaching,
         Some("team") => View::Team,
+        Some("helper") => View::Helper,
         _ => View::Missions,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{View, initial_view_from_args};
+
+    fn args(view: &str) -> Vec<String> {
+        vec![
+            "relayne".into(),
+            "--gui-capture".into(),
+            "capture.png".into(),
+            "--gui-capture-view".into(),
+            view.into(),
+        ]
+    }
+
+    #[test]
+    fn helper_capture_view_routes_to_helper() {
+        assert!(matches!(
+            initial_view_from_args(&args("helper")),
+            View::Helper
+        ));
+    }
+
+    #[test]
+    fn capture_defaults_are_preserved() {
+        assert!(matches!(
+            initial_view_from_args(&["relayne".into()]),
+            View::Missions
+        ));
+        assert!(matches!(
+            initial_view_from_args(&args("unknown")),
+            View::Missions
+        ));
     }
 }
 
