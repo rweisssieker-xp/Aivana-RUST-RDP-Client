@@ -86,8 +86,65 @@ fn recipe_import(
         if let Ok(identity) = entry.identity() {
             ui.label(format!("Signed recipe identity: {identity}"));
         }
-        if let crate::helper::catalog::CatalogAction::Sql { action, .. } = &entry.body.action {
-            ui.label(action.operation_preview());
+        match &entry.body.action {
+            crate::helper::catalog::CatalogAction::Sql { action, metadata } => {
+                ui.label(format!("Action: {}", action.operation_preview()));
+                ui.label(format!(
+                    "Exact credential-bound change scope SHA-256: {}",
+                    metadata.object.scope_sha256
+                ));
+                ui.label(format!(
+                    "Source metadata: {:?} · {}.{}.{} · native object ID {} · base table {}",
+                    metadata.object.engine,
+                    metadata.object.database,
+                    metadata.object.schema,
+                    metadata.object.table,
+                    metadata.object.object_id,
+                    metadata.base_table
+                ));
+                ui.label(format!(
+                    "Source evidence SHA-256: {}",
+                    metadata.source_evidence_sha256
+                ));
+                for column in &metadata.columns {
+                    ui.label(format!(
+                        "Source column: {} · ID {} · plain {}",
+                        column.name, column.column_id, column.plain
+                    ));
+                }
+                for index in &metadata.existing_indexes {
+                    ui.label(format!("Existing index: {index}"));
+                }
+            }
+            crate::helper::catalog::CatalogAction::ExistingServiceRecipe {
+                catalog_entry_id,
+                signed_package_sha256,
+            } => {
+                ui.label(format!(
+                    "Existing service recipe reference: {catalog_entry_id}"
+                ));
+                ui.label(format!(
+                    "Signed service package SHA-256: {signed_package_sha256}"
+                ));
+            }
+        }
+        ui.label(format!(
+            "Validity: {} to {}",
+            entry.body.issued_at, entry.body.expires_at
+        ));
+        ui.label("Signed prerequisites:");
+        for prerequisite in &entry.body.prerequisites {
+            ui.label(format!("• {prerequisite:?}"));
+        }
+        ui.label("Signed required checks and exact reviewed criterion selectors:");
+        for (check, criterion) in entry
+            .body
+            .verification
+            .checks
+            .iter()
+            .zip(&entry.body.verification.criteria)
+        {
+            ui.label(format!("• {check:?} → {criterion:?}"));
         }
         ui.label(format!("Restoration: {:?}", entry.body.restoration));
         ui.checkbox(

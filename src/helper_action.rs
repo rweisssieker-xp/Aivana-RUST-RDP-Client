@@ -343,6 +343,8 @@ pub enum RequiredCheck {
         expected_row_count: u64,
     },
     Performance {
+        scope_sha256: Digest,
+        object_id: u64,
         workload_sha256: Digest,
         maximum_median_ms: u64,
         maximum_p95_ms: u64,
@@ -373,13 +375,17 @@ impl RequiredCheck {
                 "Invalid SQL check"
             ),
             Self::Performance {
+                scope_sha256,
+                object_id,
                 workload_sha256,
                 maximum_median_ms,
                 maximum_p95_ms,
                 minimum_warmups,
                 minimum_samples,
             } => ensure!(
-                valid_digest(workload_sha256)
+                valid_digest(scope_sha256)
+                    && *object_id > 0
+                    && valid_digest(workload_sha256)
                     && *maximum_median_ms > 0
                     && *maximum_p95_ms >= *maximum_median_ms
                     && *minimum_warmups >= 3
@@ -394,16 +400,53 @@ impl RequiredCheck {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CriterionComparator {
+    AtMost,
+    AtLeast,
+    Equal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CriterionRequirement {
+    pub measure: String,
+    pub comparator: CriterionComparator,
+    /// Exact IEEE-754 finite threshold from the reviewed case criterion.
+    pub threshold_bits: u64,
+    pub unit: String,
+    pub window: String,
+}
+
+impl CriterionRequirement {
+    pub fn validate(&self) -> Result<()> {
+        let field =
+            |s: &str| !s.trim().is_empty() && s.len() <= 512 && !s.chars().any(char::is_control);
+        ensure!(
+            field(&self.measure)
+                && field(&self.unit)
+                && field(&self.window)
+                && f64::from_bits(self.threshold_bits).is_finite(),
+            "Invalid criterion requirement"
+        );
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VerificationSpec {
     pub checks: Vec<RequiredCheck>,
+    /// One exact reviewed criterion selector for each check, in the same order.
+    pub criteria: Vec<CriterionRequirement>,
 }
 impl VerificationSpec {
     pub fn validate(&self) -> Result<()> {
         ensure!(
             !self.checks.is_empty()
                 && self.checks.len() <= 16
+                && self.criteria.len() == self.checks.len()
                 && self.checks.iter().any(RequiredCheck::functional)
                 && self.checks.iter().any(|c| !c.functional()),
             "Functional and performance checks are required"
@@ -411,6 +454,17 @@ impl VerificationSpec {
         for check in &self.checks {
             check.validate()?;
         }
+        for criterion in &self.criteria {
+            criterion.validate()?;
+        }
+        let unique = self
+            .criteria
+            .iter()
+            .collect::<std::collections::HashSet<_>>();
+        ensure!(
+            unique.len() == self.criteria.len(),
+            "Duplicate criterion requirement"
+        );
         Ok(())
     }
 }

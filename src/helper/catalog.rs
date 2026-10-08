@@ -1,11 +1,12 @@
 //! Trusted recipes and inert proposal review. No dispatch or approval API is reachable here.
 use super::{
-    case::HelperCase,
+    case::{Comparator, HelperCase, SuccessCriterion},
     evidence::{Eligibility, EvidenceEnvelope},
     scope::{BoundScope, CredentialPurpose, DatabaseEngine},
 };
 use crate::helper_action::{
-    self, Digest, RestorationSpec, SqlAction, SqlEngine, VerificationSpec, VerifiedSqlMetadata,
+    self, CriterionComparator, CriterionRequirement, Digest, RequiredCheck, RestorationSpec,
+    SqlAction, SqlEngine, VerificationSpec, VerifiedSqlMetadata,
 };
 use anyhow::{Result, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -13,10 +14,108 @@ use chrono::{DateTime, Duration, Utc};
 use ring::signature;
 use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
+use std::path::Path;
 use uuid::Uuid;
 
 const RECIPE_DOMAIN: &[u8] = b"relayne-helper-recipe-v1";
 const REVIEW_DOMAIN: &[u8] = b"relayne-helper-proposal-review-v1";
+
+fn criterion_matches(requirement: &CriterionRequirement, criterion: &SuccessCriterion) -> bool {
+    criterion.complete()
+        && requirement.measure == criterion.measure
+        && requirement.comparator
+            == match criterion.comparator {
+                Comparator::AtMost => CriterionComparator::AtMost,
+                Comparator::AtLeast => CriterionComparator::AtLeast,
+                Comparator::Equal => CriterionComparator::Equal,
+            }
+        && requirement.threshold_bits == criterion.threshold.to_bits()
+        && requirement.unit == criterion.unit
+        && requirement.window == criterion.window
+}
+
+fn check_gaps(
+    case: &HelperCase,
+    verification: &VerificationSpec,
+    object: &helper_action::VerifiedSqlObject,
+) -> Vec<String> {
+    let mut gaps = Vec::new();
+    let criteria = case
+        .intake()
+        .success_criteria
+        .iter()
+        .filter(|c| c.reviewed)
+        .collect::<Vec<_>>();
+    if criteria.len() != verification.criteria.len()
+        || !criteria.iter().all(|c| c.complete())
+        || !verification
+            .criteria
+            .iter()
+            .all(|r| criteria.iter().filter(|c| criterion_matches(r, c)).count() == 1)
+        || !criteria.iter().all(|c| {
+            verification
+                .criteria
+                .iter()
+                .filter(|r| criterion_matches(r, c))
+                .count()
+                == 1
+        })
+    {
+        gaps.push("Signed check criteria differ from current reviewed case criteria".into());
+    }
+    for check in &verification.checks {
+        match check {
+            RequiredCheck::SqlFunctional {
+                scope_sha256,
+                object_id,
+                ..
+            } => {
+                if scope_sha256 != &object.scope_sha256 || object_id != &object.object_id {
+                    gaps.push("SQL functional check targets another change object".into());
+                }
+            }
+            RequiredCheck::HttpFunctional { scope_sha256, .. } => {
+                if !case.scopes().iter().any(|s| {
+                    matches!(s, BoundScope::Http { .. })
+                        && s.digest().ok().as_deref() == Some(scope_sha256)
+                }) {
+                    gaps.push("HTTP functional check lacks its current reviewed scope".into());
+                }
+            }
+            RequiredCheck::Performance {
+                scope_sha256,
+                object_id,
+                workload_sha256,
+                ..
+            } => {
+                let same_resource = case.scopes().iter().any(|s| {
+                    matches!(s, BoundScope::Database { .. })
+                        && s.digest().ok().as_deref() == Some(scope_sha256)
+                        && s.resource_digest().ok()
+                            == case
+                                .scopes()
+                                .iter()
+                                .find(|change| {
+                                    change.digest().ok().as_deref()
+                                        == Some(object.scope_sha256.as_str())
+                                })
+                                .and_then(|change| change.resource_digest().ok())
+                });
+                let plan_step = case.plan().is_some_and(|p| p.steps.iter().any(|step| {
+                    step.scope_sha256 == *scope_sha256
+                        && matches!(&step.params, super::manifest::ProbeParams::SqlWorkload { workload_digest } if workload_digest == workload_sha256)
+                        && matches!(step.capability_id, super::manifest::CapabilityId::SqlWorkloadBaseline | super::manifest::CapabilityId::SqlWorkloadRehearsal)
+                }));
+                if object_id != &object.object_id || !same_resource || !plan_step {
+                    gaps.push(
+                        "Performance check lacks the current same-object workload plan".into(),
+                    );
+                }
+            }
+        }
+    }
+    gaps
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -73,6 +172,34 @@ pub struct CatalogEntry {
 #[derive(Clone, Debug, Default)]
 pub struct CatalogTrust {
     pub enrolled_keys: Vec<String>,
+    source_digest: Option<[u8; 32]>,
+}
+
+fn protected_digest(bytes: &[u8]) -> [u8; 32] {
+    sha2::Sha256::digest(bytes).into()
+}
+fn protected_bytes(path: &Path, limit: usize) -> Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            ensure!(bytes.len() <= limit, "Protected recipe file too large");
+            Ok(Some(bytes))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+fn protected_lock(path: &Path) -> Result<std::fs::File> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.share_mode(0);
+    }
+    Ok(options.open(path.with_extension("lock"))?)
 }
 
 impl CatalogTrust {
@@ -93,16 +220,9 @@ impl CatalogTrust {
         Ok(format!("{:x}", sha2::Sha256::digest(&bytes)))
     }
     pub fn load_protected(path: &std::path::Path) -> Result<Self> {
-        if !path.exists() {
+        let Some(bytes) = protected_bytes(path, 32 * 1024)? else {
             return Ok(Self::default());
-        }
-        let file = std::fs::File::open(path)?;
-        ensure!(
-            file.metadata()?.len() <= 32 * 1024,
-            "Recipe trust store too large"
-        );
-        let bytes = std::fs::read(path)?;
-        ensure!(bytes.len() <= 32 * 1024, "Recipe trust store too large");
+        };
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Saved {
@@ -113,6 +233,7 @@ impl CatalogTrust {
         ensure!(saved.schema == 1, "Unsupported recipe trust schema");
         let trust = Self {
             enrolled_keys: saved.enrolled_keys,
+            source_digest: Some(protected_digest(&bytes)),
         };
         trust.validate()?;
         Ok(trust)
@@ -129,6 +250,14 @@ impl CatalogTrust {
             enrolled_keys: &self.enrolled_keys,
         })?;
         ensure!(clear.len() <= 32 * 1024, "Recipe trust store too large");
+        let _guard = protected_lock(path)?;
+        ensure!(
+            protected_bytes(path, 32 * 1024)?
+                .as_deref()
+                .map(protected_digest)
+                == self.source_digest,
+            "Recipe trust changed concurrently; reload"
+        );
         crate::security::atomic_write(path, &crate::security::protect_secret(&clear)?)
     }
     pub fn validate(&self) -> Result<()> {
@@ -261,6 +390,7 @@ fn recipe_bytes(body: &RecipeBody, provenance: &str) -> Result<Vec<u8>> {
 pub struct Catalog {
     pub entries: Vec<CatalogEntry>,
     pub trust: CatalogTrust,
+    source_digest: Option<[u8; 32]>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -286,22 +416,13 @@ impl Catalog {
         self.validate()
     }
     pub fn load_protected(path: &std::path::Path, trust: CatalogTrust) -> Result<Self> {
-        if !path.exists() {
+        let Some(bytes) = protected_bytes(path, 512 * 1024)? else {
             return Ok(Self {
                 entries: Vec::new(),
                 trust,
+                source_digest: None,
             });
-        }
-        let file = std::fs::File::open(path)?;
-        ensure!(
-            file.metadata()?.len() <= 512 * 1024,
-            "Catalog exceeds protected load limit"
-        );
-        let bytes = std::fs::read(path)?;
-        ensure!(
-            bytes.len() <= 512 * 1024,
-            "Catalog exceeds protected load limit"
-        );
+        };
         let clear = crate::security::unprotect_secret(&bytes)?;
         ensure!(clear.len() <= 512 * 1024, "Catalog exceeds cleartext limit");
         #[derive(Deserialize)]
@@ -315,6 +436,7 @@ impl Catalog {
         let catalog = Self {
             entries: saved.entries,
             trust,
+            source_digest: Some(protected_digest(&bytes)),
         };
         catalog.validate()?;
         Ok(catalog)
@@ -333,6 +455,14 @@ impl Catalog {
         ensure!(
             clear.len() <= 512 * 1024,
             "Catalog exceeds protected save limit"
+        );
+        let _guard = protected_lock(path)?;
+        ensure!(
+            protected_bytes(path, 512 * 1024)?
+                .as_deref()
+                .map(protected_digest)
+                == self.source_digest,
+            "Recipe catalog changed concurrently; reload"
         );
         crate::security::atomic_write(path, &crate::security::protect_secret(&clear)?)
     }
@@ -438,9 +568,7 @@ impl Catalog {
             if !read_evidence {
                 gaps.push("Fresh live verified object metadata is missing".into());
             }
-            if case.intake().success_criteria.iter().all(|c| !c.complete()) {
-                gaps.push("Reviewed success criterion is missing".into());
-            }
+            gaps.extend(check_gaps(case, &entry.body.verification, object));
         }
         if gaps.is_empty() {
             let mut unverified = vec![
@@ -576,11 +704,19 @@ fn exact_metadata_values(values: Vec<serde_json::Value>, metadata: &VerifiedSqlM
             plain: bool,
         },
     }
-    let mut found_object = false;
-    let mut found_columns = std::collections::BTreeSet::new();
+    let mut object_rows = 0usize;
+    let mut found_columns = std::collections::BTreeMap::new();
     for value in values {
-        let Ok(attested) = serde_json::from_value::<Attested>(value) else {
+        let relevant_kind = match metadata.object.engine {
+            SqlEngine::Postgres => ["postgres_object", "postgres_column"],
+            SqlEngine::SqlServer => ["sql_server_object", "sql_server_column"],
+        };
+        let kind = value.get("kind").and_then(serde_json::Value::as_str);
+        if !kind.is_some_and(|k| relevant_kind.contains(&k)) {
             continue;
+        }
+        let Ok(attested) = serde_json::from_value::<Attested>(value) else {
+            return false;
         };
         match attested {
             Attested::PostgresObject {
@@ -589,12 +725,13 @@ fn exact_metadata_values(values: Vec<serde_json::Value>, metadata: &VerifiedSqlM
                 object_id,
                 column_count,
             } if metadata.object.engine == SqlEngine::Postgres => {
-                if schema == metadata.object.schema
-                    && name == metadata.object.table
-                    && object_id == metadata.object.object_id
-                    && column_count as usize == metadata.columns.len()
-                {
-                    found_object = true;
+                if schema == metadata.object.schema && name == metadata.object.table {
+                    object_rows += 1;
+                    if object_id != metadata.object.object_id
+                        || column_count as usize != metadata.columns.len()
+                    {
+                        return false;
+                    }
                 }
             }
             Attested::SqlServerObject {
@@ -603,12 +740,13 @@ fn exact_metadata_values(values: Vec<serde_json::Value>, metadata: &VerifiedSqlM
                 object_id,
                 column_count,
             } if metadata.object.engine == SqlEngine::SqlServer => {
-                if schema == metadata.object.schema
-                    && name == metadata.object.table
-                    && object_id == metadata.object.object_id
-                    && column_count as usize == metadata.columns.len()
-                {
-                    found_object = true;
+                if schema == metadata.object.schema && name == metadata.object.table {
+                    object_rows += 1;
+                    if object_id != metadata.object.object_id
+                        || column_count as usize != metadata.columns.len()
+                    {
+                        return false;
+                    }
                 }
             }
             Attested::PostgresColumn {
@@ -617,13 +755,15 @@ fn exact_metadata_values(values: Vec<serde_json::Value>, metadata: &VerifiedSqlM
                 name,
                 plain,
             } if metadata.object.engine == SqlEngine::Postgres => {
-                if object_id == metadata.object.object_id
-                    && metadata
+                if object_id == metadata.object.object_id {
+                    if !metadata
                         .columns
                         .iter()
                         .any(|c| c.column_id == column_id && c.name == name && c.plain == plain)
-                {
-                    found_columns.insert(column_id);
+                        || found_columns.insert(column_id, (name, plain)).is_some()
+                    {
+                        return false;
+                    }
                 }
             }
             Attested::SqlServerColumn {
@@ -632,19 +772,21 @@ fn exact_metadata_values(values: Vec<serde_json::Value>, metadata: &VerifiedSqlM
                 name,
                 plain,
             } if metadata.object.engine == SqlEngine::SqlServer => {
-                if object_id == metadata.object.object_id
-                    && metadata
+                if object_id == metadata.object.object_id {
+                    if !metadata
                         .columns
                         .iter()
                         .any(|c| c.column_id == column_id && c.name == name && c.plain == plain)
-                {
-                    found_columns.insert(column_id);
+                        || found_columns.insert(column_id, (name, plain)).is_some()
+                    {
+                        return false;
+                    }
                 }
             }
             _ => {}
         }
     }
-    found_object && found_columns.len() == metadata.columns.len()
+    object_rows == 1 && found_columns.len() == metadata.columns.len()
 }
 
 #[derive(Clone, Debug)]
@@ -769,11 +911,29 @@ mod tests {
                         body_sha256: None,
                     },
                     RequiredCheck::Performance {
+                        scope_sha256: d(),
+                        object_id: 42,
                         workload_sha256: d(),
                         maximum_median_ms: 100,
                         maximum_p95_ms: 200,
                         minimum_warmups: 3,
                         minimum_samples: 15,
+                    },
+                ],
+                criteria: vec![
+                    CriterionRequirement {
+                        measure: "HTTP status".into(),
+                        comparator: CriterionComparator::AtLeast,
+                        threshold_bits: 200f64.to_bits(),
+                        unit: "status".into(),
+                        window: "after change".into(),
+                    },
+                    CriterionRequirement {
+                        measure: "Median latency".into(),
+                        comparator: CriterionComparator::AtMost,
+                        threshold_bits: 100f64.to_bits(),
+                        unit: "ms".into(),
+                        window: "after change".into(),
                     },
                 ],
             },
@@ -795,6 +955,7 @@ mod tests {
         };
         let trust = CatalogTrust {
             enrolled_keys: vec![entry.publisher_key.clone()],
+            source_digest: None,
         };
         (entry, trust)
     }
@@ -836,6 +997,7 @@ mod tests {
         let catalog = Catalog {
             entries: vec![entry],
             trust,
+            source_digest: None,
         };
         catalog.save_protected(&path).unwrap();
         Catalog::load_protected(&path, catalog.trust.clone()).unwrap();
@@ -843,6 +1005,85 @@ mod tests {
         std::fs::write(&path, b"corrupt").unwrap();
         assert!(Catalog::load_protected(&path, catalog.trust.clone()).is_err());
         let _ = std::fs::remove_file(path);
+    }
+    #[test]
+    fn stale_revision_two_cannot_replace_saved_revision_three() {
+        let rng = SystemRandom::new();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let key = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+        let (mut first, _) = entry();
+        first.publisher_key = STANDARD.encode(key.public_key().as_ref());
+        let sign = |e: &mut CatalogEntry| {
+            e.signature = STANDARD.encode(
+                key.sign(&recipe_bytes(&e.body, &e.provenance).unwrap())
+                    .as_ref(),
+            );
+        };
+        sign(&mut first);
+        let trust = CatalogTrust {
+            enrolled_keys: vec![first.publisher_key.clone()],
+            source_digest: None,
+        };
+        let path =
+            std::env::temp_dir().join(format!("relayne-recipe-cas-{}.dpapi", Uuid::new_v4()));
+        Catalog {
+            entries: vec![first.clone()],
+            trust: trust.clone(),
+            source_digest: None,
+        }
+        .save_protected(&path)
+        .unwrap();
+        let mut writer_three = Catalog::load_protected(&path, trust.clone()).unwrap();
+        let mut writer_two = Catalog::load_protected(&path, trust.clone()).unwrap();
+        let mut third = first.clone();
+        third.body.revision = 3;
+        sign(&mut third);
+        writer_three.import_signed(third).unwrap();
+        writer_three.save_protected(&path).unwrap();
+        let mut second = first;
+        second.body.revision = 2;
+        sign(&mut second);
+        writer_two.import_signed(second).unwrap();
+        assert!(
+            writer_two
+                .save_protected(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("reload")
+        );
+        assert_eq!(
+            Catalog::load_protected(&path, trust).unwrap().entries[0]
+                .body
+                .revision,
+            3
+        );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("lock"));
+    }
+    #[test]
+    fn competing_trust_enrollments_cannot_erase_one_another() {
+        let path = std::env::temp_dir().join(format!("relayne-trust-cas-{}.dpapi", Uuid::new_v4()));
+        CatalogTrust::default().save_protected(&path).unwrap();
+        let mut first = CatalogTrust::load_protected(&path).unwrap();
+        let mut stale = CatalogTrust::load_protected(&path).unwrap();
+        let key_a = STANDARD.encode([1u8; 32]);
+        let key_b = STANDARD.encode([2u8; 32]);
+        first.enroll(&key_a).unwrap();
+        first.save_protected(&path).unwrap();
+        stale.enroll(&key_b).unwrap();
+        assert!(
+            stale
+                .save_protected(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("reload")
+        );
+        assert_eq!(
+            CatalogTrust::load_protected(&path).unwrap().enrolled_keys,
+            vec![key_a]
+        );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("lock"));
     }
     #[test]
     fn statistics_acknowledgement_and_checks_are_bound_to_review_digest() {
@@ -912,6 +1153,104 @@ mod tests {
             ],
             metadata
         ));
+        let object = serde_json::json!({"kind":"postgres_object","schema":"public",
+            "name":"orders","object_id":42,"column_count":1});
+        let column = serde_json::json!({"kind":"postgres_column","object_id":42,
+            "column_id":1,"name":"status","plain":true});
+        assert!(!exact_metadata_values(
+            vec![
+                object.clone(),
+                column.clone(),
+                serde_json::json!({"kind":"postgres_column","object_id":42,"column_id":2,"name":"extra","plain":true})
+            ],
+            metadata
+        ));
+        assert!(!exact_metadata_values(
+            vec![object.clone(), column.clone(), column.clone()],
+            metadata
+        ));
+        assert!(!exact_metadata_values(
+            vec![
+                object.clone(),
+                column.clone(),
+                serde_json::json!({"kind":"postgres_object","schema":"public","name":"orders","object_id":43,"column_count":1})
+            ],
+            metadata
+        ));
+        assert!(!exact_metadata_values(
+            vec![
+                object,
+                column,
+                serde_json::json!({"kind":"postgres_column","object_id":42,"column_id":"bad","name":"status","plain":true})
+            ],
+            metadata
+        ));
+    }
+    #[test]
+    fn signed_check_selectors_reject_changed_criteria_and_unrelated_scopes() {
+        let (entry, _) = entry();
+        let CatalogAction::Sql { action, .. } = &entry.body.action else {
+            unreachable!()
+        };
+        let mut case = HelperCase::new(Default::default()).unwrap();
+        for requirement in &entry.body.verification.criteria {
+            let criterion = SuccessCriterion {
+                measure: requirement.measure.clone(),
+                comparator: match requirement.comparator {
+                    CriterionComparator::AtMost => Comparator::AtMost,
+                    CriterionComparator::AtLeast => Comparator::AtLeast,
+                    CriterionComparator::Equal => Comparator::Equal,
+                },
+                threshold: f64::from_bits(requirement.threshold_bits),
+                unit: requirement.unit.clone(),
+                window: requirement.window.clone(),
+                reviewed: true,
+            };
+            let index = case.intake().success_criteria.len();
+            case.revise(
+                case.revision(),
+                super::super::case::CaseEdit::SuccessCriterion(index, Some(criterion)),
+            )
+            .unwrap();
+        }
+        let gaps = check_gaps(&case, &entry.body.verification, action.object());
+        assert!(!gaps.iter().any(|g| g.contains("criteria")));
+        assert!(gaps.iter().any(|g| g.contains("HTTP")));
+        assert!(gaps.iter().any(|g| g.contains("Performance")));
+        let mut wrong = entry.body.verification.clone();
+        wrong.checks[0] = RequiredCheck::SqlFunctional {
+            scope_sha256: d(),
+            object_id: 43,
+            expected_row_count: 1,
+        };
+        assert!(
+            check_gaps(&case, &wrong, action.object())
+                .iter()
+                .any(|g| g.contains("SQL functional"))
+        );
+        let mut wrong = entry.body.verification.clone();
+        if let RequiredCheck::Performance { object_id, .. } = &mut wrong.checks[1] {
+            *object_id = 43;
+        }
+        assert!(
+            check_gaps(&case, &wrong, action.object())
+                .iter()
+                .any(|g| g.contains("Performance"))
+        );
+        wrong = entry.body.verification.clone();
+        wrong.criteria[0].threshold_bits = 201f64.to_bits();
+        assert!(
+            check_gaps(&case, &wrong, action.object())
+                .iter()
+                .any(|g| g.contains("criteria"))
+        );
+        wrong = entry.body.verification.clone();
+        wrong.criteria.pop();
+        assert!(
+            check_gaps(&case, &wrong, action.object())
+                .iter()
+                .any(|g| g.contains("criteria"))
+        );
     }
     #[test]
     fn signed_catalog_never_proposes_from_unbound_case_or_revoked_trust() {
@@ -920,6 +1259,7 @@ mod tests {
         let mut catalog = Catalog {
             entries: vec![entry.clone()],
             trust,
+            source_digest: None,
         };
         assert!(matches!(
             catalog.applicability(&case, &entry, case.evidence(), Utc::now()),
