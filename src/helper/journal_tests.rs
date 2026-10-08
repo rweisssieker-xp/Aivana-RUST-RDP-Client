@@ -82,7 +82,7 @@ fn intent_is_durable_before_dispatch_and_never_replayed_on_load() {
     );
     assert!(reloaded.mark_dispatch_started(id).is_err());
     reloaded
-        .reconcile(run, Some(IntentState::OutcomeUnknown))
+        .reconcile_inner(run, Some(IntentState::OutcomeUnknown), true)
         .unwrap();
     let event = reloaded
         .queue_outcome(id, ActionOutcomeV2::OutcomeUnknown)
@@ -127,7 +127,9 @@ fn ack_save_failure_keeps_exact_event_for_retry() {
     let run = permit.binding().run_id;
     let id = journal.record_intent(permit).unwrap();
     journal.mark_dispatch_started(id).unwrap();
-    journal.reconcile(run, Some(IntentState::Failed)).unwrap();
+    journal
+        .reconcile_inner(run, Some(IntentState::Failed), true)
+        .unwrap();
     let event = journal.queue_outcome(id, ActionOutcomeV2::Failed).unwrap();
     let saved = std::fs::read(&path).unwrap();
     std::fs::write(&path, b"conflict").unwrap();
@@ -169,19 +171,25 @@ fn acknowledged_unknown_can_be_corrected_once_with_a_linked_event() {
     let id = journal.record_intent(permit).unwrap();
     journal.mark_dispatch_started(id).unwrap();
     journal
-        .reconcile(run, Some(IntentState::OutcomeUnknown))
+        .reconcile_inner(run, Some(IntentState::OutcomeUnknown), true)
         .unwrap();
     let unknown = journal
         .queue_outcome(id, ActionOutcomeV2::OutcomeUnknown)
         .unwrap();
-    assert!(journal.reconcile(run, Some(IntentState::Verified)).is_err());
+    assert!(
+        journal
+            .reconcile_inner(run, Some(IntentState::Verified), true)
+            .is_err()
+    );
     journal
         .acknowledge_outcome(&ActionOutcomeAckV2 {
             event_id: unknown.event_id,
             accepted: true,
         })
         .unwrap();
-    journal.reconcile(run, Some(IntentState::Verified)).unwrap();
+    journal
+        .reconcile_inner(run, Some(IntentState::Verified), true)
+        .unwrap();
     let verified = journal
         .queue_outcome(id, ActionOutcomeV2::Verified)
         .unwrap();
@@ -201,5 +209,119 @@ fn acknowledged_unknown_can_be_corrected_once_with_a_linked_event() {
             .next()
             .unwrap(),
         &verified
+    );
+}
+
+#[test]
+fn atomic_operator_report_survives_save_fault_restart_and_intervention_correction() {
+    let path = path();
+    let mut journal = ActionJournal::load(&path).unwrap();
+    let permit = permit();
+    let run = permit.binding().run_id;
+    let id = journal.record_intent(permit).unwrap();
+    journal.mark_dispatch_started(id).unwrap();
+    let saved = std::fs::read(&path).unwrap();
+    std::fs::write(&path, b"conflicting protected file").unwrap();
+    assert!(
+        journal
+            .observe_and_queue_outcome(
+                id,
+                IntentState::OutcomeUnknown,
+                ActionOutcomeV2::OutcomeUnknown,
+                "TICKET-101"
+            )
+            .is_err()
+    );
+    std::fs::write(&path, saved).unwrap();
+    let mut recovered = ActionJournal::load(&path).unwrap();
+    assert_eq!(
+        recovered
+            .intents()
+            .iter()
+            .find(|i| i.id == id)
+            .unwrap()
+            .state,
+        IntentState::DispatchStarted
+    );
+    assert_eq!(recovered.pending_outcomes().count(), 0);
+    assert!(
+        recovered
+            .observe_and_queue_outcome(
+                id,
+                IntentState::Verified,
+                ActionOutcomeV2::Verified,
+                "TICKET-101"
+            )
+            .is_err()
+    );
+    let unknown = recovered
+        .observe_and_queue_outcome(
+            id,
+            IntentState::OutcomeUnknown,
+            ActionOutcomeV2::OutcomeUnknown,
+            "TICKET-101",
+        )
+        .unwrap();
+    let mut restarted = ActionJournal::load(&path).unwrap();
+    assert_eq!(
+        restarted
+            .intents()
+            .iter()
+            .find(|i| i.id == id)
+            .unwrap()
+            .state,
+        IntentState::OutcomeUnknown
+    );
+    assert_eq!(
+        restarted.pending_outcomes().next().unwrap().event_id,
+        unknown.event_id
+    );
+    assert_eq!(
+        restarted
+            .pending_outcomes()
+            .next()
+            .unwrap()
+            .operator_reference
+            .as_deref(),
+        Some("TICKET-101")
+    );
+    assert!(
+        restarted
+            .observe_and_queue_outcome(
+                id,
+                IntentState::NeedsIntervention,
+                ActionOutcomeV2::NeedsIntervention,
+                "TICKET-102"
+            )
+            .is_err()
+    );
+    restarted
+        .acknowledge_outcome(&ActionOutcomeAckV2 {
+            event_id: unknown.event_id,
+            accepted: true,
+        })
+        .unwrap();
+    let intervention = restarted
+        .observe_and_queue_outcome(
+            id,
+            IntentState::NeedsIntervention,
+            ActionOutcomeV2::NeedsIntervention,
+            "TICKET-102",
+        )
+        .unwrap();
+    assert_eq!(intervention.sequence, 2);
+    assert_eq!(intervention.previous_event_id, Some(unknown.event_id));
+    assert_eq!(
+        ActionJournal::load(&path)
+            .unwrap()
+            .pending_outcomes()
+            .next()
+            .unwrap()
+            .event_id,
+        intervention.event_id
+    );
+    assert_eq!(
+        restarted.reconcile(run, None).unwrap(),
+        Reconciliation::NeedsIntervention
     );
 }

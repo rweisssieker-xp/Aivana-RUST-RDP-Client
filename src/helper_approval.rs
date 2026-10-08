@@ -229,6 +229,9 @@ pub struct ActionOutcomeEventV2 {
     pub run_id: Uuid,
     pub fingerprint: Digest,
     pub outcome: ActionOutcomeV2,
+    /// Human reconciliation reference only; never a native verification proof.
+    #[serde(default)]
+    pub operator_reference: Option<String>,
     pub occurred_at: DateTime<Utc>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

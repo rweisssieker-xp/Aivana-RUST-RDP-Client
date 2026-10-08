@@ -208,6 +208,7 @@ fn actual_client_routes_enforce_two_people_exact_binding_and_one_consumption() {
         run_id: b.run_id,
         fingerprint: receipt.receipt().fingerprint.clone(),
         outcome: ActionOutcomeV2::OutcomeUnknown,
+        operator_reference: Some("operator ticket CASE-1".into()),
         occurred_at: Utc::now(),
     };
     assert!(client.report_action_outcome_v2(&event).unwrap().accepted);

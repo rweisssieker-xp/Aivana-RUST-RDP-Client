@@ -469,6 +469,9 @@ pub(super) fn serve(
             || event.occurred_at > now + Duration::minutes(1)
             || event.occurred_at < now - Duration::days(90)
             || !crate::helper_action::valid_digest(&event.fingerprint)
+            || event.operator_reference.as_ref().is_some_and(|reference| {
+                reference.len() > 256 || reference.chars().any(char::is_control)
+            })
         {
             err(request, 400, "Invalid action outcome");
             return Ok(());

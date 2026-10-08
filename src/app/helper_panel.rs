@@ -26,7 +26,8 @@ struct ActionUiState {
     approval: Option<crate::helper_approval::ActionApprovalV2>,
     receipt: Option<crate::team_client::VerifiedConsumeV2>,
     recovered: Vec<crate::helper_approval::ActionApprovalV2>,
-    outcome_observed: bool,
+    lookup_approval_id: String,
+    outcome_notes: HashMap<(Uuid, Uuid), String>,
     intent: Option<crate::helper::journal::IntentId>,
     consume_attempted: bool,
 }
@@ -202,6 +203,10 @@ impl HelperState {
         self.reviewed_proposal = None;
         self.action_ui.approval = None;
         self.action_ui.receipt = None;
+        self.action_ui.pending = None;
+        self.action_ui.recovered.clear();
+        self.action_ui.lookup_approval_id.clear();
+        self.action_ui.outcome_notes.clear();
         self.action_ui.intent = None;
         self.action_ui.consume_attempted = false;
         self.statistics_limit_acknowledged = false;
@@ -236,6 +241,10 @@ impl HelperState {
         self.reviewed_proposal = None;
         self.action_ui.approval = None;
         self.action_ui.receipt = None;
+        self.action_ui.pending = None;
+        self.action_ui.recovered.clear();
+        self.action_ui.lookup_approval_id.clear();
+        self.action_ui.outcome_notes.clear();
         self.action_ui.intent = None;
         self.action_ui.consume_attempted = false;
         self.statistics_limit_acknowledged = false;
@@ -365,6 +374,11 @@ impl AivanaApp {
             self.helper.action_ui.pending = None;
             match result {
                 Ok(ActionUiEvent::Identity(org)) => {
+                    if self.helper.action_ui.organization.as_deref() != Some(org.as_str()) {
+                        self.helper.action_ui.recovered.clear();
+                        self.helper.action_ui.lookup_approval_id.clear();
+                        self.helper.action_ui.outcome_notes.clear();
+                    }
                     self.helper.action_ui.organization = Some(org);
                     self.helper.action_ui.organization_confirmed = false;
                     self.helper.notice =
@@ -472,6 +486,27 @@ impl AivanaApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn operator_run_reference_is_cleared_on_case_selection_and_edit() {
+        let dir =
+            std::env::temp_dir().join(format!("relayne-helper-run-context-{}", Uuid::new_v4()));
+        let mut state = HelperState::at_path(dir.join("cases.dpapi"));
+        state.create();
+        let first = state.selected.unwrap();
+        state
+            .action_ui
+            .outcome_notes
+            .insert((first, Uuid::new_v4()), "TICKET-FIRST".into());
+        state.create();
+        assert!(state.action_ui.outcome_notes.is_empty());
+        let second = state.selected.unwrap();
+        state
+            .action_ui
+            .outcome_notes
+            .insert((second, Uuid::new_v4()), "TICKET-SECOND".into());
+        state.revise(CaseEdit::Description(Answer::Known("Changed case".into())));
+        assert!(state.action_ui.outcome_notes.is_empty());
+    }
     #[test]
     fn navigation_save_and_answers_dispatch_zero_jobs() {
         let ctx = egui::Context::default();

@@ -163,6 +163,14 @@ impl ActionJournal {
                         && event.previous_event_id.is_none(),
                     "Invalid outcome event binding"
                 );
+                ensure!(
+                    event
+                        .operator_reference
+                        .as_ref()
+                        .is_none_or(|reference| reference.len() <= 256
+                            && !reference.chars().any(char::is_control)),
+                    "Invalid operator reference"
+                );
             }
             let mut previous = item.outcome_event.as_ref();
             for correction in &item.outcome_corrections {
@@ -179,6 +187,14 @@ impl ActionJournal {
                         && event.run_id == item.run_id
                         && event.fingerprint == item.binding_fingerprint,
                     "Invalid outcome correction chain"
+                );
+                ensure!(
+                    event
+                        .operator_reference
+                        .as_ref()
+                        .is_none_or(|reference| reference.len() <= 256
+                            && !reference.chars().any(char::is_control)),
+                    "Invalid correction reference"
                 );
                 previous = Some(event);
             }
@@ -306,6 +322,18 @@ impl ActionJournal {
         run_id: Uuid,
         observed: Option<IntentState>,
     ) -> Result<Reconciliation> {
+        ensure!(
+            observed.is_none(),
+            "Use an atomic outcome report for terminal transitions"
+        );
+        self.reconcile_inner(run_id, None, false)
+    }
+    fn reconcile_inner(
+        &mut self,
+        run_id: Uuid,
+        observed: Option<IntentState>,
+        persist: bool,
+    ) -> Result<Reconciliation> {
         let resulting = {
             let item = self
                 .intents
@@ -358,7 +386,7 @@ impl ActionJournal {
             }
             item.state
         };
-        if observed.is_some() {
+        if observed.is_some() && persist {
             self.save()?;
         }
         Ok(match resulting {
@@ -374,6 +402,15 @@ impl ActionJournal {
         &mut self,
         id: IntentId,
         outcome: ActionOutcomeV2,
+    ) -> Result<ActionOutcomeEventV2> {
+        self.queue_outcome_inner(id, outcome, None, true)
+    }
+    fn queue_outcome_inner(
+        &mut self,
+        id: IntentId,
+        outcome: ActionOutcomeV2,
+        operator_reference: Option<&str>,
+        persist: bool,
     ) -> Result<ActionOutcomeEventV2> {
         let item = self
             .intents
@@ -427,6 +464,7 @@ impl ActionJournal {
             run_id: item.run_id,
             fingerprint: item.binding_fingerprint.clone(),
             outcome,
+            operator_reference: operator_reference.map(str::to_owned),
             occurred_at: Utc::now(),
         };
         if item.outcome_event.is_some() {
@@ -438,7 +476,44 @@ impl ActionJournal {
             item.outcome_event = Some(event.clone());
         }
         item.updated_at = Utc::now();
-        self.save()?;
+        if persist {
+            self.save()?;
+        }
+        Ok(event)
+    }
+    /// One protected write publishes both the observed state and its exact
+    /// report event. A failed save leaves the caller's journal unchanged.
+    pub fn observe_and_queue_outcome(
+        &mut self,
+        id: IntentId,
+        state: IntentState,
+        outcome: ActionOutcomeV2,
+        operator_reference: &str,
+    ) -> Result<ActionOutcomeEventV2> {
+        ensure!(
+            operator_reference.trim().len() >= 3
+                && operator_reference.len() <= 256
+                && !operator_reference.chars().any(char::is_control),
+            "Operator reference must be 3–256 printable characters"
+        );
+        ensure!(
+            matches!(
+                outcome,
+                ActionOutcomeV2::OutcomeUnknown | ActionOutcomeV2::NeedsIntervention
+            ),
+            "Operator reports cannot assert protected SQL verification"
+        );
+        let run_id = self
+            .intents
+            .iter()
+            .find(|i| i.id == id)
+            .ok_or_else(|| anyhow::anyhow!("Run intent missing"))?
+            .run_id;
+        let mut next = self.clone();
+        next.reconcile_inner(run_id, Some(state), false)?;
+        let event = next.queue_outcome_inner(id, outcome, Some(operator_reference), false)?;
+        next.save()?;
+        *self = next;
         Ok(event)
     }
     pub fn acknowledge_outcome(&mut self, ack: &ActionOutcomeAckV2) -> Result<()> {
