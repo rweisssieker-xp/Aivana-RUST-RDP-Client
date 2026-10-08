@@ -581,6 +581,8 @@ mod peer_verification_tests {
                 let trigger = cancel.clone();
                 let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let started_in_verifier = started.clone();
+                let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let finished_in_verifier = finished.clone();
                 let reviewed_hash = "a".repeat(64);
                 let deadline = Instant::now() + std::time::Duration::from_millis(70);
                 if cancel_first {
@@ -598,7 +600,9 @@ mod peer_verification_tests {
                     move |handle, _, _, _, _| {
                         started_in_verifier.store(true, Ordering::SeqCst);
                         std::thread::sleep(std::time::Duration::from_millis(220));
-                        Ok(handle.try_clone()?)
+                        let verified = handle.try_clone()?;
+                        finished_in_verifier.store(true, Ordering::SeqCst);
+                        Ok(verified)
                     },
                 );
                 assert!(
@@ -619,6 +623,13 @@ mod peer_verification_tests {
                     matches!(read, Ok(Ok(0)) | Err(_)),
                     "expired verification wrote HTTP bytes"
                 );
+                tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                    while !finished.load(Ordering::SeqCst) {
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .unwrap();
             }
         });
     }
@@ -688,7 +699,7 @@ mod peer_verification_tests {
                 &"a".repeat(64),
                 &CancellationToken::new(),
                 Instant::now() + std::time::Duration::from_millis(60),
-                semaphore,
+                semaphore.clone(),
                 move |_, _, _, _, _| {
                     entered_verifier.fetch_add(1, Ordering::SeqCst);
                     anyhow::bail!("Unexpected verifier entry")
@@ -701,7 +712,7 @@ mod peer_verification_tests {
             release_tx.send(()).unwrap();
             release_tx.send(()).unwrap();
             tokio::time::timeout(std::time::Duration::from_secs(1), async {
-                while active.load(Ordering::SeqCst) != 0 {
+                while active.load(Ordering::SeqCst) != 0 || semaphore.available_permits() != 2 {
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 }
             })
