@@ -133,9 +133,12 @@ impl CurrentProbeAuthority for SnapshotProbeAuthority {
             ensure!(
                 matches!(
                     request.scope,
-                    BoundScope::AzureVm { .. } | BoundScope::AwsEc2 { .. }
+                    BoundScope::AzureVm { .. }
+                        | BoundScope::AwsEc2 { .. }
+                        | BoundScope::Docker { .. }
+                        | BoundScope::Kubernetes { .. }
                 ),
-                "No profile target"
+                "Unsupported non-profile scope"
             );
         }
         Ok(())
@@ -426,6 +429,16 @@ pub fn built_in_registry() -> Result<CapabilityRegistry> {
             CapabilityId::SystemResources | CapabilityId::ServiceStatus => {
                 registry.register(descriptor, Arc::new(super::adapters::SystemAdapter))?
             }
+            CapabilityId::DockerContainerInspect | CapabilityId::DockerContainerStats => registry
+                .register(
+                descriptor,
+                Arc::new(super::adapters::containers::DockerAdapter),
+            )?,
+            CapabilityId::KubernetesWorkloadStatus | CapabilityId::KubernetesEvents => registry
+                .register(
+                    descriptor,
+                    Arc::new(super::adapters::containers::KubernetesAdapter),
+                )?,
             _ => {}
         }
     }

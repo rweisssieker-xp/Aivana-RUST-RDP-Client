@@ -39,17 +39,21 @@ fn current_profile_matches(scope: &BoundScope, profiles: &[ConnectionProfile]) -
     ) {
         return true;
     }
-    let profile_matches = scope
-        .target()
-        .is_some_and(|target| profiles.iter().any(|profile| target.matches(profile)));
-    profile_matches
-        && match scope {
-            BoundScope::WindowsWinRm { identity, .. } => {
-                crate::helper::scope::current_windows_identity()
-                    .is_ok_and(|current| current == *identity)
+    if let Some(target) = scope.target() {
+        profiles.iter().any(|profile| target.matches(profile))
+            && match scope {
+                BoundScope::WindowsWinRm { identity, .. } => {
+                    crate::helper::scope::current_windows_identity()
+                        .is_ok_and(|current| current == *identity)
+                }
+                _ => true,
             }
-            _ => true,
-        }
+    } else {
+        matches!(
+            scope,
+            BoundScope::Docker { .. } | BoundScope::Kubernetes { .. }
+        ) && scope.validate().is_ok()
+    }
 }
 
 fn supported(scope: &BoundScope) -> Option<(CapabilityId, ProbeParams)> {
@@ -92,6 +96,14 @@ fn supported(scope: &BoundScope) -> Option<(CapabilityId, ProbeParams)> {
             credential: Some(_),
             ..
         } => Some((CapabilityId::AwsEc2Status, ProbeParams::CloudInstance)),
+        BoundScope::Docker { .. } => Some((
+            CapabilityId::DockerContainerInspect,
+            ProbeParams::DockerInspect,
+        )),
+        BoundScope::Kubernetes { .. } => Some((
+            CapabilityId::KubernetesWorkloadStatus,
+            ProbeParams::KubernetesStatus,
+        )),
         _ => None,
     }
 }
@@ -110,6 +122,14 @@ fn displayed_capabilities(scope: &BoundScope) -> &'static [CapabilityId] {
         BoundScope::Database { .. } => &[CapabilityId::SqlRead],
         BoundScope::AzureVm { .. } => &[CapabilityId::AzureVmResourceHealth],
         BoundScope::AwsEc2 { .. } => &[CapabilityId::AwsEc2Status],
+        BoundScope::Docker { .. } => &[
+            CapabilityId::DockerContainerInspect,
+            CapabilityId::DockerContainerStats,
+        ],
+        BoundScope::Kubernetes { .. } => &[
+            CapabilityId::KubernetesWorkloadStatus,
+            CapabilityId::KubernetesEvents,
+        ],
         _ => &[CapabilityId::NetworkReachability],
     }
 }
@@ -181,7 +201,7 @@ pub(super) fn show(
     ui.label(
         "Collection uses a registered read probe on the reviewed endpoint. AI consent is separate.",
     );
-    ui.label("Remote permissions remain unknown until a probe reports them. TCP and HTTP only establish reachability or HTTP status.");
+    ui.label("Container reads verify reviewed context, target and current CLI principal first. The CLI does not use the protected vault secret, so observations remain partial.");
     if let Some(worker) = state.worker.as_ref() {
         ui.label(format!(
             "Captures: {} running, {} queued",
@@ -228,6 +248,12 @@ pub(super) fn show(
             BoundScope::Linux { .. } => {
                 "Linux SSH requires a current-identity scope without saved credential"
             }
+            BoundScope::Docker { .. } => {
+                "Docker selected container inspect / single stats snapshot"
+            }
+            BoundScope::Kubernetes { .. } => {
+                "Kubernetes selected workload status / UID-filtered events"
+            }
             _ => "No executable adapter in this wave",
         };
         ui.horizontal(|ui| {
@@ -249,12 +275,42 @@ pub(super) fn show(
                         credential_resolver
                             .as_ref()
                             .map(|resolver| resolver as &dyn SecretResolver),
-                    ) && tool_ready,
+                    ) && tool_ready
+                        && (scope.credential().is_some()
+                            || !matches!(
+                                scope,
+                                BoundScope::Docker { .. } | BoundScope::Kubernetes { .. }
+                            )),
                     egui::Button::new("Collect"),
                 )
                 .clicked()
             {
                 state.collect(case.id(), index, profiles);
+            }
+            let (second, second_label) = match scope {
+                BoundScope::Docker { .. } => (
+                    Some((CapabilityId::DockerContainerStats, ProbeParams::DockerStats)),
+                    "Collect one stats snapshot",
+                ),
+                BoundScope::Kubernetes { .. } => (
+                    Some((
+                        CapabilityId::KubernetesEvents,
+                        ProbeParams::KubernetesEvents,
+                    )),
+                    "Collect related events",
+                ),
+                _ => (None, "Collect related events"),
+            };
+            if ui
+                .add_enabled(
+                    second.is_some() && profile_current && scope.credential().is_some(),
+                    egui::Button::new(second_label),
+                )
+                .clicked()
+            {
+                if let Some((capability, params)) = second {
+                    state.collect_with(case.id(), index, profiles, capability, params);
+                }
             }
         });
         ui.label(format!(
@@ -487,6 +543,28 @@ impl HelperState {
             current_profile_matches(&scope, profiles),
             "Saved endpoint changed"
         );
+        if matches!(
+            scope,
+            BoundScope::Docker { .. } | BoundScope::Kubernetes { .. }
+        ) {
+            ensure!(
+                supported(&scope) == Some((capability_id, params.clone()))
+                    || matches!(
+                        (&scope, capability_id, &params),
+                        (
+                            BoundScope::Docker { .. },
+                            CapabilityId::DockerContainerStats,
+                            ProbeParams::DockerStats
+                        ) | (
+                            BoundScope::Kubernetes { .. },
+                            CapabilityId::KubernetesEvents,
+                            ProbeParams::KubernetesEvents
+                        )
+                    ),
+                "Container operation differs from reviewed scope"
+            );
+            crate::helper::adapters::containers::validate_scoped_operation(&scope, capability_id)?;
+        }
         self.authority.publish(
             self.store
                 .as_ref()
@@ -765,7 +843,17 @@ mod tests {
             .unwrap()
             .revise(first, 2, CaseEdit::Scopes(vec![scope]))
             .unwrap();
-        let request_id = state.try_collect(first, 0, &[profile.clone()]).unwrap();
+        let request_id = state
+            .try_collect(
+                first,
+                0,
+                &[profile.clone()],
+                Some((
+                    CapabilityId::NetworkReachability,
+                    ProbeParams::Network { port: profile.port },
+                )),
+            )
+            .unwrap();
         state.select(second);
         assert!(state.collect_jobs.contains_key(&request_id));
         for _ in 0..200 {

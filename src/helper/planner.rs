@@ -179,6 +179,19 @@ pub fn params_match(id: CapabilityId, params: &ProbeParams) -> bool {
                     | CapabilityId::AwsEc2Status,
                 ProbeParams::CloudInstance
             )
+            | (
+                CapabilityId::DockerContainerInspect,
+                ProbeParams::DockerInspect
+            )
+            | (CapabilityId::DockerContainerStats, ProbeParams::DockerStats)
+            | (
+                CapabilityId::KubernetesWorkloadStatus,
+                ProbeParams::KubernetesStatus
+            )
+            | (
+                CapabilityId::KubernetesEvents,
+                ProbeParams::KubernetesEvents
+            )
     );
     let digest = match params {
         ProbeParams::Service { service_digest } => Some(service_digest.as_str()),

@@ -15,6 +15,14 @@ pub enum CapabilityId {
     SqlWorkloadBaseline,
     SqlWorkloadRehearsal,
     ContainerStatus,
+    #[serde(rename = "docker.container.inspect.v1")]
+    DockerContainerInspect,
+    #[serde(rename = "docker.container.stats.v1")]
+    DockerContainerStats,
+    #[serde(rename = "kubernetes.workload.status.v1")]
+    KubernetesWorkloadStatus,
+    #[serde(rename = "kubernetes.events.v1")]
+    KubernetesEvents,
     CloudInstanceStatus,
     AzureVmIdentity,
     AzureVmResourceHealth,
@@ -76,6 +84,10 @@ pub enum ProbeParams {
         workload_digest: String,
     },
     Container,
+    DockerInspect,
+    DockerStats,
+    KubernetesStatus,
+    KubernetesEvents,
     CloudInstance,
 }
 
@@ -156,6 +168,26 @@ impl CapabilityManifest {
             ),
             declaration(
                 ContainerStatus,
+                Diagnostic,
+                vec![ReviewedScope, ReadCredential],
+            ),
+            declaration(
+                DockerContainerInspect,
+                Diagnostic,
+                vec![ReviewedScope, ReadCredential],
+            ),
+            declaration(
+                DockerContainerStats,
+                Diagnostic,
+                vec![ReviewedScope, ReadCredential],
+            ),
+            declaration(
+                KubernetesWorkloadStatus,
+                Diagnostic,
+                vec![ReviewedScope, ReadCredential],
+            ),
+            declaration(
+                KubernetesEvents,
                 Diagnostic,
                 vec![ReviewedScope, ReadCredential],
             ),

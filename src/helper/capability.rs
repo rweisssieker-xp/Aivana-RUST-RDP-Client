@@ -254,6 +254,26 @@ impl CapabilityRegistry {
                 ProbeParams::CloudInstance,
                 BoundScope::AzureVm { .. } | BoundScope::AwsEc2 { .. },
             ) => {}
+            (
+                CapabilityId::DockerContainerInspect,
+                ProbeParams::DockerInspect,
+                BoundScope::Docker { .. },
+            )
+            | (
+                CapabilityId::DockerContainerStats,
+                ProbeParams::DockerStats,
+                BoundScope::Docker { .. },
+            )
+            | (
+                CapabilityId::KubernetesWorkloadStatus,
+                ProbeParams::KubernetesStatus,
+                BoundScope::Kubernetes { .. },
+            )
+            | (
+                CapabilityId::KubernetesEvents,
+                ProbeParams::KubernetesEvents,
+                BoundScope::Kubernetes { .. },
+            ) => {}
             _ => anyhow::bail!("Capability parameters or scope mismatch"),
         }
         ensure!(
@@ -279,6 +299,18 @@ impl CapabilityRegistry {
                 ),
                 "Cloud read credential required"
             );
+        }
+        if matches!(
+            request.capability_id,
+            CapabilityId::DockerContainerInspect
+                | CapabilityId::DockerContainerStats
+                | CapabilityId::KubernetesWorkloadStatus
+                | CapabilityId::KubernetesEvents
+        ) {
+            super::adapters::containers::validate_scoped_operation(
+                &request.scope,
+                request.capability_id,
+            )?;
         }
         ensure!(descriptor.version > 0, "Capability version unavailable");
         Ok(())

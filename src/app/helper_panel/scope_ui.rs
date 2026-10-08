@@ -476,11 +476,15 @@ pub(super) fn show(
         }
         4 => {
             field(ui, "Daemon context", &mut editor.daemon_context);
-            field(ui, "Container ID", &mut editor.container_id);
+            field(ui, "Full container ID", &mut editor.container_id);
         }
         5 => {
             field(ui, "Context", &mut editor.context);
-            field(ui, "Cluster fingerprint", &mut editor.cluster_fingerprint);
+            field(
+                ui,
+                "Cluster endpoint/CA SHA-256 fingerprint",
+                &mut editor.cluster_fingerprint,
+            );
             field(ui, "Namespace", &mut editor.namespace);
             field(ui, "Resource kind", &mut editor.resource_kind);
             field(ui, "Resource name", &mut editor.resource_name);
@@ -520,7 +524,17 @@ pub(super) fn show(
                     });
                 field(ui, "Generation", &mut editor.credential_generation);
                 field(ui, "Principal", &mut editor.credential_principal);
-                field(ui, "Context", &mut editor.credential_context);
+                field(
+                    ui,
+                    if editor.kind == 4 {
+                        "Reviewed daemon ID"
+                    } else if editor.kind == 5 {
+                        "Reviewed Kubernetes context"
+                    } else {
+                        "Context"
+                    },
+                    &mut editor.credential_context,
+                );
             }
         });
     }

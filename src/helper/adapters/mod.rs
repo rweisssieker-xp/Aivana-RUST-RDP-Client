@@ -814,3 +814,8 @@ impl ProbeAdapter for SystemAdapter {
 #[cfg(test)]
 #[path = "system_tests.rs"]
 mod tests;
+
+pub mod containers;
+
+#[cfg(test)]
+mod containers_tests;
