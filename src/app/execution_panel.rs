@@ -648,6 +648,19 @@ impl AivanaApp {
     }
     fn execution_content(&mut self, ui: &mut Ui, recovery_only: bool) {
         ui.heading("Reviewed execution & test run");
+        if let Some(handoff) = &self.verification_handoff {
+            ui.group(|ui| {
+                ui.strong("Functional verification pending for Diagnostic Lab case");
+                ui.label(format!("Incident: {} · Case {}", handoff.incident, handoff.case_id));
+                ui.label(format!("Original target: {} · Profile {}", handoff.target.host, handoff.target.profile_id));
+                ui.small(format!("Diagnostic binding: {} · Source record: {} · Evidence IDs: {}", handoff.binding, handoff.source_record.as_deref().unwrap_or("standalone case"), handoff.source_evidence.join(" · ")));
+                if !self.selected_profile().is_some_and(|p| handoff.target.matches(p)) {
+                    ui.colored_label(tw::RED_600, "The original Windows profile changed or is not selected. This handoff cannot verify another target.");
+                } else {
+                    ui.label("Prepare and review the functional check for this exact target. Only a separate successful observed check recorded by this workflow can establish functional success; diagnostic matches do not.");
+                }
+            });
+        }
         ui.label("HTTP runtime slots as JSON (memory only; enter again for production access)");
         let runtime_editable = self.execution.http_runtime.is_none()
             && self.execution.remote.is_none()

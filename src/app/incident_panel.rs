@@ -86,10 +86,8 @@ impl AivanaApp {
             candidates.len()
         ));
         ui.label("Service changes from telemetry can only be narrowed down to the interval between captures. Event logs use computer clocks; clock differences may affect ordering.");
-        if ui
-            .button("Save encrypted metadata report")
-            .clicked()
-        {
+        ui.label("To investigate a specific failure, select its Windows profile above and use the event's Diagnostic Lab handoff. The handoff only prepares context; it runs no check.");
+        if ui.button("Save encrypted metadata report").clicked() {
             let result = (|| -> anyhow::Result<std::path::PathBuf> {
                 let path = app_data_file("relayne-incident-report.dpapi")?;
                 let bytes = serde_json::to_vec_pretty(
@@ -129,12 +127,36 @@ impl AivanaApp {
                 ));
                 ui.label(&r.title);
                 ui.small(format!("{} · Evidence: {}", r.id, r.evidence.join(" · ")));
+                if r.kind == Kind::Failure {
+                    let selected = self
+                        .incident
+                        .profile
+                        .and_then(|id| self.profiles.iter().find(|p| p.id == id));
+                    let source = selected.and_then(|p| {
+                        incident::Source::from_failure(r, &crate::mission::Target::from_profile(p))
+                            .ok()
+                    });
+                    let clicked = ui
+                        .add_enabled(
+                            source.is_some(),
+                            egui::Button::new("Investigate this failure in Diagnostic Lab"),
+                        )
+                        .clicked();
+                    if let (true, Some(source)) = (clicked, source) {
+                        self.selected_profile = Some(source.profile_id);
+                        self.intelligence.diagnostic.accept_incident(source);
+                        self.view = View::Intelligence;
+                    }
+                    if selected.is_none() {
+                        ui.small(
+                            "Choose the exact affected Windows profile to enable the handoff.",
+                        );
+                    }
+                }
             });
         }
         if records.is_empty() {
-            ui.label(
-                "No findings yet. Capture telemetry or run a reviewed job.",
-            );
+            ui.label("No findings yet. Capture telemetry or run a reviewed job.");
         }
     }
 }

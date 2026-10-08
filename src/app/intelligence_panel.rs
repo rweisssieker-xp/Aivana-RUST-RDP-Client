@@ -5,7 +5,7 @@ use crate::operations::{JobQueue, JobStatus};
 use std::sync::mpsc;
 
 pub(super) struct IntelligenceState {
-    diagnostic: super::diagnostic_panel::State,
+    pub(super) diagnostic: super::diagnostic_panel::State,
     book: Knowledge,
     error: Option<String>,
     objective: String,
@@ -167,6 +167,15 @@ impl AivanaApp {
         egui::CollapsingHeader::new("Narrow down causes with comparison tests").default_open(true).show(ui, |ui| {
             self.intelligence.diagnostic.draw(ui, diagnostic_profile.as_ref());
         });
+        if ui.button("Continue to reviewed functional verification …").clicked() {
+            match self.intelligence.diagnostic.verification_handoff(diagnostic_profile.as_ref()) {
+                Ok(handoff) => {
+                    self.verification_handoff = Some(handoff);
+                    self.view = View::Execution;
+                }
+                Err(error) => self.status = format!("Functional verification handoff unavailable: {error}"),
+            }
+        }
         if let Some(e) = &self.intelligence.error {
             ui.colored_label(tw::RED_600, e);
         }

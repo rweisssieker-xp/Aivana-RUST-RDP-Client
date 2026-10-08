@@ -165,6 +165,18 @@ pub struct Case {
     pub config: Config,
     pub created: DateTime<Utc>,
     pub observations: Vec<Observation>,
+    #[serde(default)]
+    pub source: Option<crate::incident::Source>,
+}
+/// Navigation only. Functional success is decided by the execution workflow's own evidence.
+#[derive(Clone, Debug)]
+pub struct VerificationHandoff {
+    pub case_id: Uuid,
+    pub binding: String,
+    pub target: Target,
+    pub incident: String,
+    pub source_record: Option<String>,
+    pub source_evidence: Vec<String>,
 }
 #[derive(Clone, Debug)]
 pub struct Request {
@@ -219,13 +231,55 @@ impl Case {
             config,
             created: now,
             observations: vec![],
+            source: None,
         })
     }
+    pub fn new_from_incident(
+        config: Config,
+        source: crate::incident::Source,
+        now: DateTime<Utc>,
+    ) -> Result<Self> {
+        let mut case = Self::new(config, now)?;
+        ensure!(
+            case.config.mode == Mode::ReadOnly
+                && case
+                    .config
+                    .target
+                    .as_ref()
+                    .is_some_and(|target| source.matches(target)),
+            "Incident and diagnostic target differ"
+        );
+        case.source = Some(source);
+        case.validate()?;
+        Ok(case)
+    }
     pub fn binding(&self) -> Result<String> {
-        hash(&(self.id, &self.config, self.created))
+        match &self.source {
+            Some(source) => hash(&(self.id, &self.config, self.created, source)),
+            None => hash(&(self.id, &self.config, self.created)),
+        }
     }
     pub fn validate(&self) -> Result<()> {
         self.config.validate()?;
+        if let Some(source) = &self.source {
+            ensure!(
+                self.config.mode == Mode::ReadOnly
+                    && self
+                        .config
+                        .target
+                        .as_ref()
+                        .is_some_and(|target| source.matches(target))
+                    && !source.record_id.is_empty()
+                    && source.record_id.len() <= 256
+                    && source.title.len() <= 512
+                    && source.evidence.len() <= 16
+                    && source
+                        .evidence
+                        .iter()
+                        .all(|id| !id.is_empty() && id.len() <= 256),
+                "Invalid incident source for diagnostic target"
+            );
+        }
         ensure!(self.observations.len() <= 64, "Evidence limit reached");
         let binding = self.binding()?;
         let mut ids = std::collections::BTreeSet::new();
@@ -239,6 +293,37 @@ impl Case {
             );
         }
         Ok(())
+    }
+    pub fn verification_handoff(
+        &self,
+        profile: &crate::models::ConnectionProfile,
+    ) -> Result<VerificationHandoff> {
+        self.validate()?;
+        ensure!(
+            self.config.mode == Mode::ReadOnly,
+            "Simulation has no functional verification handoff"
+        );
+        let target = self
+            .config
+            .target
+            .as_ref()
+            .context("Diagnostic target is missing")?;
+        ensure!(
+            target.matches(profile),
+            "Select the original unchanged Windows profile"
+        );
+        Ok(VerificationHandoff {
+            case_id: self.id,
+            binding: self.binding()?,
+            target: target.clone(),
+            incident: self.config.incident.clone(),
+            source_record: self.source.as_ref().map(|s| s.record_id.clone()),
+            source_evidence: self
+                .source
+                .as_ref()
+                .map(|s| s.evidence.clone())
+                .unwrap_or_default(),
+        })
     }
     fn fresh(&self, now: DateTime<Utc>) -> BTreeMap<Probe, &Observation> {
         let mut result = BTreeMap::new();
@@ -550,6 +635,9 @@ fn lock(path: &Path) -> Result<std::fs::File> {
     Ok(options.open(path.with_extension("lock"))?)
 }
 
+#[cfg(test)]
+#[path = "diagnostic_lab/handoff_tests.rs"]
+mod handoff_tests;
 #[cfg(test)]
 #[path = "diagnostic_lab/tests.rs"]
 mod tests;

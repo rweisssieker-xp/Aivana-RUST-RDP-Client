@@ -19,6 +19,8 @@ pub(super) struct State {
     mode: Mode,
     scenario: Scenario,
     review: Option<Config>,
+    source: Option<crate::incident::Source>,
+    review_source: Option<crate::incident::Source>,
     chosen: Option<Probe>,
     ai_json: String,
     ai_preview: Option<d::Proposal>,
@@ -52,6 +54,8 @@ impl Default for State {
             mode: Mode::Simulation,
             scenario: Scenario::Service,
             review: None,
+            source: None,
+            review_source: None,
             chosen: None,
             ai_json: String::new(),
             ai_preview: None,
@@ -90,6 +94,28 @@ impl Default for State {
     }
 }
 impl State {
+    pub(super) fn accept_incident(&mut self, source: crate::incident::Source) {
+        self.incident = source.title.clone();
+        self.mode = Mode::ReadOnly;
+        self.source = Some(source);
+        self.review = None;
+        self.review_source = None;
+        self.selected = None;
+        self.clear_review();
+        self.notice = "Incident context loaded. Complete the case settings, then review and save; no check has run.".into();
+    }
+    pub(super) fn verification_handoff(
+        &self,
+        profile: Option<&ConnectionProfile>,
+    ) -> anyhow::Result<d::VerificationHandoff> {
+        let case = self
+            .selected
+            .and_then(|id| self.book.cases.iter().find(|c| c.id == id))
+            .ok_or_else(|| anyhow::anyhow!("Select a saved diagnostic case"))?;
+        case.verification_handoff(
+            profile.ok_or_else(|| anyhow::anyhow!("Select the original Windows profile"))?,
+        )
+    }
     fn save(&mut self, mut next: Book) -> bool {
         if self.store_error {
             return false;
@@ -249,7 +275,15 @@ impl State {
                 if changed{self.clear_review();}
             });
             ui.collapsing("Prepare new diagnostic case",|ui|{
-                ui.horizontal_wrapped(|ui|{ui.selectable_value(&mut self.mode,Mode::Simulation,"Dev simulation (no connection)");ui.selectable_value(&mut self.mode,Mode::ReadOnly,"Subsequent read-only check");});
+                ui.horizontal_wrapped(|ui|{if self.source.is_none(){ui.selectable_value(&mut self.mode,Mode::Simulation,"Dev simulation (no connection)");}ui.selectable_value(&mut self.mode,Mode::ReadOnly,"Subsequent read-only check");});
+                if let Some(source) = &self.source {
+                    ui.label(format!("Incident source: {} · {} UTC", source.record_id, source.observed_at.format("%Y-%m-%d %H:%M:%S")));
+                    ui.small(format!("Source evidence: {}", source.evidence.join(" · ")));
+                    if !profile.is_some_and(|p| source.matches(&Target::from_profile(p))) {
+                        ui.colored_label(egui::Color32::RED, "Select the original unchanged Windows profile before preparing this case.");
+                    }
+                    if ui.button("Clear incident context").clicked() { self.source = None; self.review = None; self.review_source = None; }
+                }
                 if self.mode==Mode::Simulation {
                     egui::ComboBox::from_id_salt("diagnostic_scenario").selected_text(self.scenario.label()).show_ui(ui,|ui|{for s in Scenario::ALL{ui.selectable_value(&mut self.scenario,s,s.label());}});
                     ui.label("Example values and simulated results; no claims about real systems.");
@@ -260,7 +294,12 @@ impl State {
                 ui.horizontal(|ui|{ui.label("Public HTTP(S) dependency check");ui.text_edit_singleline(&mut self.dependency);});
                 if ui.add_enabled(!self.store_error && self.book.cases.len()<64,egui::Button::new("Create case preview")).clicked(){
                     let config=Config{mode:self.mode,scenario:if self.mode==Mode::Simulation{Some(self.scenario)}else{None},target:if self.mode==Mode::ReadOnly{profile.map(Target::from_profile)}else{None},incident:self.incident.clone(),service:self.service.trim().into(),application:self.application.trim().into(),dependency:self.dependency.trim().into()};
-                    match config.validate(){Ok(())=>self.review=Some(config),Err(e)=>self.notice=e.to_string()}
+                    match config.validate().and_then(|()| {
+                        if let Some(source) = &self.source {
+                            anyhow::ensure!(config.target.as_ref().is_some_and(|t| source.matches(t)), "Incident source and selected profile differ");
+                        }
+                        Ok(())
+                    }){Ok(())=>{self.review=Some(config);self.review_source=self.source.clone();},Err(e)=>self.notice=e.to_string()}
                 }
                 if let Some(config)=self.review.clone(){
                     ui.group(|ui|{
@@ -269,12 +308,13 @@ impl State {
                         ui.label(format!("{:?} · {}\nService: {}\nApplication: {}\nDependency: {}",config.mode,config.target.as_ref().map(|t|t.host.as_str()).unwrap_or("no host"),config.service,config.application,config.dependency));
                         ui.label("Saving does not run a check. Each real read-only check then requires its own preview and approval.");
                         if ui.add_enabled(!self.store_error,egui::Button::new("Save this case")).clicked(){
-                            match Case::new(config,Utc::now()){
-                                Ok(case)=>{let id=case.id;let mut next=self.book.clone();next.cases.push(case);if self.save(next){self.selected=Some(id);self.review=None;self.clear_review();}}
+                            let result = match self.review_source.clone() { Some(source) => Case::new_from_incident(config,source,Utc::now()), None => Case::new(config,Utc::now()) };
+                            match result{
+                                Ok(case)=>{let id=case.id;let mut next=self.book.clone();next.cases.push(case);if self.save(next){self.selected=Some(id);self.review=None;self.review_source=None;self.source=None;self.clear_review();}}
                                 Err(e)=>self.notice=e.to_string(),
                             }
                         }
-                        if ui.button("Discard case preview").clicked(){self.review=None;}
+                        if ui.button("Discard case preview").clicked(){self.review=None;self.review_source=None;}
                     });
                 }
             });
@@ -293,6 +333,16 @@ impl State {
                 "Read-only diagnosis — no repair approval"
             });
             ui.label(&case.config.incident);
+            ui.strong("1. Scope and source");
+            if let Some(source) = &case.source {
+                ui.label(format!("Selected failure {} at {} UTC. Historical evidence; timing alone does not establish cause.", source.record_id, source.observed_at.format("%Y-%m-%d %H:%M:%S")));
+                ui.small(format!(
+                    "Source evidence IDs: {}",
+                    source.evidence.join(" · ")
+                ));
+            } else {
+                ui.label("Standalone case: no incident timeline event attached.");
+            }
             ui.label(format!(
                 "Check environment: {} · Service: {}",
                 case.config
@@ -305,6 +355,36 @@ impl State {
             if let Some(s) = case.config.scenario {
                 ui.label(format!("Simulated scenario: {}", s.label()));
             }
+            ui.strong("2. Approved read-only checks");
+            for probe in Probe::ALL {
+                let latest = case
+                    .observations
+                    .iter()
+                    .filter(|o| o.probe == probe && o.at <= now)
+                    .max_by_key(|o| o.at);
+                let status = match latest {
+                    None => "Missing: no observation".to_owned(),
+                    Some(o) if now.signed_duration_since(o.at) > chrono::Duration::minutes(5) => {
+                        format!(
+                            "Stale: last {} at {} UTC",
+                            o.value.label(),
+                            o.at.format("%H:%M:%S")
+                        )
+                    }
+                    Some(o) if o.value == Value::Unknown => format!(
+                        "Missing: check was inconclusive at {} UTC",
+                        o.at.format("%H:%M:%S")
+                    ),
+                    Some(o) => format!(
+                        "Observed {} at {} UTC · request {}",
+                        o.value.label(),
+                        o.at.format("%H:%M:%S"),
+                        o.request
+                    ),
+                };
+                ui.label(format!("{} — {}", probe.label(), status));
+            }
+            ui.strong("3. Interpret the model");
             ui.label(assessment.conclusion());
             for c in &assessment.candidates {
                 ui.collapsing(
@@ -341,6 +421,8 @@ impl State {
                     ));
                 }
             }
+            ui.strong("4. Functional verification");
+            ui.label("Pending. A diagnostic model match, including four of four checks, is not evidence that the affected function works or that a repair succeeded. Use the reviewed execution workflow for a separate, observed functional check with its own time and evidence.");
             ui.add_enabled_ui(self.pending.is_none() && !self.store_error,|ui|{
                 egui::ComboBox::from_id_salt("diagnostic_probe").selected_text(self.chosen.or(assessment.next).map(|p|p.label()).unwrap_or("No check available")).show_ui(ui,|ui|{
                     for p in Probe::ALL {if case.request(p,now).is_ok(){ui.selectable_value(&mut self.chosen,Some(p),p.label());}}
@@ -426,6 +508,29 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn accepting_incident_context_is_inert_and_requires_real_case_preparation() {
+        let mut state = State::default();
+        let before_cases = state.book.cases.len();
+        let profile = ConnectionProfile::sample("Affected", "affected.example.test", "", false);
+        let target = Target::from_profile(&profile);
+        let source = crate::incident::Source {
+            record_id: "failure-1".into(),
+            profile_id: profile.id,
+            endpoint: crate::incident::endpoint_key(&target),
+            observed_at: Utc::now(),
+            title: "Application unavailable".into(),
+            evidence: vec!["capture-1".into()],
+        };
+        state.accept_incident(source);
+        assert_eq!(state.mode, Mode::ReadOnly);
+        assert!(state.selected.is_none());
+        assert!(state.review.is_none());
+        assert_eq!(state.source.as_ref().unwrap().evidence, vec!["capture-1"]);
+        assert_eq!(state.book.cases.len(), before_cases);
+        assert!(state.queue.jobs.is_empty());
+        assert!(state.pending.is_none());
+    }
     #[test]
     fn diagnostic_panel_is_offline_by_default_and_renders() {
         let ctx = egui::Context::default();

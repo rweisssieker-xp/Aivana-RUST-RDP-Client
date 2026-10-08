@@ -1,4 +1,5 @@
 //! Evidence-linked reconstruction; temporal association never proves causation.
+use anyhow::{Result, ensure};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -22,6 +23,37 @@ pub struct Record {
     pub kind: Kind,
     pub title: String,
     pub evidence: Vec<String>,
+}
+/// A historical failure and its evidence, bound to the selected saved endpoint.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Source {
+    pub record_id: String,
+    pub profile_id: Uuid,
+    pub endpoint: String,
+    pub observed_at: DateTime<Utc>,
+    pub title: String,
+    pub evidence: Vec<String>,
+}
+impl Source {
+    pub fn from_failure(record: &Record, target: &crate::mission::Target) -> Result<Self> {
+        ensure!(record.kind == Kind::Failure, "Select a documented failure");
+        ensure!(
+            record.profile == Some(target.profile_id)
+                && record.endpoint.as_deref() == Some(endpoint_key(target).as_str()),
+            "Incident and selected profile endpoint differ"
+        );
+        Ok(Self {
+            record_id: record.id.clone(),
+            profile_id: target.profile_id,
+            endpoint: endpoint_key(target),
+            observed_at: record.at,
+            title: record.title.clone(),
+            evidence: record.evidence.clone(),
+        })
+    }
+    pub fn matches(&self, target: &crate::mission::Target) -> bool {
+        self.profile_id == target.profile_id && self.endpoint == endpoint_key(target)
+    }
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct Hypothesis {
