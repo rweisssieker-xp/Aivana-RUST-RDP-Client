@@ -572,7 +572,7 @@ mod peer_verification_tests {
             .unwrap();
         runtime.block_on(async {
             for cancel_first in [false, true] {
-                let (path, mut server) = fixture();
+                let (path, server) = fixture();
                 let connected = tokio::spawn(async move {
                     server.connect().await.unwrap();
                     server

@@ -54,6 +54,7 @@ pub(super) fn reject_thread_impersonation() -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn image_sha256(path: &Path) -> Result<String> {
     image_sha256_with_guard(path, || Ok(()))
 }
