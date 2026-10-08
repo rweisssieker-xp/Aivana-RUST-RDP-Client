@@ -9,8 +9,9 @@ use std::{
         io::{AsRawHandle, FromRawHandle, OwnedHandle},
     },
     path::{Path, PathBuf},
+    time::Instant,
 };
-use tokio::net::windows::named_pipe::NamedPipeClient;
+use tokio_util::sync::CancellationToken;
 #[cfg(test)]
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
 use windows_sys::Win32::{
@@ -54,6 +55,19 @@ pub(super) fn reject_thread_impersonation() -> Result<()> {
 }
 
 pub(super) fn image_sha256(path: &Path) -> Result<String> {
+    image_sha256_with_guard(path, || Ok(()))
+}
+
+fn live(cancel: &CancellationToken, deadline: Instant) -> Result<()> {
+    ensure!(
+        !cancel.is_cancelled() && Instant::now() < deadline,
+        "Peer verification expired"
+    );
+    Ok(())
+}
+
+fn image_sha256_with_guard(path: &Path, mut guard: impl FnMut() -> Result<()>) -> Result<String> {
+    guard()?;
     let mut file = fs::File::open(path)?;
     ensure!(
         file.metadata()?.len() <= 512 * 1024 * 1024,
@@ -63,6 +77,7 @@ pub(super) fn image_sha256(path: &Path) -> Result<String> {
     let mut chunk = [0_u8; 64 * 1024];
     let mut total = 0_u64;
     loop {
+        guard()?;
         let n = file.read(&mut chunk)?;
         if n == 0 {
             break;
@@ -71,6 +86,7 @@ pub(super) fn image_sha256(path: &Path) -> Result<String> {
         ensure!(total <= 512 * 1024 * 1024, "Peer image too large");
         hash.update(&chunk[..n]);
     }
+    guard()?;
     Ok(format!("{:x}", hash.finalize()))
 }
 
@@ -184,7 +200,7 @@ fn signed_image(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn peer_process(pipe: &NamedPipeClient) -> Result<(OwnedHandle, PathBuf, u32)> {
+fn peer_process(pipe: &OwnedHandle) -> Result<(OwnedHandle, PathBuf, u32)> {
     unsafe {
         let mut pid = 0_u32;
         ensure!(
@@ -207,10 +223,13 @@ fn peer_process(pipe: &NamedPipeClient) -> Result<(OwnedHandle, PathBuf, u32)> {
 }
 
 pub(super) fn verify_pipe_peer(
-    pipe: &NamedPipeClient,
+    pipe: &OwnedHandle,
     pipe_path: &str,
     reviewed_image_sha256: &str,
+    cancel: &CancellationToken,
+    deadline: Instant,
 ) -> Result<OwnedHandle> {
+    live(cancel, deadline)?;
     reject_thread_impersonation()?;
     ensure!(
         reviewed_image_sha256.len() == 64
@@ -218,6 +237,7 @@ pub(super) fn verify_pipe_peer(
         "Invalid reviewed peer hash"
     );
     let (process, image, pid) = peer_process(pipe)?;
+    live(cancel, deadline)?;
     #[cfg(test)]
     let fixture = pipe_path.starts_with(r"\\.\pipe\relayne-fixture-")
         && pid == unsafe { GetCurrentProcessId() }
@@ -229,12 +249,16 @@ pub(super) fn verify_pipe_peer(
     };
     if !fixture {
         trusted_docker_path(&image)?;
+        live(cancel, deadline)?;
         signed_image(&image)?;
+        live(cancel, deadline)?;
     }
     ensure!(
-        image_sha256(&image)?.eq_ignore_ascii_case(reviewed_image_sha256),
+        image_sha256_with_guard(&image, || live(cancel, deadline))?
+            .eq_ignore_ascii_case(reviewed_image_sha256),
         "Docker peer image changed"
     );
+    live(cancel, deadline)?;
     // The process handle remains held for the entire capture, preventing PID
     // reuse from changing the identity associated with this pipe connection.
     Ok(process)

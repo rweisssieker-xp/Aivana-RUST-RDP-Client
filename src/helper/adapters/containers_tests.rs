@@ -643,7 +643,7 @@ fn named_pipe_fixture_exercises_real_framing_cancel_and_limits() {
                 server.write_all(body).await.unwrap();
             }
         });
-        let mut client = docker_native::PipeHttp::open(&path, &fixture_peer_sha256())
+        let mut client = docker_native::PipeHttp::open_test(&path, &fixture_peer_sha256())
             .await
             .unwrap();
         for _ in 0..2 {
@@ -667,7 +667,7 @@ fn named_pipe_fixture_exercises_real_framing_cancel_and_limits() {
                 .await
                 .unwrap();
         });
-        let mut client = docker_native::PipeHttp::open(&path, &fixture_peer_sha256())
+        let mut client = docker_native::PipeHttp::open_test(&path, &fixture_peer_sha256())
             .await
             .unwrap();
         assert!(
@@ -685,7 +685,7 @@ fn named_pipe_fixture_exercises_real_framing_cancel_and_limits() {
             assert!(server.read(&mut b).await.unwrap() > 0);
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         });
-        let mut client = docker_native::PipeHttp::open(&path, &fixture_peer_sha256())
+        let mut client = docker_native::PipeHttp::open_test(&path, &fixture_peer_sha256())
             .await
             .unwrap();
         let cancel = CancellationToken::new();
@@ -704,7 +704,7 @@ fn named_pipe_fixture_exercises_real_framing_cancel_and_limits() {
             assert!(server.read(&mut b).await.unwrap() > 0);
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         });
-        let mut client = docker_native::PipeHttp::open(&path, &fixture_peer_sha256())
+        let mut client = docker_native::PipeHttp::open_test(&path, &fixture_peer_sha256())
             .await
             .unwrap();
         assert!(
@@ -745,7 +745,7 @@ fn docker_rejects_unreviewed_pipe_peer_before_http() {
     runtime.block_on(async {
         let path = format!(r"\\.\pipe\relayne-fixture-{}", Uuid::new_v4());
         let mut server = ServerOptions::new().create(&path).unwrap();
-        let result = docker_native::PipeHttp::open(&path, &"0".repeat(64)).await;
+        let result = docker_native::PipeHttp::open_test(&path, &"0".repeat(64)).await;
         assert!(result.is_err(), "unreviewed peer must be rejected");
         tokio::time::timeout(std::time::Duration::from_secs(1), server.connect())
             .await
@@ -787,7 +787,7 @@ fn docker_rejects_many_small_headers_within_one_response() {
             );
             let _ = server.write_all(response.as_bytes()).await;
         });
-        let mut client = docker_native::PipeHttp::open(&path, &fixture_peer_sha256())
+        let mut client = docker_native::PipeHttp::open_test(&path, &fixture_peer_sha256())
             .await
             .unwrap();
         assert!(
@@ -855,7 +855,7 @@ fn docker_pipe_exposes_identification_only_token_to_server() {
                 .unwrap();
             level
         });
-        let mut client = docker_native::PipeHttp::open(&path, &fixture_peer_sha256())
+        let mut client = docker_native::PipeHttp::open_test(&path, &fixture_peer_sha256())
             .await
             .unwrap();
         assert_eq!(

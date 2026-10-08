@@ -33,7 +33,7 @@ cpal = "0.16"
 cap-std = "4"
 
 ironrdp-mstsgu = { version = "0.0.1", features = ["native-tls"] }
-tokio = { version = "1", features = ["rt-multi-thread", "io-util", "time", "net", "process"] }
+tokio = { version = "1", features = ["rt-multi-thread", "io-util", "time", "net", "process", "sync"] }
 tokio-util = { version = "0.7", features = ["rt", "compat"] }
 tiberius = { version = "0.12", default-features = false, features = ["native-tls", "tds73"] }
 futures-util = "0.3"

@@ -14,17 +14,22 @@ use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::Read,
+    os::windows::io::{AsRawHandle, BorrowedHandle, OwnedHandle},
     path::{Path, PathBuf},
+    sync::{Arc, LazyLock},
+    time::Instant,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::windows::named_pipe::{ClientOptions, NamedPipeClient},
+    sync::Semaphore,
 };
 use tokio_util::sync::CancellationToken;
 
 const MAX_META: usize = 64 * 1024;
 const MAX_RESPONSE: usize = 128 * 1024;
 const MAX_HEADERS: usize = 8 * 1024;
+static PEER_VERIFICATIONS: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(2)));
 
 #[derive(Deserialize)]
 struct ContextMeta {
@@ -169,20 +174,99 @@ pub(super) fn process_sid_digest() -> Result<String> {
 
 pub(super) struct PipeHttp {
     io: NamedPipeClient,
-    _peer: std::os::windows::io::OwnedHandle,
+    _peer: OwnedHandle,
+    deadline: Instant,
     pending: Vec<u8>,
 }
 impl PipeHttp {
-    pub(super) async fn open(path: &str, reviewed_image_sha256: &str) -> Result<Self> {
+    #[cfg(test)]
+    pub(super) async fn open_test(path: &str, reviewed_image_sha256: &str) -> Result<Self> {
+        Self::open(
+            path,
+            reviewed_image_sha256,
+            &CancellationToken::new(),
+            Instant::now() + std::time::Duration::from_secs(5),
+        )
+        .await
+    }
+
+    pub(super) async fn open(
+        path: &str,
+        reviewed_image_sha256: &str,
+        cancel: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<Self> {
+        Self::open_with(
+            path,
+            reviewed_image_sha256,
+            cancel,
+            deadline,
+            super::docker_peer::verify_pipe_peer,
+        )
+        .await
+    }
+
+    async fn open_with<F>(
+        path: &str,
+        reviewed_image_sha256: &str,
+        cancel: &CancellationToken,
+        deadline: Instant,
+        verifier: F,
+    ) -> Result<Self>
+    where
+        F: FnOnce(&OwnedHandle, &str, &str, &CancellationToken, Instant) -> Result<OwnedHandle>
+            + Send
+            + 'static,
+    {
+        ensure!(
+            !cancel.is_cancelled() && Instant::now() < deadline,
+            "Docker capture expired"
+        );
         super::docker_peer::reject_thread_impersonation()?;
         let mut options = ClientOptions::new();
         options
             .security_qos_flags(windows_sys::Win32::Storage::FileSystem::SECURITY_IDENTIFICATION);
         let io = options.open(path)?;
-        let peer = super::docker_peer::verify_pipe_peer(&io, path, reviewed_image_sha256)?;
+        // SAFETY: io owns the source handle until duplication completes.
+        let identity_handle =
+            unsafe { BorrowedHandle::borrow_raw(io.as_raw_handle()) }.try_clone_to_owned()?;
+        let permit = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => anyhow::bail!("Canceled"),
+            _ = tokio::time::sleep_until(deadline.into()) => anyhow::bail!("Docker capture expired"),
+            permit = PEER_VERIFICATIONS.clone().acquire_owned() => permit?,
+        };
+        ensure!(
+            !cancel.is_cancelled() && Instant::now() < deadline,
+            "Docker capture expired"
+        );
+        let path = path.to_owned();
+        let reviewed_image_sha256 = reviewed_image_sha256.to_owned();
+        let blocking_cancel = cancel.clone();
+        let verification = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            verifier(
+                &identity_handle,
+                &path,
+                &reviewed_image_sha256,
+                &blocking_cancel,
+                deadline,
+            )
+        });
+        let peer = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => anyhow::bail!("Canceled"),
+            _ = tokio::time::sleep_until(deadline.into()) => anyhow::bail!("Docker capture expired"),
+            result = verification => result??,
+        };
+        ensure!(
+            !cancel.is_cancelled() && Instant::now() < deadline,
+            "Docker capture expired"
+        );
         Ok(Self {
             io,
             _peer: peer,
+            deadline,
             pending: Vec::new(),
         })
     }
@@ -229,6 +313,10 @@ impl PipeHttp {
     ) -> Result<(u16, Vec<u8>)> {
         super::docker_peer::reject_thread_impersonation()?;
         ensure!(
+            !cancel.is_cancelled() && Instant::now() < self.deadline,
+            "Docker capture expired"
+        );
+        ensure!(
             path.starts_with('/')
                 && path.len() <= 256
                 && path.bytes().all(|b| b.is_ascii_graphic()),
@@ -238,7 +326,9 @@ impl PipeHttp {
             "GET {path} HTTP/1.1\r\nHost: docker\r\nConnection: keep-alive\r\nAccept: application/json\r\n\r\n"
         );
         tokio::select! {
+            biased;
             _ = cancel.cancelled() => anyhow::bail!("Canceled"),
+            _ = tokio::time::sleep_until(self.deadline.into()) => anyhow::bail!("Docker capture expired"),
             result = self.io.write_all(request.as_bytes()) => result?,
         }
         let status = self.line(cancel).await?;
@@ -381,7 +471,21 @@ pub(super) async fn collect_from_root(
     if sid != cred.principal || secret.username() != cred.principal {
         return Ok(unavailable(&subject, EvidenceStatus::Unavailable));
     }
-    let mut pipe = match PipeHttp::open(&path, reviewed_peer_sha256).await {
+    let expires_at = request.requested_at
+        + chrono::Duration::seconds(
+            request
+                .deadline_secs
+                .unwrap_or(super::super::worker::DEFAULT_DEADLINE_SECS) as i64,
+        );
+    let remaining = match expires_at
+        .signed_duration_since(chrono::Utc::now())
+        .to_std()
+    {
+        Ok(value) if !value.is_zero() => value,
+        _ => return Ok(unavailable(&subject, EvidenceStatus::Unavailable)),
+    };
+    let deadline = Instant::now() + remaining;
+    let mut pipe = match PipeHttp::open(&path, reviewed_peer_sha256, &cancel, deadline).await {
         Ok(v) => v,
         Err(_) => return Ok(unavailable(&subject, EvidenceStatus::Unavailable)),
     };
@@ -433,4 +537,164 @@ pub(super) async fn collect_from_root(
         parsed.status = EvidenceStatus::Partial;
     }
     Ok(parsed)
+}
+
+#[cfg(test)]
+mod peer_verification_tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    };
+    use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+    use uuid::Uuid;
+
+    fn fixture() -> (String, NamedPipeServer) {
+        let path = format!(r"\\.\pipe\relayne-fixture-{}", Uuid::new_v4());
+        let server = ServerOptions::new().create(&path).unwrap();
+        // Keep the server live while the client opens; the caller also uses the
+        // returned handle to verify that no HTTP request reached the peer.
+        (path, server)
+    }
+
+    #[test]
+    fn slow_peer_verification_obeys_deadline_and_cancel_without_writing() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            for cancel_first in [false, true] {
+                let (path, mut server) = fixture();
+                let connected = tokio::spawn(async move {
+                    server.connect().await.unwrap();
+                    server
+                });
+                let cancel = CancellationToken::new();
+                let trigger = cancel.clone();
+                let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let started_in_verifier = started.clone();
+                let reviewed_hash = "a".repeat(64);
+                let deadline = Instant::now() + std::time::Duration::from_millis(70);
+                if cancel_first {
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(35)).await;
+                        trigger.cancel();
+                    });
+                }
+                let opened = PipeHttp::open_with(
+                    &path,
+                    &reviewed_hash,
+                    &cancel,
+                    deadline,
+                    move |handle, _, _, _, _| {
+                        started_in_verifier.store(true, Ordering::SeqCst);
+                        std::thread::sleep(std::time::Duration::from_millis(220));
+                        Ok(handle.try_clone()?)
+                    },
+                );
+                assert!(
+                    tokio::time::timeout(std::time::Duration::from_millis(150), opened)
+                        .await
+                        .unwrap()
+                        .is_err()
+                );
+                assert!(started.load(Ordering::SeqCst));
+                let mut server = connected.await.unwrap();
+                let mut bytes = [0_u8; 8];
+                let read = tokio::time::timeout(
+                    std::time::Duration::from_millis(50),
+                    server.read(&mut bytes),
+                )
+                .await;
+                assert!(
+                    matches!(read, Ok(Ok(0)) | Err(_)),
+                    "expired verification wrote HTTP bytes"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn canceled_verifications_keep_both_global_slots_occupied() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let active = Arc::new(AtomicUsize::new(0));
+            let (release_tx, release_rx) = mpsc::channel::<()>();
+            let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+            let mut tasks = Vec::new();
+            let mut servers = Vec::new();
+            let mut tokens = Vec::new();
+            for _ in 0..2 {
+                let (path, server) = fixture();
+                servers.push(server);
+                let cancel = CancellationToken::new();
+                tokens.push(cancel.clone());
+                let active = active.clone();
+                let release_rx = release_rx.clone();
+                tasks.push(tokio::spawn(async move {
+                    PipeHttp::open_with(
+                        &path,
+                        &"a".repeat(64),
+                        &cancel,
+                        Instant::now() + std::time::Duration::from_secs(2),
+                        move |_, _, _, _, _| {
+                            active.fetch_add(1, Ordering::SeqCst);
+                            release_rx.lock().unwrap().recv().unwrap();
+                            active.fetch_sub(1, Ordering::SeqCst);
+                            anyhow::bail!("Fixture verifier")
+                        },
+                    )
+                    .await
+                }));
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while active.load(Ordering::SeqCst) != 2 {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+            for token in &tokens {
+                token.cancel();
+            }
+            for task in tasks {
+                assert!(task.await.unwrap().is_err());
+            }
+            assert_eq!(active.load(Ordering::SeqCst), 2);
+
+            let (path, server) = fixture();
+            servers.push(server);
+            let entered = Arc::new(AtomicUsize::new(0));
+            let entered_verifier = entered.clone();
+            let queued = PipeHttp::open_with(
+                &path,
+                &"a".repeat(64),
+                &CancellationToken::new(),
+                Instant::now() + std::time::Duration::from_millis(60),
+                move |_, _, _, _, _| {
+                    entered_verifier.fetch_add(1, Ordering::SeqCst);
+                    anyhow::bail!("Unexpected verifier entry")
+                },
+            )
+            .await;
+            assert!(queued.is_err());
+            assert_eq!(entered.load(Ordering::SeqCst), 0);
+            assert_eq!(active.load(Ordering::SeqCst), 2);
+            release_tx.send(()).unwrap();
+            release_tx.send(()).unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while active.load(Ordering::SeqCst) != 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+        });
+    }
 }
