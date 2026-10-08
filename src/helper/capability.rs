@@ -284,7 +284,8 @@ impl CapabilityRegistry {
                     review_content_sha256,
                 },
                 BoundScope::Database {
-                    engine: super::scope::DatabaseEngine::Postgres,
+                    engine:
+                        super::scope::DatabaseEngine::Postgres | super::scope::DatabaseEngine::SqlServer,
                     credential: Some(credential),
                     ..
                 },

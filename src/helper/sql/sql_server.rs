@@ -33,6 +33,10 @@ type TdsFuture<'a, T> = Pin<Box<dyn Future<Output = std::result::Result<T, Failu
 mod plan;
 pub(super) use plan::estimated_plan;
 
+#[path = "sql_server_workload.rs"]
+mod workload;
+pub(super) use workload::run_sandbox_workload;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SqlServerReadProbe {
     Identity,

@@ -39,13 +39,13 @@ impl SamplingPolicy {
 }
 #[derive(Clone, Debug)]
 pub struct ReviewedWorkload {
-    scope: BoundScope,
-    template: ReviewedSelectTemplate,
-    case_id: Uuid,
-    case_revision: u64,
-    review_evidence_id: Uuid,
-    review_content_sha256: String,
-    reviewed_at: chrono::DateTime<chrono::Utc>,
+    pub(super) scope: BoundScope,
+    pub(super) template: ReviewedSelectTemplate,
+    pub(super) case_id: Uuid,
+    pub(super) case_revision: u64,
+    pub(super) review_evidence_id: Uuid,
+    pub(super) review_content_sha256: String,
+    pub(super) reviewed_at: chrono::DateTime<chrono::Utc>,
 }
 impl ReviewedWorkload {
     pub(crate) fn from_validated_request(
@@ -74,7 +74,21 @@ impl ReviewedWorkload {
         template: ReviewedSelectTemplate,
         evidence_id: Uuid,
     ) -> Result<Self> {
-        template.reviewed_statement(scope)?;
+        match scope {
+            BoundScope::Database {
+                engine: crate::helper::scope::DatabaseEngine::Postgres,
+                ..
+            } => {
+                template.reviewed_statement(scope)?;
+            }
+            BoundScope::Database {
+                engine: crate::helper::scope::DatabaseEngine::SqlServer,
+                ..
+            } => {
+                template.sql_server_statement(scope)?;
+            }
+            _ => anyhow::bail!("Reviewed database fixture required"),
+        }
         let digest = scope.digest()?;
         ensure!(
             case.scopes()
@@ -92,12 +106,19 @@ impl ReviewedWorkload {
                 && evidence.binding.case_id == case.id()
                 && evidence.binding.case_revision == case.revision()
                 && evidence.binding.scope_sha256 == digest
+                && evidence.binding.credential_scope_sha256 == scope.credential_scope_digest()?
                 && evidence.eligibility(chrono::Utc::now(), chrono::Duration::minutes(5))
                     == Eligibility::Eligible,
             "fresh live SQL-read review evidence required"
         );
         ensure!(
-            metadata_matches(&evidence.sql_observations, template),
+            match scope {
+                BoundScope::Database {
+                    engine: crate::helper::scope::DatabaseEngine::SqlServer,
+                    ..
+                } => sql_server_metadata_matches(&evidence.sql_observations, template),
+                _ => metadata_matches(&evidence.sql_observations, template),
+            },
             "reviewed live object/column identity missing"
         );
         Ok(Self {
@@ -145,6 +166,55 @@ pub(super) fn metadata_matches(
         .iter()
         .filter_map(|o| match o {
             SqlObservation::PostgresColumn {
+                object_id,
+                column_id,
+                name,
+                plain,
+            } if *object_id == objects[0] && *column_id > 0 && *plain => {
+                Some((*column_id, name.as_str()))
+            }
+            _ => None,
+        })
+        .collect();
+    columns.sort_by_key(|(id, _)| *id);
+    columns.len() == expected.len()
+        && columns
+            .iter()
+            .zip(expected)
+            .all(|((_, actual), wanted)| actual == wanted)
+        && columns.windows(2).all(|pair| pair[0].0 < pair[1].0)
+}
+
+pub(super) fn sql_server_metadata_matches(
+    observations: &[SqlObservation],
+    template: ReviewedSelectTemplate,
+) -> bool {
+    let expected = template.expected_columns();
+    let objects: Vec<_> = observations
+        .iter()
+        .filter_map(|item| match item {
+            SqlObservation::SqlServerObject {
+                schema,
+                name,
+                object_id,
+                column_count,
+            } if schema == "fixture"
+                && name == template.object()
+                && *object_id > 0
+                && *column_count as usize == expected.len() =>
+            {
+                Some(*object_id)
+            }
+            _ => None,
+        })
+        .collect();
+    if objects.len() != 1 {
+        return false;
+    }
+    let mut columns: Vec<_> = observations
+        .iter()
+        .filter_map(|item| match item {
+            SqlObservation::SqlServerColumn {
                 object_id,
                 column_id,
                 name,

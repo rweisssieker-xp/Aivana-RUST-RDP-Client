@@ -91,7 +91,7 @@ impl ProbeAdapter for SqlWorkloadAdapter {
     fn collect<'a>(
         &'a self,
         request: &'a ProbeRequest,
-        _secrets: &'a dyn SecretResolver,
+        secrets: &'a dyn SecretResolver,
         cancel: CancellationToken,
     ) -> ProbeFuture<'a> {
         Box::pin(async move {
@@ -120,12 +120,25 @@ impl ProbeAdapter for SqlWorkloadAdapter {
                 *review_evidence_id,
                 review_content_sha256.clone(),
             );
-            let samples = benchmark::run_sandbox_workload(
-                &reviewed,
-                &benchmark::SamplingPolicy::default(),
-                cancel,
-            )
-            .await?;
+            let policy = benchmark::SamplingPolicy::default();
+            let (samples, engine_source) = match &request.scope {
+                BoundScope::Database {
+                    engine: DatabaseEngine::Postgres,
+                    ..
+                } => (
+                    benchmark::run_sandbox_workload(&reviewed, &policy, cancel).await?,
+                    "pg",
+                ),
+                BoundScope::Database {
+                    engine: DatabaseEngine::SqlServer,
+                    ..
+                } => (
+                    sql_server::run_sandbox_workload(request, &reviewed, &policy, secrets, cancel)
+                        .await?,
+                    "sqlserver",
+                ),
+                _ => anyhow::bail!("SQL workload database scope required"),
+            };
             let artifact = WorkloadArtifact::from_samples(&samples)?;
             let now = chrono::Utc::now();
             Ok(ProbeOutput {
@@ -144,7 +157,7 @@ impl ProbeAdapter for SqlWorkloadAdapter {
                 sql_observations: vec![],
                 sql_artifacts: vec![SqlArtifact::Workload(artifact)],
                 evidence_refs: vec![*review_evidence_id],
-                source_id: format!("pg-workload-v1:{workload_digest}").into_bytes(),
+                source_id: format!("{engine_source}-workload-v1:{workload_digest}").into_bytes(),
                 source_observed_at: now,
                 parser_version: 1,
             })

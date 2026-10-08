@@ -31,6 +31,22 @@ pub(super) fn show(
     let Ok(digest) = scope.digest() else { return };
     ui.separator();
     ui.heading("SQL plan and workload evidence");
+    if ui
+        .button("Prune expired unheld SQL artifacts (90 days) and save")
+        .clicked()
+    {
+        let result = match (&mut state.store, &state.path) {
+            (Some(store), Some(path)) => {
+                store.maintain_sql_artifacts(path, case.id(), chrono::Utc::now())
+            }
+            _ => Err(anyhow::anyhow!("Helper store unavailable")),
+        };
+        state.notice = result
+            .map(|count| {
+                format!("SQL artifact maintenance saved; {count} expired artifact(s) pruned")
+            })
+            .unwrap_or_else(|error| format!("SQL artifact maintenance failed: {error}"));
+    }
 
     let path_id = egui::Id::new(("helper-plan-path", case.id(), &digest));
     let mut path = ui
@@ -194,10 +210,45 @@ pub(super) fn show(
                     .map(|_| "SQL Server SHOWPLAN collection started".to_owned())
                     .unwrap_or_else(|error| format!("SQL Server SHOWPLAN unavailable: {error}"));
             }
+            let review = case.evidence().iter().rev().find(|e| {
+                e.capability_id == CapabilityId::SqlRead
+                    && e.binding.scope_sha256 == digest
+                    && crate::helper::sql::benchmark::ReviewedWorkload::review(
+                        case, scope, template, e.id,
+                    )
+                    .is_ok()
+            });
+            if let Some(review) = review {
+                if ui
+                    .button("Run reviewed SQL Server fixture workload (3 warmups, 15 samples)")
+                    .clicked()
+                {
+                    let outcome = template.fingerprint(scope).and_then(|workload_digest| {
+                        state.try_collect_sql(
+                            case.id(),
+                            scope,
+                            profiles,
+                            CapabilityId::SqlWorkloadBaseline,
+                            ProbeParams::SqlWorkload {
+                                workload_digest,
+                                review_evidence_id: review.id,
+                                review_content_sha256: review.content_sha256.clone(),
+                            },
+                        )
+                    });
+                    state.notice = outcome
+                        .map(|_| "Reviewed SQL Server workload started".to_owned())
+                        .unwrap_or_else(|error| format!("Workload unavailable: {error}"));
+                }
+            } else {
+                ui.label(
+                    "Workload needs a fresh complete SQL Server read of the exact fixture object.",
+                );
+            }
         } else {
             ui.label("Native SHOWPLAN requires an exact disposable loopback fixture scope and read credential.");
         }
-        ui.label("SQL Server workload sampling awaits an attested disposable fixture; imported plans remain unverified.");
+        ui.label("Imported plans remain unverified; local fixture behavior has no live endpoint validation.");
     }
 
     let active: Vec<_> = state

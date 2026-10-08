@@ -154,10 +154,13 @@ fn imported_plan_artifact_round_trips_exports_and_expires_separately() {
     );
     let later = Utc::now() + Duration::days(91);
     assert_eq!(
-        loaded.prune_expired_sql_artifacts(case_id, later).unwrap(),
+        loaded
+            .maintain_sql_artifacts(&path, case_id, later)
+            .unwrap(),
         1
     );
-    let saved = loaded
+    let reloaded = HelperStore::load(&path).unwrap();
+    let saved = reloaded
         .case(case_id)
         .unwrap()
         .evidence()
@@ -166,6 +169,110 @@ fn imported_plan_artifact_round_trips_exports_and_expires_separately() {
         .unwrap();
     assert!(saved.sql_artifacts.is_empty());
     assert_eq!(saved.content_sha256.len(), 64);
+    let export = export_case(&reloaded, case_id, ExportFormat::Json, later).unwrap();
+    assert!(!export.body.contains("\"actual_rows\""));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn sql_artifact_maintenance_preserves_held_and_referenced_projections_after_reload() {
+    use crate::helper::sql::artifacts::{PlanArtifact, PlanOperator, SqlArtifact, SqlPlanFormat};
+    let (mut store, case_id, scope_sha256) = fixture();
+    let credential_scope_sha256 = store.case(case_id).unwrap().scopes()[0]
+        .credential_scope_digest()
+        .unwrap();
+    let mut make_plan = || {
+        let mut item = envelope(EvidenceBinding {
+            case_id,
+            case_revision: store.case(case_id).unwrap().revision(),
+            request_id: Uuid::new_v4(),
+            scope_sha256: scope_sha256.clone(),
+            credential_scope_sha256: credential_scope_sha256.clone(),
+            run_id: None,
+        });
+        item.capability_id = CapabilityId::SqlPlan;
+        item.origin = Origin::ImportedUnverified;
+        item.records.clear();
+        item.sql_artifacts = vec![SqlArtifact::Plan(PlanArtifact {
+            format: SqlPlanFormat::PostgresJson,
+            source_sha256: "b".repeat(64),
+            metadata_sha256: None,
+            template_sha256: "c".repeat(64),
+            operator_count: 1,
+            operators_truncated: false,
+            operators: vec![PlanOperator {
+                depth: 0,
+                name: "Sort".into(),
+                estimated_rows: Some(12.0),
+                estimated_cost: Some(1.0),
+                actual_rows: None,
+                spill: false,
+                temp_io: false,
+            }],
+            has_spill_evidence: false,
+            has_temp_io: false,
+        })];
+        item
+    };
+    let unheld = make_plan();
+    let unheld_id = unheld.id;
+    let held = make_plan();
+    let held_id = held.id;
+    let referenced = make_plan();
+    let referenced_id = referenced.id;
+    drop(make_plan);
+    for item in [unheld, held, referenced] {
+        import_evidence(&mut store, case_id, item).unwrap();
+    }
+    let mut referrer = envelope(EvidenceBinding {
+        case_id,
+        case_revision: store.case(case_id).unwrap().revision(),
+        request_id: Uuid::new_v4(),
+        scope_sha256,
+        credential_scope_sha256,
+        run_id: None,
+    });
+    referrer.evidence_refs = vec![referenced_id];
+    import_evidence(&mut store, case_id, referrer).unwrap();
+    store
+        .set_evidence_hold(
+            case_id,
+            EvidenceHold {
+                run_id: Uuid::new_v4(),
+                reason: HoldReason::AmbiguousOutcome,
+                evidence_ids: vec![held_id],
+            },
+        )
+        .unwrap();
+    let dir = std::env::temp_dir().join(format!("relayne-sql-maintenance-{}", Uuid::new_v4()));
+    let path = dir.join("cases.dpapi");
+    store.save(&path).unwrap();
+    let later = Utc::now() + Duration::days(91);
+    assert_eq!(
+        store.maintain_sql_artifacts(&path, case_id, later).unwrap(),
+        1
+    );
+    let reloaded = HelperStore::load(&path).unwrap();
+    let case = reloaded.case(case_id).unwrap();
+    let remaining = |id| {
+        case.evidence()
+            .iter()
+            .find(|item| item.id == id)
+            .unwrap()
+            .sql_artifacts
+            .len()
+    };
+    assert_eq!(remaining(unheld_id), 0);
+    assert_eq!(remaining(held_id), 1);
+    assert_eq!(remaining(referenced_id), 1);
+    assert_eq!(
+        case.sql_artifact_retention(held_id, later),
+        Some(RetentionState::ExpiredHeld)
+    );
+    assert_eq!(
+        case.sql_artifact_retention(referenced_id, later),
+        Some(RetentionState::ExpiredReferenced)
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -398,6 +505,8 @@ fn expired_held_history_is_preserved_and_capacity_rejects_without_eviction() {
         entries.push(e);
     }
     let held_id = entries[0].id;
+    let referenced_id = entries[1].id;
+    entries[0].evidence_refs = vec![referenced_id];
     let mut value = serde_json::to_value(&case).unwrap();
     value["evidence"] = serde_json::to_value(entries).unwrap();
     value["evidence_revision"] = serde_json::json!(MAX_ENVELOPES_PER_CASE);
@@ -414,7 +523,11 @@ fn expired_held_history_is_preserved_and_capacity_rejects_without_eviction() {
         Some(RetentionState::ExpiredHeld)
     );
     assert_eq!(
-        full.evidence_retention(full.evidence()[1].id, Utc::now()),
+        full.evidence_retention(referenced_id, Utc::now()),
+        Some(RetentionState::ExpiredReferenced)
+    );
+    assert_eq!(
+        full.evidence_retention(full.evidence()[2].id, Utc::now()),
         Some(RetentionState::ExpiredUnheld)
     );
     let next = envelope(EvidenceBinding {
@@ -430,10 +543,11 @@ fn expired_held_history_is_preserved_and_capacity_rejects_without_eviction() {
     assert_eq!(full.evidence()[0].id, held_id);
     assert_eq!(
         full.prune_expired_evidence_metadata(Utc::now()).unwrap(),
-        MAX_ENVELOPES_PER_CASE - 1
+        MAX_ENVELOPES_PER_CASE - 2
     );
-    assert_eq!(full.evidence().len(), 1);
+    assert_eq!(full.evidence().len(), 2);
     assert_eq!(full.evidence()[0].id, held_id);
+    assert_eq!(full.evidence()[1].id, referenced_id);
 }
 
 #[test]

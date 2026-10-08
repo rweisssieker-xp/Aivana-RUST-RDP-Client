@@ -500,6 +500,23 @@ impl HelperStore {
         *self = next;
         Ok(removed)
     }
+
+    /// Explicit maintenance persists the pruned projection atomically. A failed
+    /// save leaves the in-memory case and every protected reference untouched.
+    pub fn maintain_sql_artifacts(
+        &mut self,
+        path: &Path,
+        case_id: Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<usize> {
+        let mut next = self.clone();
+        let removed = next.prune_expired_sql_artifacts(case_id, now)?;
+        if removed > 0 {
+            next.save(path)?;
+            *self = next;
+        }
+        Ok(removed)
+    }
     pub fn save(&mut self, path: &Path) -> Result<()> {
         ensure!(self.opened, "Load or create a helper store before saving");
         self.validate()?;
