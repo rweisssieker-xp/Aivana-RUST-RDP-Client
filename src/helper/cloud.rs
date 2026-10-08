@@ -36,6 +36,7 @@ fn output(request: &ProbeRequest, observation: Observation, complete: bool) -> R
             subject_sha256: request.scope.resource_digest()?,
         }],
         metrics: Vec::new(),
+        sql_observations: Vec::new(),
         evidence_refs: Vec::new(),
         source_id: format!(
             "cloud:{:?}:{}",
