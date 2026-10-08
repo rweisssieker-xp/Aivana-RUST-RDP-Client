@@ -39,6 +39,24 @@ The `fixture` schema contains:
 
 Connect with host `127.0.0.1`, port `55433`, database `relayne_helper_acceptance`, `sslmode=verify-full`, and CA file `C:\RelayneHelperAcceptance\root.crt`. The owner role can run the controlled mutation examples. The reader role has `SELECT` on the fixture schema. `seed.sql` refuses the wrong database, owner, port, or server address before creating the schema.
 
-This folder supplies database prerequisites only. Task 18 still needs the product binary's explicit fixture/acceptance mode, real PostgreSQL adapter and action flow, shared API coordinator, and two separate portal origins. Those components must be wired through product code and tested; this script does not claim their behavior, flag spelling, live acceptance, SQL Server, Linux, cloud, or customer-environment verification.
+## Guest application fixture
+
+After the database bootstrap and demand service are healthy, map this folder read-only inside the **same** Windows Sandbox guest, for example at `C:\FixtureScripts`. Run `start-app.ps1 -ValidateOnly` first. It reports the fixed contract without modifying the guest. Then run `start-app.ps1` inside the guest. It checks the guest identity and the exact existing root, requires free loopback ports `58080`–`58082`, creates non-secret separate config files under `C:\RelayneHelperAcceptance\app-fixture`, and launches three distinct Windows PowerShell processes. It waits until the API and both portals verify rows from the new database. The existing reference lab on `55432` and the host PostgreSQL service are excluded.
+
+The API's single bounded `GET /orders?customer_id=424242&limit=3` route executes `app-query.sql` using guest `psql` with `sslmode=verify-full`, the guest CA, and `relayne_fixture_reader`. It supplies the reviewed integers as typed `psql` variables; HTTP content is never inserted into SQL. The password is read only from the guest ACL-protected `credentials.txt` and supplied to the child process environment. It is never a command argument, config field, response, or exported receipt. Only origins `http://127.0.0.1:58081` and `http://127.0.0.1:58082` receive CORS permission. Requests from another Origin receive 403. Each portal's `/check` and `/` route fetches the API with its own Origin and checks database, role, order IDs `60001`–`60003`, customer `424242`, status `pending`, and amount `99.99`. A database or API failure makes that route fail. The portal HTML is rendered from this checked result path.
+
+These guest-local URLs provide independent functional checks:
+
+```text
+http://127.0.0.1:58080/orders?customer_id=424242&limit=3
+http://127.0.0.1:58081/check
+http://127.0.0.1:58082/check
+```
+
+Each service writes JSONL request, status, expected and observed order IDs, and elapsed time to its own file under `C:\RelayneHelperAcceptance\evidence`. Run `verify-app.ps1` in the guest to probe API, both exact CORS origins, both portals, rendered database content, and rejection of a third origin. It writes `app-verification.json` with separate request timings and an explicit `product_acceptance=false` label. The startup manifest records the three exact PIDs, configs, and script hashes. `stop-app.ps1` checks the guest and exact process command lines before stopping those three processes. It leaves the database, credentials, reference lab, and evidence in place. If a port is occupied, startup refuses the run; inspect the guest rather than stopping an unrelated process. A failed startup stops only processes it launched and matched by exact executable/script/config. The guest should retain these files until the product acceptance run has consumed and exported the appropriate redacted receipts.
+
+This application fixture supplies the API and portal prerequisites. Task 18 still needs the actual product binary's fixture/acceptance mode, coordinator, authority/journal actions, native captures, and seven-scenario receipts. App checks do not establish product acceptance, SQL Server, Linux, cloud, or customer-environment verification.
 
 Run the focused host-side validation test with `pwsh -NoProfile -File tests/helper-sandbox/test-bootstrap.ps1`. It parses the script and invokes validation for path, fixed port, database, schema, TLS, and host refusal. It does not start a guest or modify either PostgreSQL cluster.
+
+Run `pwsh -NoProfile -File tests/helper-sandbox/test-app.ps1` for hermetic parser and guard checks of the app scripts. It opens no database or listener. Actual row, CORS, timing, and cross-process behavior require a fresh guest execution and its recorded receipts.
