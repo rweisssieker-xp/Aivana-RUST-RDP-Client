@@ -682,13 +682,10 @@ fn show_local_journal(
         .collect::<Vec<_>>();
     for event in pending {
         ui.label(format!(
-            "Saved report {} · sequence {} · reference {}",
+            "Saved report {} · sequence {} · local reference digest {}",
             event.event_id,
             event.sequence,
-            event
-                .operator_reference
-                .as_deref()
-                .unwrap_or("native verifier")
+            event.operator_reference_sha256.as_deref().unwrap_or("none")
         ));
         if ui
             .button(format!("Send saved outcome event {}", event.event_id))

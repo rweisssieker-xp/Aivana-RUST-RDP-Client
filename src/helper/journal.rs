@@ -40,6 +40,8 @@ pub struct IntentRecord {
     pub prepared_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub outcome_event: Option<ActionOutcomeEventV2>,
+    #[serde(default)]
+    pub outcome_note: Option<String>,
     pub outcome_acknowledged: bool,
     #[serde(default)]
     pub outcome_corrections: Vec<OutcomeDelivery>,
@@ -49,7 +51,28 @@ pub struct IntentRecord {
 #[serde(deny_unknown_fields)]
 pub struct OutcomeDelivery {
     pub event: ActionOutcomeEventV2,
+    #[serde(default)]
+    pub operator_note: Option<String>,
     pub acknowledged: bool,
+}
+
+fn operator_note_matches(event: &ActionOutcomeEventV2, note: Option<&str>) -> Result<bool> {
+    match note {
+        Some(note) => Ok(note.trim().len() >= 3
+            && note.len() <= 256
+            && !note.chars().any(char::is_control)
+            && event.operator_reference_sha256.as_deref()
+                == Some(
+                    crate::helper_approval::operator_reference_digest(
+                        event.event_id,
+                        event.approval_id,
+                        event.run_id,
+                        note,
+                    )?
+                    .as_str(),
+                )),
+        None => Ok(event.operator_reference_sha256.is_none()),
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -164,12 +187,8 @@ impl ActionJournal {
                     "Invalid outcome event binding"
                 );
                 ensure!(
-                    event
-                        .operator_reference
-                        .as_ref()
-                        .is_none_or(|reference| reference.len() <= 256
-                            && !reference.chars().any(char::is_control)),
-                    "Invalid operator reference"
+                    operator_note_matches(event, item.outcome_note.as_deref())?,
+                    "Invalid protected operator note binding"
                 );
             }
             let mut previous = item.outcome_event.as_ref();
@@ -189,12 +208,8 @@ impl ActionJournal {
                     "Invalid outcome correction chain"
                 );
                 ensure!(
-                    event
-                        .operator_reference
-                        .as_ref()
-                        .is_none_or(|reference| reference.len() <= 256
-                            && !reference.chars().any(char::is_control)),
-                    "Invalid correction reference"
+                    operator_note_matches(event, correction.operator_note.as_deref())?,
+                    "Invalid protected correction note binding"
                 );
                 previous = Some(event);
             }
@@ -297,6 +312,7 @@ impl ActionJournal {
             prepared_at: now,
             updated_at: now,
             outcome_event: None,
+            outcome_note: None,
             outcome_acknowledged: false,
             outcome_corrections: Vec::new(),
         });
@@ -455,8 +471,19 @@ impl ActionJournal {
                 "Invalid outcome correction"
             );
         }
+        let event_id = Uuid::new_v4();
+        let reference_sha256 = operator_reference
+            .map(|note| {
+                crate::helper_approval::operator_reference_digest(
+                    event_id,
+                    item.approval_id,
+                    item.run_id,
+                    note,
+                )
+            })
+            .transpose()?;
         let event = ActionOutcomeEventV2 {
-            event_id: Uuid::new_v4(),
+            event_id,
             sequence: previous.map_or(1, |(e, _)| e.sequence + 1),
             previous_event_id: previous.map(|(e, _)| e.event_id),
             approval_id: item.approval_id,
@@ -464,16 +491,18 @@ impl ActionJournal {
             run_id: item.run_id,
             fingerprint: item.binding_fingerprint.clone(),
             outcome,
-            operator_reference: operator_reference.map(str::to_owned),
+            operator_reference_sha256: reference_sha256,
             occurred_at: Utc::now(),
         };
         if item.outcome_event.is_some() {
             item.outcome_corrections.push(OutcomeDelivery {
                 event: event.clone(),
+                operator_note: operator_reference.map(str::to_owned),
                 acknowledged: false,
             });
         } else {
             item.outcome_event = Some(event.clone());
+            item.outcome_note = operator_reference.map(str::to_owned);
         }
         item.updated_at = Utc::now();
         if persist {

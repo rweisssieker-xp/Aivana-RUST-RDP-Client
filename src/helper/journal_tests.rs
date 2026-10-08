@@ -228,7 +228,7 @@ fn atomic_operator_report_survives_save_fault_restart_and_intervention_correctio
                 id,
                 IntentState::OutcomeUnknown,
                 ActionOutcomeV2::OutcomeUnknown,
-                "TICKET-101"
+                "password=Secret123; SELECT * FROM customers"
             )
             .is_err()
     );
@@ -250,7 +250,7 @@ fn atomic_operator_report_survives_save_fault_restart_and_intervention_correctio
                 id,
                 IntentState::Verified,
                 ActionOutcomeV2::Verified,
-                "TICKET-101"
+                "password=Secret123; SELECT * FROM customers"
             )
             .is_err()
     );
@@ -259,7 +259,7 @@ fn atomic_operator_report_survives_save_fault_restart_and_intervention_correctio
             id,
             IntentState::OutcomeUnknown,
             ActionOutcomeV2::OutcomeUnknown,
-            "TICKET-101",
+            "password=Secret123; SELECT * FROM customers",
         )
         .unwrap();
     let mut restarted = ActionJournal::load(&path).unwrap();
@@ -281,9 +281,39 @@ fn atomic_operator_report_survives_save_fault_restart_and_intervention_correctio
             .pending_outcomes()
             .next()
             .unwrap()
-            .operator_reference
+            .operator_reference_sha256
             .as_deref(),
-        Some("TICKET-101")
+        Some(
+            crate::helper_approval::operator_reference_digest(
+                unknown.event_id,
+                unknown.approval_id,
+                unknown.run_id,
+                "password=Secret123; SELECT * FROM customers"
+            )
+            .unwrap()
+            .as_str()
+        )
+    );
+    assert_eq!(
+        restarted
+            .intents()
+            .iter()
+            .find(|i| i.id == id)
+            .unwrap()
+            .outcome_note
+            .as_deref(),
+        Some("password=Secret123; SELECT * FROM customers")
+    );
+    assert!(
+        !serde_json::to_string(&unknown)
+            .unwrap()
+            .contains("password=Secret123; SELECT * FROM customers")
+    );
+    assert!(
+        !std::fs::read(&path)
+            .unwrap()
+            .windows(b"password=Secret123".len())
+            .any(|window| window == b"password=Secret123")
     );
     assert!(
         restarted

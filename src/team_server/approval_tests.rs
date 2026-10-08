@@ -199,19 +199,54 @@ fn actual_client_routes_enforce_two_people_exact_binding_and_one_consumption() {
             .consume_action_v2(item.id, &ConsumeActionApprovalV2 { binding: b.clone() })
             .is_err()
     );
+    let sensitive_note = "password=Secret123; SELECT * FROM customers";
+    let event_id = Uuid::new_v4();
     let event = ActionOutcomeEventV2 {
         sequence: 1,
         previous_event_id: None,
-        event_id: Uuid::new_v4(),
+        event_id,
         approval_id: item.id,
         consume_id: receipt.receipt().consume_id,
         run_id: b.run_id,
         fingerprint: receipt.receipt().fingerprint.clone(),
         outcome: ActionOutcomeV2::OutcomeUnknown,
-        operator_reference: Some("operator ticket CASE-1".into()),
+        operator_reference_sha256: Some(
+            operator_reference_digest(event_id, item.id, b.run_id, sensitive_note).unwrap(),
+        ),
         occurred_at: Utc::now(),
     };
     assert!(client.report_action_outcome_v2(&event).unwrap().accepted);
+    let payload: String = rusqlite::Connection::open(&h.db)
+        .unwrap()
+        .query_row(
+            "SELECT payload FROM helper_action_outcome_events_v2 WHERE event_id=?1",
+            [event.event_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!payload.contains(sensitive_note));
+    assert!(!payload.contains("Secret123"));
+    assert!(
+        !serde_json::to_string(&event)
+            .unwrap()
+            .contains(sensitive_note)
+    );
+    let mut raw_wire = serde_json::to_value(&event).unwrap();
+    raw_wire["event_id"] = serde_json::json!(Uuid::new_v4());
+    raw_wire["operator_reference"] = serde_json::json!(sensitive_note);
+    assert_eq!(
+        h.post("/v2/helper-action-outcomes", &alice.token, raw_wire)
+            .status(),
+        400
+    );
+    let mut invalid_digest = serde_json::to_value(&event).unwrap();
+    invalid_digest["event_id"] = serde_json::json!(Uuid::new_v4());
+    invalid_digest["operator_reference_sha256"] = serde_json::json!(sensitive_note);
+    assert_eq!(
+        h.post("/v2/helper-action-outcomes", &alice.token, invalid_digest)
+            .status(),
+        400
+    );
     assert!(client.report_action_outcome_v2(&event).unwrap().accepted);
     let mut conflicting = event.clone();
     conflicting.outcome = ActionOutcomeV2::Failed;

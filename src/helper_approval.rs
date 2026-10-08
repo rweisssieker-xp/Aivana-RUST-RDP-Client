@@ -229,9 +229,10 @@ pub struct ActionOutcomeEventV2 {
     pub run_id: Uuid,
     pub fingerprint: Digest,
     pub outcome: ActionOutcomeV2,
-    /// Human reconciliation reference only; never a native verification proof.
+    /// Digest of a protected local operator note; never the note itself or
+    /// a native SQL verification proof.
     #[serde(default)]
-    pub operator_reference: Option<String>,
+    pub operator_reference_sha256: Option<Digest>,
     pub occurred_at: DateTime<Utc>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -239,4 +240,16 @@ pub struct ActionOutcomeEventV2 {
 pub struct ActionOutcomeAckV2 {
     pub event_id: Uuid,
     pub accepted: bool,
+}
+
+pub fn operator_reference_digest(
+    event_id: Uuid,
+    approval_id: Uuid,
+    run_id: Uuid,
+    note: &str,
+) -> Result<Digest> {
+    digest(
+        b"relayne-helper-operator-reference-v1",
+        &(event_id, approval_id, run_id, note),
+    )
 }
