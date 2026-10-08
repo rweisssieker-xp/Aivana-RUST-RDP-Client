@@ -169,18 +169,25 @@ impl SqlObservation {
                     && *tls_required
             }
             Self::SqlServerRequest {
+                session_id,
                 state,
                 wait_type,
                 elapsed_ms,
-                ..
             } => {
-                state.as_deref().is_none_or(Self::tds_state)
+                *session_id > 0
+                    && state.as_deref().is_none_or(Self::tds_state)
                     && wait_type.as_deref().is_none_or(Self::token)
                     && elapsed_ms.is_none_or(|v| v >= 0)
             }
             Self::SqlServerWait {
-                wait_type, wait_ms, ..
-            } => wait_type.as_deref().is_none_or(Self::token) && wait_ms.is_none_or(|v| v >= 0),
+                session_id,
+                wait_type,
+                wait_ms,
+            } => {
+                *session_id > 0
+                    && wait_type.as_deref().is_none_or(Self::token)
+                    && wait_ms.is_none_or(|v| v >= 0)
+            }
             Self::SqlServerBlocking {
                 waiting_session_id,
                 blocking_session_id,

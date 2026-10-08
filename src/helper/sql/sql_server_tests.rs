@@ -72,6 +72,15 @@ fn denied_visibility_and_nulls_never_become_healthy() {
         classify(SqlServerReadProbe::Objects, &[]),
         ReadState::Unknown
     );
+    assert!(
+        !SqlObservation::SqlServerRequest {
+            session_id: 0,
+            state: Some("running".into()),
+            wait_type: None,
+            elapsed_ms: Some(1),
+        }
+        .bounded()
+    );
 }
 
 #[test]

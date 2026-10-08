@@ -542,12 +542,25 @@ fn classify(probe: SqlServerReadProbe, rows: &[SqlObservation]) -> ReadState {
         matches!(
             v,
             SqlObservation::SqlServerRequest { state: None, .. }
+                | SqlObservation::SqlServerRequest {
+                    elapsed_ms: None,
+                    ..
+                }
                 | SqlObservation::SqlServerWait {
                     wait_type: None,
                     ..
                 }
+                | SqlObservation::SqlServerWait { wait_ms: None, .. }
                 | SqlObservation::Index { scans: None, .. }
                 | SqlObservation::SqlServerStatistics { rows: None, .. }
+                | SqlObservation::SqlServerStatistics {
+                    modification_counter: None,
+                    ..
+                }
+                | SqlObservation::SqlServerStatistics {
+                    histogram_steps: None,
+                    ..
+                }
                 | SqlObservation::SqlServerPermission {
                     database_connect: None,
                     ..
