@@ -1696,6 +1696,167 @@ mod tests {
     }
 
     #[test]
+    fn list_persists_pending_and_approved_expiry_once_without_decision_or_consume() {
+        use crate::repair_approval::*;
+        let h = Harness::new();
+        let alice = h.issue_actor("alice", Role::Operator);
+        let bob = h.issue_actor("bob", Role::Operator);
+        let viewer = h.issue_actor("watcher", Role::Viewer);
+        let pending = create_repair(&h, &alice.token, repair_binding());
+        let approved = create_repair(&h, &alice.token, repair_binding());
+        let denied = create_repair(&h, &alice.token, repair_binding());
+        let consumed = create_repair(&h, &alice.token, repair_binding());
+        assert_eq!(
+            decide_repair(&h, &bob.token, approved.id, RepairDecision::Approve).status(),
+            200
+        );
+        assert_eq!(
+            decide_repair(&h, &bob.token, denied.id, RepairDecision::Deny).status(),
+            200
+        );
+        assert_eq!(
+            decide_repair(&h, &bob.token, consumed.id, RepairDecision::Approve).status(),
+            200
+        );
+        assert_eq!(consume_repair(&h, &alice.token, &consumed).status(), 200);
+        let db = open_store(&h.db).unwrap();
+        for id in [pending.id, approved.id, denied.id, consumed.id] {
+            db.execute(
+                "UPDATE repair_approvals SET expires_at=?1 WHERE id=?2",
+                params![
+                    (chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339(),
+                    id.to_string()
+                ],
+            )
+            .unwrap();
+        }
+        drop(db);
+        let path = "/v1/repair-approvals?limit=20&offset=0";
+        assert_eq!(
+            h.request(
+                reqwest::Method::GET,
+                path,
+                &viewer.token,
+                serde_json::Value::Null
+            )
+            .status(),
+            403
+        );
+        let db = open_store(&h.db).unwrap();
+        let untouched: i64 = db.query_row("SELECT COUNT(*) FROM repair_approvals WHERE state IN ('pending','approved') AND id IN (?1,?2)", params![pending.id.to_string(), approved.id.to_string()], |r| r.get(0)).unwrap();
+        assert_eq!(untouched, 2);
+        drop(db);
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let url = format!("{}{}", h.url, path);
+                let token = alice.token.clone();
+                std::thread::spawn(move || {
+                    reqwest::blocking::Client::new()
+                        .get(url)
+                        .bearer_auth(token)
+                        .send()
+                        .unwrap()
+                        .status()
+                })
+            })
+            .collect();
+        for handle in handles {
+            assert_eq!(handle.join().unwrap(), 200);
+        }
+        for _ in 0..2 {
+            let response = h.request(
+                reqwest::Method::GET,
+                path,
+                &alice.token,
+                serde_json::Value::Null,
+            );
+            assert_eq!(response.status(), 200);
+            let rows: Vec<RepairApproval> = response.json().unwrap();
+            for id in [pending.id, approved.id] {
+                assert_eq!(
+                    rows.iter().find(|item| item.id == id).unwrap().state,
+                    RepairState::Expired
+                );
+            }
+            assert_eq!(
+                rows.iter().find(|item| item.id == denied.id).unwrap().state,
+                RepairState::Denied
+            );
+            assert_eq!(
+                rows.iter()
+                    .find(|item| item.id == consumed.id)
+                    .unwrap()
+                    .state,
+                RepairState::Consumed
+            );
+        }
+        let db = open_store(&h.db).unwrap();
+        for id in [pending.id, approved.id] {
+            let (state, audits): (String, i64) = db.query_row(
+                "SELECT state,(SELECT COUNT(*) FROM audit WHERE action='repair_expired' AND target=?1) FROM repair_approvals WHERE id=?1",
+                [id.to_string()], |r| Ok((r.get(0)?, r.get(1)?)),
+            ).unwrap();
+            assert_eq!(state, "expired");
+            assert_eq!(audits, 1);
+        }
+        for (id, state) in [(denied.id, "denied"), (consumed.id, "consumed")] {
+            let (stored, audits): (String, i64) = db.query_row(
+                "SELECT state,(SELECT COUNT(*) FROM audit WHERE action='repair_expired' AND target=?1) FROM repair_approvals WHERE id=?1",
+                [id.to_string()], |r| Ok((r.get(0)?, r.get(1)?)),
+            ).unwrap();
+            assert_eq!(stored, state);
+            assert_eq!(audits, 0);
+        }
+    }
+
+    #[test]
+    fn failed_list_expiry_audit_rolls_back_state_and_response() {
+        let h = Harness::new();
+        let alice = h.issue_actor("alice", Role::Operator);
+        let item = create_repair(&h, &alice.token, repair_binding());
+        let db = open_store(&h.db).unwrap();
+        db.execute(
+            "UPDATE repair_approvals SET expires_at=?1 WHERE id=?2",
+            params![
+                (chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339(),
+                item.id.to_string()
+            ],
+        )
+        .unwrap();
+        db.execute_batch("CREATE TRIGGER reject_repair_expiry_audit BEFORE INSERT ON audit WHEN NEW.action='repair_expired' BEGIN SELECT RAISE(ABORT, 'injected failure'); END;").unwrap();
+        drop(db);
+        let result = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_millis(500))
+            .build()
+            .unwrap()
+            .get(format!("{}/v1/repair-approvals?limit=20&offset=0", h.url))
+            .bearer_auth(&alice.token)
+            .send();
+        assert!(
+            result
+                .map(|response| !response.status().is_success())
+                .unwrap_or(true)
+        );
+        let db = open_store(&h.db).unwrap();
+        let state: String = db
+            .query_row(
+                "SELECT state FROM repair_approvals WHERE id=?1",
+                [item.id.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let audits: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM audit WHERE action='repair_expired' AND target=?1",
+                [item.id.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "pending");
+        assert_eq!(audits, 0);
+    }
+
+    #[test]
     fn concurrent_consume_has_one_winner_and_one_audit_event() {
         use crate::repair_approval::*;
         let h = Harness::new();

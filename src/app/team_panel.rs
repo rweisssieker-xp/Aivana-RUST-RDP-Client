@@ -133,6 +133,14 @@ fn visible_repair_state(item: &RepairApproval) -> RepairState {
     }
 }
 
+fn visible_repair_label(item: &RepairApproval) -> &'static str {
+    if item.state != RepairState::Expired && visible_repair_state(item) == RepairState::Expired {
+        "Deadline passed locally; reload to confirm recorded expiry"
+    } else {
+        repair_state_label(item.state)
+    }
+}
+
 fn repair_role_summary(role: &Role) -> &'static str {
     match role {
         Role::Viewer => {
@@ -216,9 +224,13 @@ mod repair_status_tests {
         item.state = RepairState::Pending;
         item.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
         assert_eq!(visible_repair_state(&item), RepairState::Expired);
+        assert!(visible_repair_label(&item).contains("reload"));
         assert!(!can_decide_repair(&Role::Operator, "bob", &item));
         item.state = RepairState::Approved;
         assert_eq!(visible_repair_state(&item), RepairState::Expired);
+        assert!(visible_repair_label(&item).contains("reload"));
+        item.state = RepairState::Expired;
+        assert_eq!(visible_repair_label(&item), "Expired");
         item.state = RepairState::Consumed;
         assert_eq!(visible_repair_state(&item), RepairState::Consumed);
         item.state = RepairState::Denied;
@@ -436,7 +448,7 @@ impl AivanaApp {
         ui.small(repair_role_summary(&snapshot.role));
         ui.small("Legacy actor labels are assigned by an administrator; different labels do not prove different people. OIDC checks signed token expiry and current local subject role, without instant external identity-provider revocation.");
         ui.small("Team records contain credential-free endpoints and repair metadata. RDP credentials stay local; WinRM uses your current Windows identity. The masked team token stays in this app's memory and is cleared on sign-out.");
-        ui.small("Successful repair requests, decisions, expiry, consumption, and outcome acceptance are recorded with metadata in the same server transaction. Only admins can load the latest 500 audit entries; an approval state is not a delivered outcome.");
+        ui.small("Server refresh records elapsed approval deadlines and expiry audit together. A cached row can pass its deadline between refreshes; reload to confirm the server record. Only admins can load the latest 500 audit entries; an approval state is not a delivered outcome.");
         ui.collapsing("Repair approval status", |ui| {
             ui.small("The server makes the final authorization decision. A requester and approver must be different authenticated actors. Compare the full fingerprint and intended change through your review channel; a digest alone does not reveal the command.");
             if ui.add_enabled(self.team.pending.is_none() && snapshot.role != Role::Viewer, egui::Button::new("Load recent repair approvals")).clicked() {
@@ -451,7 +463,7 @@ impl AivanaApp {
                 ui.small(format!("Showing {} approvals from offset {} (up to 20 per page).", self.team.repairs.len(), self.team.repairs_offset));
                 for item in self.team.repairs.clone() {
                     ui.group(|ui| {
-                        ui.strong(repair_state_label(visible_repair_state(&item)));
+                        ui.strong(visible_repair_label(&item));
                         ui.label(format!("Requester {} · Approver {} · Run {} · target {}", item.requester, item.approver.as_deref().unwrap_or("—"), item.binding.run_id, item.binding.target_index + 1));
                         ui.label(format!("Service {} · {:?} → {:?} · expires {} UTC", item.binding.service, item.binding.before, item.binding.desired, item.expires_at));
                         ui.small(format!("Fingerprint {}…", abbreviated_fingerprint(&item.fingerprint)));

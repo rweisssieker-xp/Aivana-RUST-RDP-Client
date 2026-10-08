@@ -243,17 +243,16 @@ pub(super) fn serve(
             err(request, 400, "Invalid list range");
             return Ok(());
         }
-        let mut stmt = db.prepare(&format!("{SELECT} WHERE requester_actor=?1 OR approver_actor=?1 OR (state='pending' AND requester_actor<>?1) ORDER BY created_at DESC LIMIT ?2 OFFSET ?3"))?;
-        let mut rows = stmt
-            .query_map(params![who.actor, limit, offset], row)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut rows = {
+            let mut stmt = tx.prepare(&format!("{SELECT} WHERE requester_actor=?1 OR approver_actor=?1 OR (state='pending' AND requester_actor<>?1) ORDER BY created_at DESC LIMIT ?2 OFFSET ?3"))?;
+            stmt.query_map(params![who.actor, limit, offset], row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
         for item in &mut rows {
-            if item.expires_at <= now
-                && matches!(item.state, RepairState::Pending | RepairState::Approved)
-            {
-                item.state = RepairState::Expired;
-            }
+            expire(&tx, item, now)?;
         }
+        tx.commit()?;
         respond(request, 200, serde_json::to_value(rows)?);
         return Ok(());
     }
