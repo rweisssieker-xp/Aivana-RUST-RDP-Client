@@ -119,6 +119,31 @@ impl PersistentCredentialStore {
             secret,
         )
     }
+    pub fn prepare_scoped(
+        &mut self,
+        scope_digest: &str,
+        purpose: crate::helper::scope::CredentialPurpose,
+        expected_current: Option<Uuid>,
+        secret: SecretCredential,
+    ) -> Result<crate::models::ScopedCredentialRef> {
+        crate::helper::credentials::prepare_scoped_at(
+            &self.path.with_extension("scoped.dpapi"),
+            scope_digest,
+            purpose,
+            expected_current,
+            secret,
+        )
+    }
+    pub fn commit_scoped(&mut self, new_id: Uuid, previous_id: Option<Uuid>) -> Result<()> {
+        crate::helper::credentials::commit_scoped_at(
+            &self.path.with_extension("scoped.dpapi"),
+            new_id,
+            previous_id,
+        )
+    }
+    pub fn abort_scoped(&mut self, id: Uuid) -> Result<()> {
+        crate::helper::credentials::abort_scoped_at(&self.path.with_extension("scoped.dpapi"), id)
+    }
 
     #[allow(dead_code)]
     pub fn revoke_scoped(&mut self, reference: Uuid) -> Result<()> {
