@@ -4,8 +4,9 @@ BEGIN
     IF current_database() <> 'relayne_helper_acceptance'
        OR current_user <> 'relayne_fixture_owner'
        OR current_setting('port') <> '55433'
-       OR inet_server_addr()::text <> '127.0.0.1' THEN
-        RAISE EXCEPTION 'Refusing fixture seed outside the dedicated guest database, role, port, and loopback listener';
+       OR inet_server_addr() IS DISTINCT FROM inet '127.0.0.1' THEN
+        RAISE EXCEPTION 'Refusing fixture seed outside the dedicated guest database, role, port, and loopback listener (database=%, role=%, port=%, server_address=%)',
+            current_database(), current_user, current_setting('port'), inet_server_addr();
     END IF;
 END
 $guard$;
