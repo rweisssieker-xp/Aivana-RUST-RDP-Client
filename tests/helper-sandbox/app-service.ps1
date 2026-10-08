@@ -20,8 +20,12 @@ if ($config.root -cne $root -or $config.database -cne 'relayne_helper_acceptance
 $ports = @{ api = 58080; 'portal-a' = 58081; 'portal-b' = 58082 }
 if ($config.port -ne $ports[$config.kind]) { throw 'Invalid fixture app port.' }
 if ([IO.Path]::GetFullPath($ConfigPath) -ine (Join-Path $root "app-fixture\$($config.kind).json")) { throw 'Invalid fixture config path.' }
+if ($config.run_id -notmatch '^[a-f0-9]{32}$') { throw 'Invalid fixture run identifier.' }
 $queryPath = Join-Path $PSScriptRoot 'app-query.sql'
-$receiptPath = Join-Path $root "evidence\$($config.kind)-requests.jsonl"
+$receiptPath = Join-Path $root "evidence\app-$($config.run_id)-$($config.kind).jsonl"
+if (Test-Path -LiteralPath $receiptPath) { throw 'Per-run receipt already exists.' }
+$receiptCount = 0
+$receiptBytes = 0
 $credentialPath = Join-Path $root 'credentials.txt'
 $caPath = Join-Path $root 'root.crt'
 $psqlPath = Join-Path $root 'pgsql\bin\psql.exe'
@@ -70,11 +74,12 @@ function Invoke-DatabaseQuery {
     } finally { $secret = $null; $readerLine = $null }
 }
 
-function Invoke-ApiFromPortal([string]$origin) {
+function Invoke-ApiFromPortal([string]$origin, [string]$probe) {
     $request = [Net.HttpWebRequest][Net.WebRequest]::Create('http://127.0.0.1:58080/orders?customer_id=424242&limit=3')
     $request.Method = 'GET'
     $request.Timeout = 5000
     $request.Headers.Add('Origin', $origin)
+    if ($probe) { $request.Headers.Add('X-Relayne-Probe', $probe) }
     $response = [Net.HttpWebResponse]$request.GetResponse()
     try {
         if ([int]$response.StatusCode -ne 200 -or $response.Headers['Access-Control-Allow-Origin'] -cne $origin) {
@@ -90,13 +95,58 @@ function Invoke-ApiFromPortal([string]$origin) {
 function Write-Response($client, [int]$status, [string]$body, [string]$contentType, [string]$cors) {
     $stream = $client.GetStream()
     $bytes = [Text.Encoding]::UTF8.GetBytes($body)
-    $reason = if ($status -eq 200) { 'OK' } elseif ($status -eq 403) { 'Forbidden' } elseif ($status -eq 404) { 'Not Found' } else { 'Service Unavailable' }
+    $reason = if ($status -eq 200) { 'OK' } elseif ($status -eq 400) { 'Bad Request' } elseif ($status -eq 403) { 'Forbidden' } elseif ($status -eq 404) { 'Not Found' } else { 'Service Unavailable' }
     $headers = "HTTP/1.1 $status $reason`r`nContent-Type: $contentType; charset=utf-8`r`nContent-Length: $($bytes.Length)`r`nConnection: close`r`nCache-Control: no-store`r`n"
     if ($cors) { $headers += "Access-Control-Allow-Origin: $cors`r`nVary: Origin`r`n" }
     $head = [Text.Encoding]::ASCII.GetBytes($headers + "`r`n")
     $stream.Write($head, 0, $head.Length)
     $stream.Write($bytes, 0, $bytes.Length)
     $stream.Flush()
+}
+
+function Read-BoundedRequest($client) {
+    $stream = $client.GetStream()
+    $bytes = [Collections.Generic.List[byte]]::new()
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    while ($bytes.Count -lt 4096) {
+        $remaining = 5000 - [int]$clock.ElapsedMilliseconds
+        if ($remaining -le 0) { throw 'HTTP header deadline exceeded.' }
+        $stream.ReadTimeout = $remaining
+        $value = $stream.ReadByte()
+        if ($value -lt 0 -or $value -gt 127) { throw 'Invalid HTTP header byte.' }
+        $bytes.Add([byte]$value)
+        $n = $bytes.Count
+        if ($n -ge 4 -and $bytes[$n-4] -eq 13 -and $bytes[$n-3] -eq 10 -and
+            $bytes[$n-2] -eq 13 -and $bytes[$n-1] -eq 10) { break }
+    }
+    if ($bytes.Count -ge 4096 -and -not ($bytes[$bytes.Count-4] -eq 13 -and $bytes[$bytes.Count-3] -eq 10 -and
+        $bytes[$bytes.Count-2] -eq 13 -and $bytes[$bytes.Count-1] -eq 10)) { throw 'HTTP header exceeds 4096 bytes.' }
+    $lines = [Text.Encoding]::ASCII.GetString($bytes.ToArray()).Split(@("`r`n"), [StringSplitOptions]::None)
+    if ($lines.Count -gt 34 -or $lines[0] -notmatch '^GET ([^ ]{1,128}) HTTP/1\.[01]$') { throw 'Invalid or oversized request line/header count.' }
+    $route = $Matches[1]; $origin = ''; $probe = ''; $originCount = 0; $probeCount = 0
+    for ($i = 1; $i -lt $lines.Count - 2; $i++) {
+        if ($lines[$i] -notmatch '^([A-Za-z0-9-]+):[ \t]*([^\r\n]*)$') { throw 'Malformed HTTP header.' }
+        $name = $Matches[1]; $value = $Matches[2].Trim()
+        if ($name -ieq 'Origin') { $originCount++; $origin = $value }
+        if ($name -ieq 'X-Relayne-Probe') { $probeCount++; $probe = $value }
+    }
+    if ($originCount -gt 1 -or ($originCount -eq 1 -and -not $origin) -or
+        $probeCount -gt 1 -or ($probeCount -eq 1 -and $probe -notmatch '^[a-f0-9]{32}$')) {
+        throw 'Ambiguous or malformed Origin/probe header.'
+    }
+    return [pscustomobject]@{ route=$route; origin=$origin; probe=$probe }
+}
+
+function Write-BoundedReceipt($receipt) {
+    $line = ($receipt | ConvertTo-Json -Depth 6 -Compress) + "`n"
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($line)
+    if ($script:receiptCount -ge 512 -or $script:receiptBytes + $bytes.Length -gt 1048576 -or $bytes.Length -gt 4096) {
+        throw 'App receipt budget exhausted; refusing unrecorded response.'
+    }
+    $file = [IO.FileStream]::new($receiptPath, [IO.FileMode]::Append, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+    try { $file.Write($bytes, 0, $bytes.Length); $file.Flush($true) } finally { $file.Dispose() }
+    $script:receiptCount++
+    $script:receiptBytes += $bytes.Length
 }
 
 $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Parse('127.0.0.1'), [int]$config.port)
@@ -107,18 +157,12 @@ try {
         try {
             $client.ReceiveTimeout = 5000
             $client.SendTimeout = 5000
-            $reader = [IO.StreamReader]::new($client.GetStream(), [Text.Encoding]::ASCII, $false, 1024, $true)
-            $requestLine = $reader.ReadLine()
-            $origin = ''
-            for ($h = 0; $h -lt 32; $h++) {
-                $line = $reader.ReadLine()
-                if ($null -eq $line -or $line -eq '') { break }
-                if ($line.StartsWith('Origin: ', [StringComparison]::OrdinalIgnoreCase)) { $origin = $line.Substring(8).Trim() }
-            }
             $clock = [Diagnostics.Stopwatch]::StartNew()
-            $status = 404; $body = '{"error":"unknown route"}'; $type = 'application/json'; $cors = ''; $observed = @(); $observedRows = @(); $receiptOrigin = $origin
-            $route = if ($requestLine -match '^GET ([^ ]+) HTTP/1\.[01]$') { $Matches[1] } else { '' }
+            $status = 400; $body = '{"error":"invalid request"}'; $type = 'application/json'; $cors = ''; $observed = @(); $observedRows = @(); $receiptOrigin = ''; $route = 'invalid'; $probe = ''
             try {
+                $request = Read-BoundedRequest $client
+                $route = $request.route; $origin = $request.origin; $probe = $request.probe; $receiptOrigin = $origin
+                $status = 404; $body = '{"error":"unknown route"}'
                 if ($config.kind -ceq 'api') {
                     if ($origin -and $origin -cnotin @('http://127.0.0.1:58081', 'http://127.0.0.1:58082')) {
                         $status = 403; $body = '{"error":"origin denied"}'
@@ -133,7 +177,7 @@ try {
                 } elseif ($route -ceq '/check' -or $route -ceq '/') {
                     $portalOrigin = "http://127.0.0.1:$($config.port)"
                     $receiptOrigin = $portalOrigin
-                    $data = Invoke-ApiFromPortal $portalOrigin
+                    $data = Invoke-ApiFromPortal $portalOrigin $probe
                     $observed = @($data.orders | ForEach-Object { $_.order_id })
                     $observedRows = @($data.orders | Select-Object order_id,customer_id,status,amount)
                     if ($route -ceq '/check') {
@@ -150,11 +194,13 @@ try {
                     }
                     $status = 200
                 }
-            } catch { $status = 503; $body = '{"error":"fixture data unavailable"}'; $type = 'application/json' }
-            Write-Response $client $status $body $type $cors
+            } catch {
+                if ($route -ne 'invalid') { $status = 503; $body = '{"error":"fixture data unavailable"}'; $type = 'application/json' }
+            }
             $clock.Stop()
-            $receipt = [ordered]@{ at_utc = [DateTime]::UtcNow.ToString('o'); fixture = 'guest-local'; service = $config.kind; origin = $receiptOrigin; route = $route; status = $status; elapsed_ms = $clock.Elapsed.TotalMilliseconds; expected_order_ids = @(60001,60002,60003); observed_order_ids = $observed; observed_rows = $observedRows; db_backed = ($status -eq 200) }
-            Add-Content -LiteralPath $receiptPath -Value ($receipt | ConvertTo-Json -Compress) -Encoding UTF8
-        } catch { } finally { $client.Dispose() }
+            $receipt = [ordered]@{ at_utc = [DateTime]::UtcNow.ToString('o'); fixture = 'guest-local'; run_id = $config.run_id; service = $config.kind; origin = $receiptOrigin; route = $route; probe = $probe; status = $status; elapsed_ms = $clock.Elapsed.TotalMilliseconds; expected_order_ids = @(60001,60002,60003); observed_order_ids = $observed; observed_rows = $observedRows; db_backed = ($status -eq 200) }
+            Write-BoundedReceipt $receipt
+            Write-Response $client $status $body $type $cors
+        } finally { $client.Dispose() }
     }
 } finally { $listener.Stop() }
