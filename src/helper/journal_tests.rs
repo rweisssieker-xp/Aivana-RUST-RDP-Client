@@ -31,6 +31,106 @@ use crate::helper_action::{
 use crate::helper_approval::{ActionBindingV2, ActionProof, ConsumeReceiptV2, RunKind};
 use chrono::Duration;
 
+#[test]
+fn functional_only_production_receipt_can_resolve_without_performance_samples() {
+    use crate::helper::case::{Comparator, HelperCase, ProblemIntake, SuccessCriterion};
+    use crate::helper::verification::{
+        CheckOutcome, FunctionalCheckReceipt, FunctionalReceipt, RunReference, resolve_case,
+    };
+    use crate::helper_action::{CriterionComparator, CriterionRequirement, RequiredCheck, VerificationSpec};
+    use crate::helper_approval::{ActionOutcomeEventV2, ActionOutcomeV2};
+
+    let mut intake = ProblemIntake::default();
+    intake.success_criteria.push(SuccessCriterion {
+        measure: "HTTP status".into(),
+        comparator: Comparator::Equal,
+        threshold: 200.0,
+        unit: "status".into(),
+        window: "after change".into(),
+        reviewed: true,
+    });
+    let case = HelperCase::new(intake).unwrap();
+    let check = RequiredCheck::HttpFunctional {
+        scope_sha256: d(),
+        expected_status: 200,
+        body_sha256: None,
+        window: "after change".into(),
+    };
+    let verification = VerificationSpec {
+        checks: vec![check.clone()],
+        criteria: vec![CriterionRequirement {
+            measure: "HTTP status".into(),
+            comparator: CriterionComparator::Equal,
+            threshold_bits: 200f64.to_bits(),
+            unit: "status".into(),
+            window: "after change".into(),
+        }],
+    };
+    verification.validate().unwrap();
+    let approved_verification_sha256 = crate::helper_action::digest(
+        b"relayne-helper-reviewed-verification-v2",
+        &verification,
+    )
+    .unwrap();
+    let run_id = Uuid::new_v4();
+    let approval_id = Uuid::new_v4();
+    let consume_id = Uuid::new_v4();
+    let path = path();
+    let mut journal = ActionJournal::load(&path).unwrap();
+    journal
+        .test_seed_verified_production(
+            run_id,
+            case.id(),
+            approval_id,
+            consume_id,
+            d(),
+            d(),
+            d(),
+        )
+        .unwrap();
+    let now = Utc::now();
+    journal.intents[0].verification_sha256 = Some(approved_verification_sha256.clone());
+    journal.intents[0].outcome_event = Some(ActionOutcomeEventV2 {
+        event_id: Uuid::new_v4(),
+        sequence: 1,
+        previous_event_id: None,
+        approval_id,
+        consume_id,
+        run_id,
+        fingerprint: d(),
+        outcome: ActionOutcomeV2::Verified,
+        operator_reference_sha256: None,
+        occurred_at: now - Duration::seconds(2),
+    });
+    let receipt = FunctionalReceipt {
+        case_id: case.id(),
+        case_revision: case.revision(),
+        evidence_revision: case.evidence_revision(),
+        verification_plan_sha256: d(),
+        run: RunReference::GenericProduction {
+            run_id,
+            binding_sha256: d(),
+            production_receipt_sha256: Some(d()),
+        },
+        captured_at: now,
+        verification,
+        approved_verification_sha256,
+        checks: vec![FunctionalCheckReceipt {
+            check,
+            outcome: CheckOutcome::Passed,
+            observed_http_status: Some(200),
+            observed_row_count: None,
+            observed_body_sha256: None,
+            observed_at: Some(now - Duration::seconds(1)),
+        }],
+    };
+    assert_eq!(
+        resolve_case(&case, &journal, &receipt, None).unwrap(),
+        crate::helper::case::CaseResolution::VerifiedRelayneRepair
+    );
+    std::fs::remove_file(path).unwrap();
+}
+
 fn d() -> String {
     "a".repeat(64)
 }

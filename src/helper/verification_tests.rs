@@ -1,6 +1,94 @@
 use super::*;
 
 #[test]
+fn service_performance_is_rejected_before_verification_dispatch() {
+    use crate::helper_action::CriterionRequirement;
+    let case = HelperCase::new(crate::helper::case::ProblemIntake::default()).unwrap();
+    let verification = VerificationSpec {
+        checks: vec![
+            RequiredCheck::HttpFunctional {
+                scope_sha256: digest(),
+                expected_status: 200,
+                body_sha256: None,
+                window: "after change".into(),
+            },
+            RequiredCheck::Performance {
+                scope_sha256: digest(),
+                object_id: 1,
+                workload_sha256: digest(),
+                maximum_median_ms: 100,
+                maximum_p95_ms: 100,
+                minimum_warmups: 3,
+                minimum_samples: 15,
+                window: "after change".into(),
+            },
+        ],
+        criteria: vec![
+            CriterionRequirement {
+                measure: "HTTP status".into(),
+                comparator: CriterionComparator::Equal,
+                threshold_bits: 200f64.to_bits(),
+                unit: "status".into(),
+                window: "after change".into(),
+            },
+            CriterionRequirement {
+                measure: "Median latency".into(),
+                comparator: CriterionComparator::AtMost,
+                threshold_bits: 100f64.to_bits(),
+                unit: "ms".into(),
+                window: "after change".into(),
+            },
+        ],
+    };
+    verification.validate().unwrap();
+    let approved_verification_sha256 = crate::helper_action::digest(
+        b"relayne-helper-reviewed-verification-v2",
+        &verification,
+    )
+    .unwrap();
+    let run = RunReference::ExistingService {
+        run_id: Uuid::new_v4(),
+        target_index: 0,
+        execution_plan_sha256: digest(),
+    };
+    let plan = VerificationPlan {
+        case_id: case.id(),
+        case_revision: case.revision(),
+        evidence_revision: case.evidence_revision(),
+        run: run.clone(),
+        verification: verification.clone(),
+        approved_verification_sha256: approved_verification_sha256.clone(),
+        http_scopes: Vec::new(),
+        sql_targets: Vec::new(),
+        captured_at: Utc::now(),
+    };
+    assert!(
+        plan.validate(&case)
+            .unwrap_err()
+            .to_string()
+            .contains("Service performance")
+    );
+    let receipt = FunctionalReceipt {
+        case_id: case.id(),
+        case_revision: case.revision(),
+        evidence_revision: case.evidence_revision(),
+        verification_plan_sha256: digest(),
+        run,
+        captured_at: Utc::now(),
+        verification,
+        approved_verification_sha256,
+        checks: Vec::new(),
+    };
+    assert!(
+        receipt
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("Service performance")
+    );
+}
+
+#[test]
 fn persisted_resolution_links_reject_missing_or_aliased_receipts() {
     let mut links = crate::helper::case::ResolutionProofLinks {
         run_id: Uuid::from_u128(1),

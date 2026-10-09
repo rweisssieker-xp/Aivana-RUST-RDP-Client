@@ -2,6 +2,41 @@ use super::*;
 use crate::helper::case::{Answer, CaseEdit, MAX_DESCRIPTION, MAX_LIST, MAX_PROFILES};
 
 #[test]
+fn reopened_verified_case_requires_protected_receipts() {
+    use crate::helper::case::{CaseResolution, ResolutionProofLinks, ResolutionReview};
+    let dir = std::env::temp_dir().join(format!("relayne-helper-{}", Uuid::new_v4()));
+    let path = dir.join("cases.dpapi");
+    let mut store = HelperStore::load(&path).unwrap();
+    let case_id = store.create(ProblemIntake::default()).unwrap();
+    let digest = "a".repeat(64);
+    store.cases[0]
+        .record_resolution(ResolutionReview {
+            outcome: CaseResolution::VerifiedRelayneRepair,
+            reason: "Fixture-only claim".into(),
+            coverage: "HTTP status".into(),
+            evidence_refs: Vec::new(),
+            proof_sha256: Some(digest.clone()),
+            proof_links: Some(ResolutionProofLinks {
+                run_id: Uuid::new_v4(),
+                intent_id: Uuid::new_v4(),
+                production_receipt_sha256: digest.clone(),
+                functional_receipt_id: Uuid::new_v4(),
+                functional_receipt_sha256: digest,
+                baseline_receipt_id: None,
+                baseline_receipt_sha256: None,
+                after_receipt_id: None,
+                after_receipt_sha256: None,
+            }),
+            reviewed_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    assert_eq!(store.cases[0].id(), case_id);
+    store.save(&path).unwrap();
+    assert!(HelperStore::load(&path).is_err());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn unknown_answer_round_trips() {
     let dir = std::env::temp_dir().join(format!("relayne-helper-{}", Uuid::new_v4()));
     let path = dir.join("cases.dpapi");

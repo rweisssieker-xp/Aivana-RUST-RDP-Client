@@ -518,9 +518,8 @@ impl VerificationSpec {
             !self.checks.is_empty()
                 && self.checks.len() <= 16
                 && self.criteria.len() == self.checks.len()
-                && self.checks.iter().any(RequiredCheck::functional)
-                && self.checks.iter().any(|c| !c.functional()),
-            "Functional and performance checks are required"
+                && self.checks.iter().any(RequiredCheck::functional),
+            "At least one functional check is required"
         );
         for (check, criterion) in self.checks.iter().zip(&self.criteria) {
             check.validate()?;
@@ -593,6 +592,20 @@ mod tests {
             criteria: vec![status, latency],
         };
         spec.validate().unwrap();
+        VerificationSpec {
+            checks: vec![spec.checks[0].clone()],
+            criteria: vec![spec.criteria[0].clone()],
+        }
+        .validate()
+        .unwrap();
+        assert!(
+            VerificationSpec {
+                checks: vec![spec.checks[1].clone()],
+                criteria: vec![spec.criteria[1].clone()],
+            }
+            .validate()
+            .is_err()
+        );
         spec.criteria.swap(0, 1);
         assert!(spec.validate().is_err());
         spec.criteria.swap(0, 1);

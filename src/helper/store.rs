@@ -337,6 +337,22 @@ impl HelperStore {
         );
         let mut store: Self = serde_json::from_slice(&raw)?;
         store.validate()?;
+        if store
+            .cases
+            .iter()
+            .any(|case| case.resolution() == Some(super::case::CaseResolution::VerifiedRelayneRepair))
+        {
+            let journal = super::journal::ActionJournal::load(&super::journal::ActionJournal::path()?)?;
+            let receipts = super::verification::ReceiptStore::load_checked(
+                &super::verification::ReceiptStore::path()?,
+                &journal,
+            )?;
+            for case in &store.cases {
+                if case.resolution() == Some(super::case::CaseResolution::VerifiedRelayneRepair) {
+                    receipts.verify_resolution_from_store(case, &journal)?;
+                }
+            }
+        }
         store.source_digest = Some(digest(&bytes));
         store.opened = true;
         Ok(store)

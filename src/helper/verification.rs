@@ -131,6 +131,15 @@ impl VerificationPlan {
         self.run.validate()?;
         self.verification.validate()?;
         ensure!(
+            !matches!(self.run, RunReference::ExistingService { .. })
+                || self
+                    .verification
+                    .checks
+                    .iter()
+                    .all(RequiredCheck::functional),
+            "Service performance verification is unsupported"
+        );
+        ensure!(
             crate::helper_action::digest(
                 b"relayne-helper-reviewed-verification-v2",
                 &self.verification
@@ -266,6 +275,15 @@ impl FunctionalReceipt {
         );
         self.run.validate()?;
         self.verification.validate()?;
+        ensure!(
+            !matches!(self.run, RunReference::ExistingService { .. })
+                || self
+                    .verification
+                    .checks
+                    .iter()
+                    .all(RequiredCheck::functional),
+            "Service performance verification is unsupported"
+        );
         ensure!(
             crate::helper_action::digest(
                 b"relayne-helper-reviewed-verification-v2",
