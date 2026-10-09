@@ -130,6 +130,8 @@ pub(super) struct HelperState {
     notice: String,
     action_ui: ActionUiState,
     verification_ui: VerificationUiState,
+    acceptance_report: Option<crate::helper::lab::AcceptanceReport>,
+    acceptance_report_path: String,
 }
 
 impl HelperState {
@@ -164,6 +166,8 @@ impl HelperState {
                 notice: format!("Helper storage unavailable: {e}"),
                 action_ui: ActionUiState::default(),
                 verification_ui: VerificationUiState::default(),
+                acceptance_report: None,
+                acceptance_report_path: String::new(),
             },
         }
     }
@@ -217,6 +221,8 @@ impl HelperState {
                     },
                     action_ui: ActionUiState::default(),
                     verification_ui: VerificationUiState::default(),
+                    acceptance_report: None,
+                    acceptance_report_path: String::new(),
                 }
             }
             Err(e) => Self {
@@ -249,6 +255,8 @@ impl HelperState {
                 ),
                 action_ui: ActionUiState::default(),
                 verification_ui: VerificationUiState::default(),
+                acceptance_report: None,
+                acceptance_report_path: String::new(),
             },
         }
     }
@@ -375,6 +383,8 @@ impl HelperState {
             notice,
             action_ui: ActionUiState::default(),
             verification_ui: VerificationUiState::default(),
+            acceptance_report: None,
+            acceptance_report_path: String::new(),
         }
     }
     pub(super) fn adopt_incident(&mut self, source: crate::incident::Source) {
@@ -511,6 +521,7 @@ impl AivanaApp {
                 self.helper.reload();
             }
         });
+        self.show_acceptance_report(ui);
         ui.label(&self.helper.notice);
         let ids = self
             .helper
@@ -569,11 +580,187 @@ impl AivanaApp {
             ui.label("Create or select a case to begin.");
         }
     }
+
+    fn show_acceptance_report(&mut self, ui: &mut Ui) {
+        use crate::helper::lab::{CaptureState, FixtureLabel, ScenarioStatus, load_report};
+        use crate::localization::{Locale, tr};
+
+        let locale = self.desktop.locale;
+        ui.separator();
+        ui.heading(tr(locale, "Helper acceptance"));
+        ui.label(tr(
+            locale,
+            "Preflight reports show blockers; they do not mean scenarios were executed.",
+        ));
+        ui.horizontal(|ui| {
+            ui.label(tr(locale, "Acceptance report path"));
+            ui.text_edit_singleline(&mut self.helper.acceptance_report_path);
+            if ui.button(tr(locale, "Load report")).clicked() {
+                let result = load_report(std::path::Path::new(&self.helper.acceptance_report_path));
+                match result {
+                    Ok(report) => {
+                        self.helper.acceptance_report = Some(report);
+                        self.helper.notice = tr(locale, "Acceptance report loaded.").into();
+                    }
+                    Err(_) => {
+                        self.helper.acceptance_report = None;
+                        self.helper.notice =
+                            tr(locale, "Acceptance report unavailable or invalid.").into();
+                    }
+                }
+            }
+        });
+
+        let Some(report) = self.helper.acceptance_report.as_ref() else {
+            return;
+        };
+        if report.validate().is_err() {
+            ui.colored_label(
+                egui::Color32::from_rgb(159, 87, 12),
+                tr(locale, "Acceptance report invalid."),
+            );
+            return;
+        }
+        let current = self.helper.current();
+        let is_current = current.is_some_and(|case| {
+            case.id() == report.case_id
+                && case.revision() == report.case_revision
+                && case.evidence_revision() == report.evidence_revision
+        });
+        ui.group(|ui| {
+            ui.strong(match report.fixture {
+                FixtureLabel::SimulationFixture => tr(locale, "Simulation fixture preflight"),
+                FixtureLabel::GuestAcceptancePreflight => tr(locale, "Guest acceptance preflight"),
+                FixtureLabel::MeasuredGuestFixture => tr(locale, "Measured guest fixture"),
+            });
+            ui.label(format!(
+                "{} {} · {} {} · {} {}",
+                tr(locale, "Run"),
+                report.run_id,
+                tr(locale, "Case record"),
+                report.case_id,
+                tr(locale, "Case revision"),
+                report.case_revision
+            ));
+            if !is_current {
+                ui.colored_label(
+                    egui::Color32::from_rgb(159, 87, 12),
+                    tr(locale, "Report historical context."),
+                );
+            }
+            if !report.product_acceptance {
+                ui.strong(tr(locale, "Product acceptance: not established"));
+            }
+            const SCENARIOS: [&str; 7] = [
+                "Sparse intake reload",
+                "Native reads, blocker, imported spill",
+                "Selectivity maintenance",
+                "Reviewed index mutation restoration",
+                "API portal checks",
+                "Binding edits reconciliation",
+                "Lesson invalidation and export",
+            ];
+            for scenario in &report.scenarios {
+                let title = tr(locale, SCENARIOS[scenario.id as usize - 1]);
+                ui.collapsing(title, |ui| {
+                    ui.strong(status_label(locale, scenario.status));
+                    ui.label(tr(locale, &scenario.summary));
+                    for reference in &scenario.evidence_refs {
+                        ui.monospace(reference);
+                    }
+                });
+            }
+            ui.label(tr(locale, "Native capture states"));
+            for capture in &report.captures {
+                ui.horizontal(|ui| {
+                    ui.label(capture_label(locale, capture.state));
+                    ui.label(status_label(locale, capture.status));
+                    if capture.evidence_refs.is_empty() {
+                        ui.small(tr(locale, "No persisted capture reference"));
+                    }
+                });
+            }
+            if report
+                .captures
+                .iter()
+                .any(|item| item.state == CaptureState::Verified)
+                && report
+                    .captures
+                    .iter()
+                    .all(|item| item.evidence_refs.is_empty())
+            {
+                ui.small(tr(
+                    locale,
+                    "Capture references are absent; no verified screenshot is shown.",
+                ));
+            }
+        });
+
+        fn status_label(locale: Locale, status: ScenarioStatus) -> &'static str {
+            tr(
+                locale,
+                match status {
+                    ScenarioStatus::NotRun => "Not run",
+                    ScenarioStatus::Passed => "Passed",
+                    ScenarioStatus::Failed => "Failed",
+                    ScenarioStatus::Blocked => "Blocked",
+                    ScenarioStatus::Incomplete => "Incomplete",
+                },
+            )
+        }
+        fn capture_label(locale: Locale, state: CaptureState) -> &'static str {
+            tr(
+                locale,
+                match state {
+                    CaptureState::Requested => "Requested",
+                    CaptureState::Approved => "Approved",
+                    CaptureState::Consumed => "Consumed",
+                    CaptureState::Verified => "Verified",
+                    CaptureState::Intervention => "Capture intervention",
+                },
+            )
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn acceptance_report_render_is_read_only_and_shows_preflight_state() {
+        let ctx = egui::Context::default();
+        let mut app = AivanaApp::from_context(&ctx);
+        let dir =
+            std::env::temp_dir().join(format!("relayne-helper-acceptance-ui-{}", Uuid::new_v4()));
+        app.helper = HelperState::at_path(dir.join("cases.dpapi"));
+        app.helper.create();
+        let case = app.helper.current().unwrap().clone();
+        app.helper.acceptance_report = Some(
+            crate::helper::lab::run_acceptance(
+                &case,
+                crate::helper::lab::FixtureLabel::SimulationFixture,
+            )
+            .unwrap(),
+        );
+        app.view = View::Helper;
+
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| app.helper_view(ui));
+        });
+
+        let report = app.helper.acceptance_report.as_ref().unwrap();
+        assert!(!report.product_acceptance);
+        assert!(report.scenarios.iter().all(|item| {
+            matches!(
+                item.status,
+                crate::helper::lab::ScenarioStatus::Blocked
+                    | crate::helper::lab::ScenarioStatus::Incomplete
+            )
+        }));
+        assert!(app.operations.queue.jobs.is_empty());
+        std::fs::remove_dir_all(dir).ok();
+    }
 
     fn test_approval(case_id: Uuid) -> crate::helper_approval::ActionApprovalV2 {
         let mut binding = crate::helper::journal::tests::permit().binding().clone();
@@ -613,9 +800,11 @@ mod tests {
 
         app.helper.create();
         assert_ne!(app.helper.selected, Some(first));
-        assert!(sender
-            .send(Ok(ActionUiEvent::ProductionRequested(old_approval)))
-            .is_err());
+        assert!(
+            sender
+                .send(Ok(ActionUiEvent::ProductionRequested(old_approval)))
+                .is_err()
+        );
         app.poll_helper();
         assert!(app.helper.action_ui.pending.is_none());
         assert!(app.helper.action_ui.production_approval.is_none());
@@ -633,11 +822,13 @@ mod tests {
         app.helper.action_ui.pending = Some(receiver);
         app.helper
             .revise(CaseEdit::Description(Answer::Known("Changed case".into())));
-        assert!(sender
-            .send(Ok(ActionUiEvent::ProductionRequested(test_approval(
-                second
-            ))))
-            .is_err());
+        assert!(
+            sender
+                .send(Ok(ActionUiEvent::ProductionRequested(test_approval(
+                    second
+                ))))
+                .is_err()
+        );
         app.poll_helper();
         assert!(app.helper.action_ui.production_approval.is_none());
         assert!(!app.helper.action_ui.staging_confirmed);

@@ -13,6 +13,7 @@ pub mod export;
 pub mod inventory;
 pub mod journal;
 pub mod knowledge;
+pub mod lab;
 pub mod manifest;
 pub mod planner;
 // Fixed tool variants are consumed by the platform adapter waves.

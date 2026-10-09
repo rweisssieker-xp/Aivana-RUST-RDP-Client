@@ -120,6 +120,8 @@ Headless KI / RDP commands:
 Options:
   --rdp-smoke-timeout <seconds>   Override smoke/preflight timeout, clamped to 5-600 seconds
   --rdp-env-file <path>           Read AIVANA_RDP_TEST_* values from a .env file for readiness and live RDP checks
+  --helper-lab --case-id <uuid> [--report <path>] Run a SimulationFixture helper preflight
+  --helper-acceptance --case-id <uuid> [--report <path>] Run a guest acceptance preflight (no scenario execution)
   --help, --ai-help               Show this command reference
 
 Live gate requirement:
@@ -139,10 +141,52 @@ fn cli_arg_value(args: &[String], name: &str) -> Option<String> {
     None
 }
 
+fn run_helper_acceptance_preflight(
+    args: &[String],
+    fixture: helper::lab::FixtureLabel,
+) -> anyhow::Result<helper::lab::AcceptanceReport> {
+    let case_id = cli_arg_value(args, "--case-id")
+        .ok_or_else(|| anyhow::anyhow!("--case-id <uuid> is required"))?
+        .parse::<uuid::Uuid>()?;
+    let store_path = helper::store::HelperStore::path()?;
+    let store = helper::store::HelperStore::load(&store_path)?;
+    let case = store
+        .case(case_id)
+        .ok_or_else(|| anyhow::anyhow!("The requested persisted helper case was not found"))?;
+    let report = helper::lab::run_acceptance(case, fixture)?;
+    let report_path = match cli_arg_value(args, "--report") {
+        Some(path) => std::path::PathBuf::from(path),
+        None => security::app_data_file("helper-acceptance-preflight.json")?,
+    };
+    helper::lab::save_report(&report_path, &report)?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    eprintln!("Preflight report saved: {}", report_path.display());
+    Ok(report)
+}
+
 fn main() -> eframe::Result<()> {
     install_rustls_crypto_provider();
 
     let args = std::env::args().collect::<Vec<_>>();
+    if args.iter().any(|arg| arg == "--helper-lab") {
+        if let Err(error) =
+            run_helper_acceptance_preflight(&args, helper::lab::FixtureLabel::SimulationFixture)
+        {
+            eprintln!("Helper lab preflight failed: {error}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+    if args.iter().any(|arg| arg == "--helper-acceptance") {
+        if let Err(error) = run_helper_acceptance_preflight(
+            &args,
+            helper::lab::FixtureLabel::GuestAcceptancePreflight,
+        ) {
+            eprintln!("Helper acceptance preflight failed: {error}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     if args.iter().any(|arg| arg == "--release-readiness") {
         let locale = match args.windows(2).find(|w| w[0] == "--language") {
             Some(pair) => match localization::Locale::parse(&pair[1]) {

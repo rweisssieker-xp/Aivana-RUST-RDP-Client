@@ -41,6 +41,18 @@ impl Locale {
     }
 }
 pub fn tr(locale: Locale, source: &str) -> &str {
+    if let Some(row) = HELPER_ACCEPTANCE_CATALOG
+        .iter()
+        .find(|row| row[0] == source)
+    {
+        let index = match locale {
+            Locale::De => 1,
+            Locale::EnUs => 0,
+            Locale::Fr => 2,
+            Locale::It => 3,
+        };
+        return row[index];
+    }
     let index = match locale {
         Locale::De => 0,
         Locale::EnUs => 1,
@@ -400,6 +412,16 @@ mod tests {
                 assert!(!tr(locale, row[0]).trim().is_empty());
             }
         }
+        for row in HELPER_ACCEPTANCE_CATALOG {
+            assert!(keys.insert(row[0]));
+            for locale in Locale::ALL {
+                let translated = tr(locale, row[0]);
+                assert!(!translated.trim().is_empty());
+                if locale != Locale::EnUs {
+                    assert_ne!(translated, row[0], "missing {locale:?} translation for {}", row[0]);
+                }
+            }
+        }
     }
     #[test]
     fn release_locale_roundtrip_and_alias() {
@@ -414,3 +436,276 @@ mod tests {
         assert_eq!(Locale::parse("xx"), None);
     }
 }
+
+const HELPER_ACCEPTANCE_CATALOG: &[[&str; 4]] = &[
+    [
+        "Helper acceptance",
+        "Helper-Abnahme",
+        "Validation de l’assistant",
+        "Collaudo dell’assistente",
+    ],
+    [
+        "Preflight reports show blockers; they do not mean scenarios were executed.",
+        "Vorprüfberichte zeigen Blocker; sie bedeuten nicht, dass Szenarien ausgeführt wurden.",
+        "Les rapports préalables signalent des blocages ; ils ne signifient pas que les scénarios ont été exécutés.",
+        "I rapporti preliminari mostrano blocchi; non indicano che gli scenari siano stati eseguiti.",
+    ],
+    [
+        "Acceptance report path",
+        "Pfad des Abnahmeberichts",
+        "Chemin du rapport de validation",
+        "Percorso del rapporto di collaudo",
+    ],
+    [
+        "Load report",
+        "Bericht laden",
+        "Charger le rapport",
+        "Carica rapporto",
+    ],
+    [
+        "Acceptance report loaded.",
+        "Abnahmebericht geladen.",
+        "Rapport de validation chargé.",
+        "Rapporto di collaudo caricato.",
+    ],
+    [
+        "Acceptance report unavailable or invalid.",
+        "Abnahmebericht nicht verfügbar oder ungültig.",
+        "Rapport de validation indisponible ou invalide.",
+        "Rapporto di collaudo non disponibile o non valido.",
+    ],
+    [
+        "Acceptance report invalid.",
+        "Abnahmebericht ist ungültig.",
+        "Le rapport de validation est invalide.",
+        "Il rapporto di collaudo non è valido.",
+    ],
+    [
+        "Simulation fixture preflight",
+        "Vorprüfung mit Simulationsdaten",
+        "Précontrôle sur fixture simulée",
+        "Precontrollo con fixture simulata",
+    ],
+    [
+        "Guest acceptance preflight",
+        "Vorprüfung der Gastumgebung",
+        "Précontrôle de l’environnement invité",
+        "Precontrollo dell’ambiente guest",
+    ],
+    [
+        "Measured guest fixture",
+        "Gemessene Gastumgebung",
+        "Fixture invitée mesurée",
+        "Fixture guest misurata",
+    ],
+    [
+        "Run",
+        "Lauf",
+        "Exécution",
+        "Esecuzione",
+    ],
+    [
+        "Case record",
+        "Fallakte",
+        "Dossier du cas",
+        "Pratica del caso",
+    ],
+    [
+        "Case revision",
+        "Fallrevision",
+        "Révision du cas",
+        "Revisione del caso",
+    ],
+    [
+        "Report historical context.",
+        "Bericht gehört zu einem früheren Fallkontext.",
+        "Le rapport correspond à un ancien contexte de cas.",
+        "Il rapporto appartiene a un contesto del caso precedente.",
+    ],
+    [
+        "Product acceptance: not established",
+        "Produktabnahme: nicht belegt",
+        "Validation produit : non établie",
+        "Collaudo prodotto: non dimostrato",
+    ],
+    [
+        "Sparse intake reload",
+        "Unvollständige Falldaten und Speichern",
+        "Saisie incomplète et rechargement",
+        "Inserimento incompleto e ricaricamento",
+    ],
+    [
+        "Native reads, blocker, imported spill",
+        "Native Reads, Blocker und importierter Spill",
+        "Lectures natives, blocage et débordement importé",
+        "Letture native, blocco e spill importato",
+    ],
+    [
+        "Selectivity maintenance",
+        "Selektivität nach Wartung",
+        "Sélectivité après maintenance",
+        "Selettività dopo la manutenzione",
+    ],
+    [
+        "Reviewed index mutation restoration",
+        "Geprüfte Indexänderung und Wiederherstellung",
+        "Modification d’index examinée et restauration",
+        "Modifica indice esaminata e ripristino",
+    ],
+    [
+        "API portal checks",
+        "API- und Portalprüfungen",
+        "Vérifications de l’API et des deux portails",
+        "Verifiche API e di entrambi i portali",
+    ],
+    [
+        "Binding edits reconciliation",
+        "Bindungsänderungen und Abgleich",
+        "Modifications de liaison et rapprochement",
+        "Modifiche di associazione e riconciliazione",
+    ],
+    [
+        "Lesson invalidation export",
+        "Lernregel ungültig machen und exportieren",
+        "Invalidation et export de leçon",
+        "Invalidazione ed esportazione della lezione",
+    ],
+    [
+        "Native capture states",
+        "Native Aufnahmestände",
+        "États de capture natifs",
+        "Stati di acquisizione nativi",
+    ],
+    [
+        "No persisted capture reference",
+        "Keine gespeicherte Aufnahmereferenz",
+        "Aucune référence de capture enregistrée",
+        "Nessun riferimento di acquisizione salvato",
+    ],
+    [
+        "Capture references are absent; no verified screenshot is shown.",
+        "Aufnahmereferenzen fehlen; es wird kein verifiziertes Bild angezeigt.",
+        "Les références de capture manquent ; aucune capture vérifiée n’est affichée.",
+        "Mancano i riferimenti di acquisizione; non viene mostrata alcuna schermata verificata.",
+    ],
+    [
+        "Requested",
+        "Angefordert",
+        "Demandée",
+        "Richiesta",
+    ],
+    [
+        "Approved",
+        "Freigegeben",
+        "Approuvée",
+        "Approvata",
+    ],
+    [
+        "Consumed",
+        "Verbraucht",
+        "Consommée",
+        "Consumata",
+    ],
+    [
+        "Verified",
+        "Verifiziert",
+        "Vérifiée",
+        "Verificata",
+    ],
+    [
+        "Capture intervention",
+        "Aufnahme erfordert Eingreifen",
+        "Intervention de capture",
+        "Intervento di acquisizione",
+    ],
+    [
+        "Not run",
+        "Nicht ausgeführt",
+        "Non exécuté",
+        "Non eseguito",
+    ],
+    [
+        "Passed",
+        "Bestanden",
+        "Réussi",
+        "Superato",
+    ],
+    [
+        "Failed",
+        "Fehlgeschlagen",
+        "Échec",
+        "Non riuscito",
+    ],
+    [
+        "Blocked",
+        "Blockiert",
+        "Bloqué",
+        "Bloccato",
+    ],
+    [
+        "Incomplete",
+        "Unvollständig",
+        "Incomplet",
+        "Incompleto",
+    ],
+    [
+        "Persisted case loaded; save/reload zero-call instrumentation has not run.",
+        "Gespeicherter Fall geladen; die Null-Aufruf-Prüfung beim Speichern und Neuladen wurde nicht ausgeführt.",
+        "Cas enregistré chargé ; la vérification d’absence d’appels lors de l’enregistrement et du rechargement n’a pas été exécutée.",
+        "Caso salvato caricato; il controllo dell’assenza di chiamate durante il salvataggio e il ricaricamento non è stato eseguito.",
+    ],
+    [
+        "Reviewed PostgreSQL scope exists; native collection, blocker, import workload receipts are required.",
+        "Ein geprüfter PostgreSQL-Bereich ist vorhanden; native Erfassungs-, Blocker-, Import- und Workloadbelege fehlen.",
+        "Un périmètre PostgreSQL examiné existe ; les preuves de collecte native, de blocage, d’importation et de charge sont requises.",
+        "Esiste un ambito PostgreSQL verificato; sono necessarie prove di raccolta nativa, blocco, importazione e carico.",
+    ],
+    [
+        "A reviewed PostgreSQL scope is required for native reads.",
+        "Für native Lesezugriffe ist ein geprüfter PostgreSQL-Bereich erforderlich.",
+        "Un périmètre PostgreSQL examiné est requis pour les lectures natives.",
+        "Per le letture native è necessario un ambito PostgreSQL verificato.",
+    ],
+    [
+        "Requires accepted Task 14 protected rehearsal and Task 15 native production action, intent and verification receipts.",
+        "Erfordert den akzeptierten geschützten Task-14-Probelauf sowie native Task-15-Belege für Produktionsaktion, Absicht und Verifikation.",
+        "Nécessite la répétition protégée acceptée de la tâche 14 et les preuves natives de la tâche 15 pour l’action de production, l’intention et la vérification.",
+        "Richiede la prova protetta accettata del task 14 e le prove native del task 15 per azione di produzione, intenzione e verifica.",
+    ],
+    [
+        "Requires accepted Task 14 protected rehearsal and Task 15 exact-index production and restoration receipts.",
+        "Erfordert den akzeptierten geschützten Task-14-Probelauf sowie Task-15-Produktions- und Wiederherstellungsbelege für den exakten Index.",
+        "Nécessite la répétition protégée acceptée de la tâche 14 et les preuves de production et de restauration de l’index exact de la tâche 15.",
+        "Richiede la prova protetta accettata del task 14 e le prove di produzione e ripristino dell’indice esatto del task 15.",
+    ],
+    [
+        "Three reviewed HTTP scopes exist; separate DB-backed API and portal functional receipts are still required.",
+        "Drei geprüfte HTTP-Bereiche sind vorhanden; separate datenbankgestützte Funktionsbelege für API und Portale fehlen.",
+        "Trois périmètres HTTP examinés existent ; des preuves fonctionnelles distinctes, adossées à la base, restent nécessaires pour l’API et les portails.",
+        "Esistono tre ambiti HTTP verificati; sono ancora necessarie prove funzionali separate, basate sul database, per API e portali.",
+    ],
+    [
+        "Three separately reviewed API/portal HTTP scopes are required.",
+        "Drei separat geprüfte HTTP-Bereiche für API und Portale sind erforderlich.",
+        "Trois périmètres HTTP distincts examinés pour l’API et les portails sont requis.",
+        "Sono necessari tre ambiti HTTP distinti e verificati per API e portali.",
+    ],
+    [
+        "Pre-dispatch edit and post-launch reconciliation witnesses have not been collected for this run.",
+        "Für diesen Lauf wurden keine Belege zu Änderungen vor dem Start und zum Abgleich nach dem Start erfasst.",
+        "Aucune preuve de modification avant lancement ni de rapprochement après lancement n’a été recueillie pour cette exécution.",
+        "Per questa esecuzione non sono state raccolte prove di modifiche prima dell’avvio e riconciliazione dopo l’avvio.",
+    ],
+    [
+        "Case is marked verified; exact lesson evidence, restart invalidation and export receipts are still required.",
+        "Der Fall ist als verifiziert markiert; genaue Lernbelege sowie Belege für Invalidierung nach Neustart und Export fehlen.",
+        "Le cas est marqué comme vérifié ; les preuves exactes de la leçon, de l’invalidation après redémarrage et de l’export restent requises.",
+        "Il caso è contrassegnato come verificato; servono ancora prove precise della lezione, dell’invalidazione dopo il riavvio e dell’esportazione.",
+    ],
+    [
+        "Requires an independently verified product outcome before lesson creation.",
+        "Vor dem Erstellen einer Lernregel ist ein unabhängig verifiziertes Produktergebnis erforderlich.",
+        "Un résultat produit vérifié de manière indépendante est requis avant la création d’une leçon.",
+        "Prima di creare una lezione è necessario un risultato del prodotto verificato in modo indipendente.",
+    ],
+];
