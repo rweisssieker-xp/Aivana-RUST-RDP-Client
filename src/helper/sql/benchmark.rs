@@ -52,6 +52,48 @@ pub struct ReviewedWorkload {
     pub(super) review_content_sha256: String,
     pub(super) reviewed_at: chrono::DateTime<chrono::Utc>,
 }
+
+/// Captures the exact reviewed read before the native action starts. The same
+/// read can be repeated after commit even if its five-minute admission window
+/// has elapsed; native identity, metadata, data and deadline checks still run.
+pub(super) struct PostcommitWorkloadAdmission(ReviewedWorkload);
+
+impl PostcommitWorkloadAdmission {
+    pub(super) fn request(&self) -> &ReviewedWorkload {
+        &self.0
+    }
+}
+
+pub(super) fn admit_postcommit_workload(
+    request: &ReviewedWorkload,
+) -> Result<PostcommitWorkloadAdmission> {
+    admit_postcommit_workload_at(request, chrono::Utc::now())
+}
+
+pub(super) fn admit_postcommit_workload_at(
+    request: &ReviewedWorkload,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<PostcommitWorkloadAdmission> {
+    ensure_review_freshness_at(request, now)?;
+    request.fingerprint()?;
+    Ok(PostcommitWorkloadAdmission(request.clone()))
+}
+
+fn ensure_review_freshness(request: &ReviewedWorkload) -> Result<()> {
+    ensure_review_freshness_at(request, chrono::Utc::now())
+}
+
+fn ensure_review_freshness_at(
+    request: &ReviewedWorkload,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    ensure!(
+        now >= request.reviewed_at
+            && now.signed_duration_since(request.reviewed_at) < chrono::Duration::minutes(5),
+        "workload review expired"
+    );
+    Ok(())
+}
 impl ReviewedWorkload {
     pub(crate) fn from_validated_request(
         request: &crate::helper::capability::ProbeRequest,
@@ -914,6 +956,23 @@ pub async fn run_sandbox_workload(
     policy: &SamplingPolicy,
     cancel: CancellationToken,
 ) -> Result<WorkloadSamples> {
+    run_sandbox_workload_inner(request, policy, cancel, true).await
+}
+
+pub(super) async fn run_admitted_postcommit_workload(
+    admission: &PostcommitWorkloadAdmission,
+    policy: &SamplingPolicy,
+    cancel: CancellationToken,
+) -> Result<WorkloadSamples> {
+    run_sandbox_workload_inner(admission.request(), policy, cancel, false).await
+}
+
+async fn run_sandbox_workload_inner(
+    request: &ReviewedWorkload,
+    policy: &SamplingPolicy,
+    cancel: CancellationToken,
+    require_fresh_review: bool,
+) -> Result<WorkloadSamples> {
     if matches!(
         &request.scope,
         BoundScope::Database {
@@ -921,15 +980,19 @@ pub async fn run_sandbox_workload(
             ..
         }
     ) {
-        return super::sql_server::run_rehearsal_workload(request, policy, cancel).await;
+        return super::sql_server::run_rehearsal_workload(
+            request,
+            policy,
+            cancel,
+            require_fresh_review,
+        )
+        .await;
     }
     policy.validate()?;
     ensure!(!cancel.is_cancelled(), "workload canceled");
-    ensure!(
-        chrono::Utc::now().signed_duration_since(request.reviewed_at)
-            < chrono::Duration::minutes(5),
-        "workload review expired"
-    );
+    if require_fresh_review {
+        ensure_review_freshness(request)?;
+    }
     let statement = request.template.reviewed_statement(&request.scope)?;
     let session = connect_fixture(&request.scope, request.template, &cancel).await?;
     let run = async {

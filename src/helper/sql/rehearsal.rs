@@ -247,7 +247,7 @@ struct MappingFingerprint<'a> {
 }
 
 impl SqlTrialMapping {
-    pub fn validate(&self) -> Result<()> {
+    fn validate_content(&self) -> Result<()> {
         ensure!(
             self.case_id != Uuid::nil()
                 && self.case_revision > 0
@@ -272,15 +272,26 @@ impl SqlTrialMapping {
                 && self.reviewed_limits.len() >= 8
                 && self.reviewed_limits.len() <= 512
                 && !self.reviewed_limits.chars().any(char::is_control)
-                && self.reviewed_at <= Utc::now()
-                && self.expires_at > Utc::now()
                 && self.expires_at <= self.reviewed_at + Duration::minutes(5),
-            "Invalid or expired isolated SQL trial mapping"
+            "Invalid isolated SQL trial mapping content"
         );
         Ok(())
     }
+    fn validate_at(&self, now: DateTime<Utc>) -> Result<()> {
+        self.validate_content()?;
+        ensure!(
+            self.reviewed_at <= now && self.expires_at > now,
+            "Expired isolated SQL trial mapping"
+        );
+        Ok(())
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        self.validate_at(Utc::now())
+    }
+
     pub fn fingerprint(&self) -> Result<String> {
-        self.validate()?;
+        self.validate_content()?;
         digest(
             b"relayne-helper-reviewed-sql-trial-mapping-v1",
             &MappingFingerprint {
@@ -572,7 +583,7 @@ impl SqlRehearsalReceipt {
     }
     pub fn validate_for(&self, mapping: &SqlTrialMapping, proposal: &HelperProposal) -> Result<()> {
         self.validate(Utc::now())?;
-        mapping.validate()?;
+        mapping.validate_content()?;
         let CatalogAction::Sql { action, .. } = &proposal.action else {
             anyhow::bail!("SQL proposal required for rehearsal receipt")
         };
@@ -736,6 +747,7 @@ async fn run_sql_rehearsal_inner(
     cancel: CancellationToken,
 ) -> Result<SqlRehearsalReceipt> {
     mapping.validate()?;
+    let admitted_mapping_sha256 = mapping.fingerprint()?;
     ensure!(
         permit.binding().run_kind == RunKind::Rehearsal
             && permit.binding().case_id == case.id()
@@ -744,7 +756,7 @@ async fn run_sql_rehearsal_inner(
             && permit.binding().action.object().scope_sha256 == mapping.production_scope_sha256
             && matches!(&permit.binding().proof,
             ActionProof::StagingReviewProof { mapping_sha256, staging_scope_sha256, staging_physical_sha256, .. }
-                if mapping_sha256 == &mapping.fingerprint()?
+            if mapping_sha256 == &admitted_mapping_sha256
                     && staging_scope_sha256 == &mapping.staging_scope_sha256
                     && staging_physical_sha256 == &mapping.staging_physical_sha256),
         "Permit does not authorize exact reviewed staging mapping"
@@ -835,6 +847,10 @@ async fn run_sql_rehearsal_inner(
                 == mapping.synthetic_data_sha256,
         "Native baseline or staged data coverage incomplete"
     );
+    // A review may expire while bounded read-only preflight and sampling run.
+    // Refuse native dispatch unless the same mapping is still fresh here.
+    mapping.validate()?;
+    let postcommit_workload = benchmark::admit_postcommit_workload(&workload)?;
     let native_identity = changes::NativeActionIdentity::from_permit(&permit)?;
     let proof = match changes::execute_sql_change(
         permit,
@@ -869,16 +885,23 @@ async fn run_sql_rehearsal_inner(
     // Once native SQL has committed, every later error must durably close the
     // dispatch as needing intervention. The consumed permit is never retried.
     let completed: Result<SqlRehearsalReceipt> = async {
-        let after = benchmark::run_sandbox_workload(&workload, &policy, cancel.clone()).await?;
-        let after_data =
-            benchmark::fixture_data_observation(stage_read, mapping.template, cancel).await?;
+        let after = benchmark::run_admitted_postcommit_workload(
+            &postcommit_workload,
+            &policy,
+            cancel.clone(),
+        )
+        .await
+        .context("PostcommitWorkload")?;
+        let after_data = benchmark::fixture_data_observation(stage_read, mapping.template, cancel)
+            .await
+            .context("PostcommitData")?;
         ensure!(
             after.compatibility.is_complete()
                 && before.result_sha256 == after.result_sha256
                 && after.warmups >= 3
                 && after.milliseconds.len() >= 15
                 && after_data.sha256 == mapping.synthetic_data_sha256,
-            "Staged workload/result/coverage incomplete after action"
+            "PostcommitComparison: staged workload/result/coverage incomplete after action"
         );
         let check_outcomes = evaluate_required_checks(
             &proposal.verification,
@@ -887,7 +910,8 @@ async fn run_sql_rehearsal_inner(
             &mapping.template.fingerprint(production_read)?,
             &after_data,
             &after,
-        )?;
+        )
+        .context("PostcommitRequiredChecks")?;
         let now = Utc::now();
         let mut receipt = SqlRehearsalReceipt {
             schema: RECEIPT_SCHEMA,
@@ -898,7 +922,7 @@ async fn run_sql_rehearsal_inner(
             binding_fingerprint: proof.identity().binding_fingerprint().to_owned(),
             case_id: case.id(),
             case_revision: case.revision(),
-            mapping_sha256: mapping.fingerprint()?,
+            mapping_sha256: admitted_mapping_sha256,
             production_scope_sha256: mapping.production_scope_sha256.clone(),
             production_physical_sha256: mapping.production_physical_sha256.clone(),
             staging_scope_sha256: mapping.staging_scope_sha256.clone(),
@@ -927,10 +951,14 @@ async fn run_sql_rehearsal_inner(
             expires_at: now + Duration::hours(1),
             content_sha256: String::new(),
         };
-        let mut journal = ActionJournal::load(journal_path)?;
-        receipt.content_sha256 = receipt.fingerprint()?;
-        receipt.save()?;
-        journal.record_native_outcome(intent_id, &proof, Some(&receipt))?;
+        let mut journal = ActionJournal::load(journal_path).context("PostcommitJournalRecord")?;
+        receipt.content_sha256 = receipt
+            .fingerprint()
+            .context("PostcommitReceiptIntegrity")?;
+        receipt.save().context("PostcommitReceiptIntegrity")?;
+        journal
+            .record_native_outcome(intent_id, &proof, Some(&receipt))
+            .context("PostcommitJournalRecord")?;
         Ok(receipt)
     }
     .await;

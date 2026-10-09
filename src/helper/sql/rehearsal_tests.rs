@@ -1,5 +1,89 @@
 use super::*;
 
+// Only fixed vocabulary crosses the guest evidence boundary. Native errors
+// may contain SQL or connection details and are never serialized.
+fn guest_failure_classification(error: &anyhow::Error) -> (&'static str, &'static str) {
+    let chain: Vec<_> = error
+        .chain()
+        .map(std::string::ToString::to_string)
+        .collect();
+    let has = |needle: &str| chain.iter().any(|part| part.contains(needle));
+    let stage = if has("PostcommitJournalRecord") {
+        "PostcommitJournalRecord"
+    } else if has("PostcommitReceiptIntegrity") {
+        "PostcommitReceiptIntegrity"
+    } else if has("PostcommitRequiredChecks") {
+        "PostcommitRequiredChecks"
+    } else if has("PostcommitComparison") {
+        "PostcommitComparison"
+    } else if has("PostcommitData") {
+        "PostcommitData"
+    } else if has("PostcommitWorkload") {
+        "PostcommitWorkload"
+    } else if has("SQL committed") {
+        "PostcommitUnclassified"
+    } else if has("Native dispatch") || has("Native SQL action") {
+        "NativeAction"
+    } else {
+        "Precommit"
+    };
+    let class = if has("workload review expired") || has("SQL Server workload review expired") {
+        "ReviewExpired"
+    } else if has("deadline") || has("timed out") {
+        "Deadline"
+    } else if has("canceled") || has("cancelled") {
+        "Canceled"
+    } else if has("identity changed") || has("identity unavailable") || has("binding mismatch") {
+        "IdentityDrift"
+    } else if has("data changed") || has("result changed") || has("digest mismatch") {
+        "DataDrift"
+    } else if has("coverage incomplete") || has("compatibility incomplete") {
+        "CoverageIncomplete"
+    } else if has("outcome uncertain") {
+        "NativeOutcomeUncertain"
+    } else {
+        "Other"
+    };
+    (stage, class)
+}
+
+#[test]
+fn guest_failure_classification_is_allowlisted_and_uses_inner_cause() {
+    let error = anyhow::Error::msg("workload review expired; secret=do-not-emit")
+        .context("SQL committed; durable outcome needs intervention");
+    assert_eq!(
+        guest_failure_classification(&error),
+        ("PostcommitUnclassified", "ReviewExpired")
+    );
+    let workload = anyhow::Error::msg("workload review expired; secret=do-not-emit")
+        .context("PostcommitWorkload")
+        .context("SQL committed; durable outcome needs intervention");
+    assert_eq!(
+        guest_failure_classification(&workload),
+        ("PostcommitWorkload", "ReviewExpired")
+    );
+    for stage in [
+        "PostcommitData",
+        "PostcommitComparison",
+        "PostcommitRequiredChecks",
+        "PostcommitReceiptIntegrity",
+        "PostcommitJournalRecord",
+    ] {
+        let error = anyhow::Error::msg("secret=do-not-emit").context(stage);
+        assert_eq!(guest_failure_classification(&error), (stage, "Other"));
+    }
+    let unknown = anyhow::Error::msg("server detail: secret=do-not-emit");
+    let (stage, class) = guest_failure_classification(&unknown);
+    assert_eq!((stage, class), ("Precommit", "Other"));
+    let exported = serde_json::to_string(&serde_json::json!({
+        "FailureStage": stage,
+        "FailureClass": class,
+    }))
+    .unwrap();
+    assert!(!exported.contains("do-not-emit"));
+    assert!(!exported.contains("server detail"));
+}
+
 /// Read-only postmortem for a prior guest attempt. Never dispatches a SQL action.
 #[tokio::test]
 #[ignore = "Requires the existing isolated Windows Sandbox and its guest-only fixture credentials"]
@@ -368,6 +452,109 @@ fn mapping_requires_distinct_physical_database_and_exact_review_window() {
     alias = mapping.clone();
     alias.expires_at = alias.reviewed_at + Duration::minutes(6);
     assert!(alias.validate().is_err());
+}
+
+#[test]
+fn admitted_mapping_expiry_preserves_content_binding_and_receipt_hour() {
+    use crate::helper_action::{
+        RestorationSpec, SqlAction, SqlEngine, StatisticsLimitation, VerifiedSqlColumn,
+        VerifiedSqlMetadata, VerifiedSqlObject,
+    };
+
+    let mut mapping = mapping();
+    let now = Utc::now();
+    mapping.reviewed_at = now - Duration::minutes(6);
+    mapping.expires_at = mapping.reviewed_at + Duration::minutes(5);
+    let object = VerifiedSqlObject {
+        engine: SqlEngine::Postgres,
+        database: "fixture_db".into(),
+        schema: "fixture".into(),
+        table: "spill_events".into(),
+        object_id: 1,
+        scope_sha256: mapping.production_scope_sha256.clone(),
+    };
+    let action = SqlAction::PostgresAnalyze {
+        object: object.clone(),
+    };
+    let mut checked = receipt(&mapping, true);
+    let verification = VerificationSpec {
+        checks: vec![
+            RequiredCheck::SqlFunctional {
+                scope_sha256: mapping.production_scope_sha256.clone(),
+                object_id: 1,
+                expected_row_count: 100,
+                window: "after change".into(),
+            },
+            RequiredCheck::Performance {
+                scope_sha256: mapping.production_scope_sha256.clone(),
+                object_id: 1,
+                workload_sha256: mapping.production_template_sha256.clone(),
+                maximum_median_ms: 10,
+                maximum_p95_ms: 20,
+                minimum_warmups: 3,
+                minimum_samples: 15,
+                window: "after change".into(),
+            },
+        ],
+        criteria: checked
+            .check_outcomes
+            .iter()
+            .map(|outcome| outcome.criterion.clone())
+            .collect(),
+    };
+    verification.validate().unwrap();
+    mapping.action_sha256 = digest(b"relayne-helper-sql-action-v1", &action).unwrap();
+    mapping.verification_sha256 =
+        digest(b"relayne-helper-reviewed-verification-v2", &verification).unwrap();
+    for (outcome, check) in checked.check_outcomes.iter_mut().zip(&verification.checks) {
+        outcome.check = check.clone();
+    }
+    checked.mapping_sha256 = mapping.fingerprint().unwrap();
+    checked.action_sha256 = mapping.action_sha256.clone();
+    checked.verification_sha256 = mapping.verification_sha256.clone();
+    checked.created_at = mapping.expires_at - Duration::minutes(1);
+    checked.expires_at = checked.created_at + Duration::hours(1);
+    checked.content_sha256 = checked.fingerprint().unwrap();
+    let proposal = HelperProposal {
+        case_id: mapping.case_id,
+        case_revision: mapping.case_revision,
+        recipe_id: Uuid::new_v4(),
+        recipe_revision: 1,
+        action_version: crate::helper_action::SQL_ACTION_VERSION,
+        recipe_identity: d('a'),
+        catalog_generation_sha256: d('b'),
+        action: CatalogAction::Sql {
+            action,
+            metadata: VerifiedSqlMetadata {
+                object,
+                columns: vec![VerifiedSqlColumn {
+                    name: "event_id".into(),
+                    column_id: 1,
+                    plain: true,
+                }],
+                existing_indexes: vec![],
+                base_table: true,
+                source_evidence_sha256: d('c'),
+            },
+        },
+        verification,
+        restoration: RestorationSpec::ManualOrUnavailable {
+            limitation: StatisticsLimitation::PriorStatisticsCannotBeRestoredExactly,
+        },
+        prerequisites: vec![],
+        unverified_prerequisites: vec![],
+        plan_sha256: d('d'),
+        criteria_sha256: d('e'),
+        evidence_ids: vec![],
+        statistics_limit_acknowledged: true,
+    };
+    let admitted_at = mapping.expires_at - Duration::milliseconds(1);
+    let after_commit = mapping.expires_at + Duration::milliseconds(1);
+    assert!(mapping.validate_at(admitted_at).is_ok());
+    assert!(mapping.validate_at(after_commit).is_err());
+    assert!(mapping.validate().is_err());
+    assert_eq!(mapping.fingerprint().unwrap(), checked.mapping_sha256);
+    assert!(checked.validate_for(&mapping, &proposal).is_ok());
 }
 
 #[test]
@@ -848,29 +1035,7 @@ async fn guest_reviewed_native_rehearsal_mints_protected_receipt() {
     let receipt = match run {
         Ok(receipt) => receipt,
         Err(error) => {
-            let message = format!("{error:#}");
-            let labels = [
-                "Production native preflight changed",
-                "Production synthetic data changed",
-                "Staging native before-state changed",
-                "Reviewed live SQL source no longer covers exact workload object",
-                "Native baseline or staged data coverage incomplete",
-                "Staged workload/result/coverage incomplete after action",
-                "Native SQL action failed or outcome uncertain",
-                "Native compatibility observations differ or are incomplete",
-                "PostgreSQL index coverage incomplete",
-                "PostgreSQL statistics coverage incomplete",
-                "PostgreSQL fixture identity changed",
-                "PostgreSQL fixture column identity changed",
-                "workload review expired",
-                "workload deadline exceeded",
-                "workload result changed",
-                "SQL committed",
-            ];
-            let label = labels
-                .into_iter()
-                .find(|label| message.contains(label))
-                .unwrap_or("Other native rehearsal failure");
+            let (failure_stage, failure_class) = guest_failure_classification(&error);
             let journal_state = ActionJournal::load(&journal_path)
                 .ok()
                 .and_then(|journal| {
@@ -886,7 +1051,8 @@ async fn guest_reviewed_native_rehearsal_mints_protected_receipt() {
                 "ProductAcceptance": false,
                 "TestOnlyAuthority": true,
                 "ActualSqlRehearsalReceipt": false,
-                "FailureLabel": label,
+                "FailureStage": failure_stage,
+                "FailureClass": failure_class,
                 "JournalState": journal_state,
             });
             std::fs::write(
@@ -894,7 +1060,7 @@ async fn guest_reviewed_native_rehearsal_mints_protected_receipt() {
                 serde_json::to_vec(&witness).unwrap(),
             )
             .unwrap();
-            panic!("Native rehearsal failed: {label}");
+            panic!("Native rehearsal failed: {failure_stage}/{failure_class}");
         }
     };
     receipt.validate_for(&mapping, &proposal).unwrap();

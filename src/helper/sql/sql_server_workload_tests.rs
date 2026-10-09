@@ -146,6 +146,27 @@ fn tds_v2_rehearsal_template_has_only_two_fixed_fixture_endpoints() {
     );
 }
 
+#[test]
+fn sort_fixture_group_id_only_drift_changes_bounded_digest() {
+    let reviewed = ReviewedSelectTemplate::OrderSort;
+    for column in reviewed.expected_columns() {
+        assert!(
+            TDS_SORT_DATA_SQL.contains(&format!("t.[{column}]")),
+            "TDS sort data digest omits reviewed column {column}"
+        );
+    }
+    let digest_for_group = |group_id| {
+        let mut hasher = benchmark::BoundedFixtureHasher::new();
+        hasher
+            .push(&format!(
+                r#"{{"event_id":7,"group_id":{group_id},"payload":"stable"}}"#
+            ))
+            .unwrap();
+        hasher.finish().unwrap().sha256
+    };
+    assert_ne!(digest_for_group(3), digest_for_group(4));
+}
+
 fn reviewed() -> (ReviewedWorkload, TemplateStatement) {
     let scope = fixture_scope();
     let template = ReviewedSelectTemplate::CustomerOrders {
@@ -255,6 +276,107 @@ async fn repeated_fixed_samples_have_bound_provenance_and_statistics() {
     );
     assert_eq!(session.calls.len(), 20);
     assert!(!result.can_prove_repair());
+}
+
+#[tokio::test]
+async fn admitted_postcommit_read_keeps_native_guards_after_review_expiry() {
+    let (mut review, statement) = reviewed();
+    let now = chrono::Utc::now();
+    review.reviewed_at = now - chrono::Duration::minutes(6);
+    assert!(benchmark::admit_postcommit_workload_at(&review, now).is_err());
+    let admission =
+        benchmark::admit_postcommit_workload_at(&review, now - chrono::Duration::minutes(2))
+            .unwrap();
+    assert_eq!(admission.request().reviewed_at, review.reviewed_at);
+
+    let policy = SamplingPolicy::default();
+    let cancel = CancellationToken::new();
+    let mut stale_without_admission = fake();
+    assert!(
+        collect_with_session(
+            &mut stale_without_admission,
+            &review,
+            &statement,
+            &policy,
+            expected_identity(),
+            &cancel,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .is_err()
+    );
+
+    let mut accepted = fake();
+    accepted.compatibility = Some(["a".repeat(64), "a".repeat(64)]);
+    let samples = collect_with_session_inner(
+        &mut accepted,
+        admission.request(),
+        &statement,
+        &policy,
+        expected_identity(),
+        &cancel,
+        Instant::now() + Duration::from_secs(5),
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(samples.compatibility.is_complete());
+
+    let mut foreign_identity = fake();
+    if let SqlObservation::SqlServerIdentity {
+        database_principal, ..
+    } = &mut foreign_identity.identity[0]
+    {
+        *database_principal = "foreign".into();
+    }
+    assert!(
+        collect_with_session_inner(
+            &mut foreign_identity,
+            admission.request(),
+            &statement,
+            &policy,
+            expected_identity(),
+            &cancel,
+            Instant::now() + Duration::from_secs(5),
+            false,
+        )
+        .await
+        .is_err()
+    );
+    assert!(!foreign_identity.calls.contains(&"sample"));
+
+    let canceled = CancellationToken::new();
+    canceled.cancel();
+    assert!(
+        collect_with_session_inner(
+            &mut fake(),
+            admission.request(),
+            &statement,
+            &policy,
+            expected_identity(),
+            &canceled,
+            Instant::now() + Duration::from_secs(5),
+            false,
+        )
+        .await
+        .is_err()
+    );
+    let mut slow = fake();
+    slow.stall_at = Some(1);
+    assert!(
+        collect_with_session_inner(
+            &mut slow,
+            admission.request(),
+            &statement,
+            &policy,
+            expected_identity(),
+            &cancel,
+            Instant::now() + Duration::from_millis(1),
+            false,
+        )
+        .await
+        .is_err()
+    );
 }
 
 #[tokio::test]

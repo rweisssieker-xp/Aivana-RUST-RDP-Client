@@ -86,13 +86,38 @@ async fn collect_with_session(
     cancel: &CancellationToken,
     deadline: Instant,
 ) -> Result<WorkloadSamples> {
+    collect_with_session_inner(
+        session,
+        request,
+        statement,
+        policy,
+        expected_identity,
+        cancel,
+        deadline,
+        true,
+    )
+    .await
+}
+
+async fn collect_with_session_inner(
+    session: &mut dyn WorkloadSession,
+    request: &ReviewedWorkload,
+    statement: &TemplateStatement,
+    policy: &SamplingPolicy,
+    expected_identity: (&str, &str, &str, u16),
+    cancel: &CancellationToken,
+    deadline: Instant,
+    require_fresh_review: bool,
+) -> Result<WorkloadSamples> {
     policy.validate()?;
     ensure!(!cancel.is_cancelled(), "SQL Server workload canceled");
-    ensure!(
-        chrono::Utc::now().signed_duration_since(request.reviewed_at)
-            < chrono::Duration::minutes(5),
-        "SQL Server workload review expired"
-    );
+    if require_fresh_review {
+        ensure!(
+            chrono::Utc::now().signed_duration_since(request.reviewed_at)
+                < chrono::Duration::minutes(5),
+            "SQL Server workload review expired"
+        );
+    }
     let identity = gated(cancel, deadline, session.identity())
         .await
         .map_err(|_| anyhow::anyhow!("SQL Server workload identity unavailable"))?;
@@ -311,6 +336,7 @@ pub(in crate::helper::sql) async fn run_rehearsal_workload(
     request: &ReviewedWorkload,
     policy: &SamplingPolicy,
     cancel: CancellationToken,
+    require_fresh_review: bool,
 ) -> Result<WorkloadSamples> {
     policy.validate()?;
     let statement = request.template.sql_server_statement(&request.scope)?;
@@ -327,7 +353,7 @@ pub(in crate::helper::sql) async fn run_rehearsal_workload(
     let deadline = Instant::now() + Duration::from_secs(u64::from(policy.deadline_secs));
     let mut session =
         open_rehearsal_fixture(&request.scope, request.template, &cancel, deadline).await?;
-    collect_with_session(
+    collect_with_session_inner(
         &mut session,
         request,
         &statement,
@@ -335,12 +361,13 @@ pub(in crate::helper::sql) async fn run_rehearsal_workload(
         (database, &credential.principal, &target.host, *port),
         &cancel,
         deadline,
+        require_fresh_review,
     )
     .await
 }
 
 const TDS_ORDER_DATA_SQL: &str = "SELECT TOP (100001) CASE WHEN DATALENGTH(j.json_row) <= 16384 THEN j.json_row END FROM [fixture].[orders] AS t CROSS APPLY (SELECT (SELECT t.[order_id], t.[customer_id], t.[status], t.[amount], t.[created_at], t.[detail] FOR JSON PATH, WITHOUT_ARRAY_WRAPPER) AS json_row) AS j ORDER BY t.[order_id]";
-const TDS_SORT_DATA_SQL: &str = "SELECT TOP (100001) CASE WHEN DATALENGTH(j.json_row) <= 16384 THEN j.json_row END FROM [fixture].[spill_events] AS t CROSS APPLY (SELECT (SELECT t.[event_id], t.[payload] FOR JSON PATH, WITHOUT_ARRAY_WRAPPER) AS json_row) AS j ORDER BY t.[event_id]";
+const TDS_SORT_DATA_SQL: &str = "SELECT TOP (100001) CASE WHEN DATALENGTH(j.json_row) <= 16384 THEN j.json_row END FROM [fixture].[spill_events] AS t CROSS APPLY (SELECT (SELECT t.[event_id], t.[group_id], t.[payload] FOR JSON PATH, WITHOUT_ARRAY_WRAPPER) AS json_row) AS j ORDER BY t.[event_id]";
 
 pub(in crate::helper::sql) async fn fixture_data_observation(
     scope: &BoundScope,
