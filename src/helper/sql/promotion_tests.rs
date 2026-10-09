@@ -3,37 +3,40 @@
 use super::*;
 use crate::helper::{
     approval::{
-        authorize_and_record_intent, authorize_and_start_dispatch, production_request_binding,
-        record_local_review, staged_request_binding, withdraw_local_review, NativeDispatchProof,
+        NativeDispatchProof, authorize_and_record_intent, authorize_and_start_dispatch,
+        production_request_binding, record_local_review, staged_request_binding,
+        withdraw_local_review,
     },
     capability::{ProbeAdapter, ProbeRequest},
     case::{CaseEdit, Comparator, ProblemIntake, SuccessCriterion},
     catalog::{
-        guest_sign_lab_recipe, Catalog, CatalogAction, CatalogTrust,
-        Prerequisite as RecipePrerequisite, ProposalParams, RecipeBody,
+        Catalog, CatalogAction, CatalogTrust, Prerequisite as RecipePrerequisite, ProposalParams,
+        RecipeBody, guest_sign_lab_recipe,
     },
-    credentials::{save_scoped_at, PersistentSecretResolver},
+    credentials::{PersistentSecretResolver, save_scoped_at},
     evidence::{EvidenceBinding, EvidenceStatus},
     manifest::{CapabilityId, CheckRole, Prerequisite as ProbePrerequisite, ProbeParams},
     planner::{HelperPlan, HelperPlanStep},
     scope::{CredentialPurpose, CredentialScope, DatabaseEngine},
     sql::{
         changes::{
-            guest_pg_boundary_counts, guest_pg_read_only_witness, reset_guest_pg_boundary_counts,
-            GuestPgBoundaryCounts, GuestPgReadback,
+            GuestPgBoundaryCounts, GuestPgReadback, guest_pg_assert_isolated_owned,
+            guest_pg_boundary_counts, guest_pg_prepare_isolated_fixture,
+            guest_pg_read_only_witness, guest_pg_require_isolated_absent,
+            reset_guest_pg_boundary_counts,
         },
         postgres::PostgresAdapter,
-        rehearsal::{load_sql_rehearsal, run_sql_rehearsal, SqlTrialMapping},
-        restoration::{load_production_receipt, restore_index, RestorationOutcome},
-        templates::ReviewedSelectTemplate,
+        rehearsal::{SqlTrialMapping, load_sql_rehearsal, run_sql_rehearsal},
+        restoration::{RestorationOutcome, load_production_receipt, restore_index},
+        templates::{ReviewedSelectTemplate, TASK15_TABLE},
         types::SqlObservation,
     },
     store::HelperStore,
 };
 use crate::helper_action::{
-    digest, CriterionComparator, CriterionRequirement, PlainIndexColumn, RequiredCheck,
-    RestorationSpec, SortDirection, SqlAction, SqlEngine, VerificationSpec, VerifiedSqlColumn,
-    VerifiedSqlMetadata, VerifiedSqlObject,
+    CriterionComparator, CriterionRequirement, PlainIndexColumn, RequiredCheck, RestorationSpec,
+    SortDirection, SqlAction, SqlEngine, VerificationSpec, VerifiedSqlColumn, VerifiedSqlMetadata,
+    VerifiedSqlObject, digest,
 };
 use crate::helper_approval::{
     ActionApprovalStateV2, ActionBindingV2, ActionDecisionV2, ConsumeActionApprovalV2,
@@ -43,7 +46,7 @@ use crate::mission::Target;
 use crate::models::SecretCredential;
 use crate::team_client::{TeamClient, VerifiedConsumeV2};
 use crate::team_server::{Role, TokenRequest};
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use chrono::{Duration, Utc};
 use serde::Serialize;
 use std::{
@@ -349,6 +352,7 @@ fn guest_scope(
     target: &Target,
     port: u16,
     database: &str,
+    table: &str,
     purpose: CredentialPurpose,
     principal: &str,
     password: &str,
@@ -359,7 +363,7 @@ fn guest_scope(
         port,
         database: database.into(),
         schema: Some("fixture".into()),
-        object: Some("orders".into()),
+        object: Some(table.into()),
         credential: None,
     };
     let vault = crate::security::app_data_file("credentials.scoped.dpapi")?;
@@ -403,10 +407,77 @@ struct GuestFixture {
     production_read: BoundScope,
     staging_change: BoundScope,
     staging_read: BoundScope,
+    shared_production_change: BoundScope,
+    shared_production_read: BoundScope,
+    shared_staging_change: BoundScope,
+    shared_staging_read: BoundScope,
+    shared_production_before: GuestPgReadback,
+    shared_staging_before: GuestPgReadback,
+    isolated_run_id: Uuid,
     baseline: GuestPgReadback,
     staging_baseline: GuestPgReadback,
     case_path: PathBuf,
     journal_path: PathBuf,
+}
+
+fn validate_shared_sources(production: &GuestPgReadback, staging: &GuestPgReadback) -> Result<()> {
+    ensure!(
+        production.physical_sha256 != staging.physical_sha256
+            && production.row_count == 75_000
+            && staging.row_count == 75_000
+            && production.row_sha256 == staging.row_sha256
+            && production.object_id > 0
+            && staging.object_id > 0
+            && !production.indexes.is_empty()
+            && !staging.indexes.is_empty(),
+        "Existing shared fixture copies differ; no isolated table may be created"
+    );
+    Ok(())
+}
+
+fn assert_shared_source_preserved(before: &GuestPgReadback, after: &GuestPgReadback) -> Result<()> {
+    ensure!(
+        before.physical_sha256 == after.physical_sha256
+            && before.database_id == after.database_id
+            && before.object_id == after.object_id
+            && before.row_count == after.row_count
+            && before.row_sha256 == after.row_sha256
+            && before.index_set_sha256 == after.index_set_sha256
+            && before.index_identity_sha256 == after.index_identity_sha256,
+        "Original shared fixture rows or index identities changed"
+    );
+    Ok(())
+}
+
+#[test]
+fn existing_customer_index_is_preserved_by_isolated_fixture_gate() {
+    let baseline = GuestPgReadback {
+        physical_sha256: "a".repeat(64),
+        database_id: 1,
+        object_id: 16_386,
+        row_count: 75_000,
+        row_sha256: "b".repeat(64),
+        index_set_sha256: "c".repeat(64),
+        index_identity_sha256: "d".repeat(64),
+        indexes: vec![crate::helper::sql::changes::GuestPgIndexWitness {
+            id: 42,
+            name: "existing_customer_id_index".into(),
+            definition_sha256: "e".repeat(64),
+            marker_sha256: None,
+            valid: true,
+        }],
+        customer_id_index_present: true,
+    };
+    let mut staging = baseline.clone();
+    staging.physical_sha256 = "f".repeat(64);
+    assert!(validate_shared_sources(&baseline, &staging).is_ok());
+    assert!(assert_shared_source_preserved(&baseline, &baseline).is_ok());
+    let mut altered = baseline.clone();
+    altered.indexes[0].id += 1;
+    altered.index_identity_sha256 = "0".repeat(64);
+    assert!(assert_shared_source_preserved(&baseline, &altered).is_err());
+    staging.row_sha256 = "1".repeat(64);
+    assert!(validate_shared_sources(&baseline, &staging).is_err());
 }
 
 async fn prepare_guest_fixture(trace: &mut GuestTrace) -> Result<GuestFixture> {
@@ -429,6 +500,7 @@ async fn prepare_guest_fixture(trace: &mut GuestTrace) -> Result<GuestFixture> {
         &target,
         55433,
         "relayne_helper_acceptance",
+        "orders",
         CredentialPurpose::ControlledChange,
         "relayne_fixture_owner",
         guest_secret(&production_secrets, "owner")?,
@@ -439,6 +511,7 @@ async fn prepare_guest_fixture(trace: &mut GuestTrace) -> Result<GuestFixture> {
         &target,
         55433,
         "relayne_helper_acceptance",
+        "orders",
         CredentialPurpose::Read,
         "relayne_fixture_reader",
         guest_secret(&production_secrets, "reader")?,
@@ -449,6 +522,7 @@ async fn prepare_guest_fixture(trace: &mut GuestTrace) -> Result<GuestFixture> {
         &target,
         55434,
         "relayne_helper_rehearsal",
+        "orders",
         CredentialPurpose::ControlledChange,
         "relayne_rehearsal_owner",
         guest_secret(&staging_secrets, "owner")?,
@@ -459,6 +533,7 @@ async fn prepare_guest_fixture(trace: &mut GuestTrace) -> Result<GuestFixture> {
         &target,
         55434,
         "relayne_helper_rehearsal",
+        "orders",
         CredentialPurpose::Read,
         "relayne_rehearsal_reader",
         guest_secret(&staging_secrets, "reader")?,
@@ -470,13 +545,13 @@ async fn prepare_guest_fixture(trace: &mut GuestTrace) -> Result<GuestFixture> {
         None,
         None,
     )?;
-    let baseline = guest_pg_read_only_witness(
+    let shared_production_before = guest_pg_read_only_witness(
         &production_change,
         &production_read,
         CancellationToken::new(),
     )
     .await?;
-    let staging_baseline =
+    let shared_staging_before =
         guest_pg_read_only_witness(&staging_change, &staging_read, CancellationToken::new())
             .await?;
     trace.mark(
@@ -486,14 +561,125 @@ async fn prepare_guest_fixture(trace: &mut GuestTrace) -> Result<GuestFixture> {
         None,
         None,
     )?;
+    validate_shared_sources(&shared_production_before, &shared_staging_before)?;
+    // Check both clusters before creating either table. A previous run-owned
+    // table is preserved for investigation and is never silently reused.
+    guest_pg_require_isolated_absent(&production_change).await?;
+    guest_pg_require_isolated_absent(&staging_change).await?;
+    let isolated_run_id = Uuid::new_v4();
+    trace.mark(
+        TraceStage::Preflight,
+        "CreateIsolatedFixtureTables",
+        TraceBoundary::Before,
+        None,
+        Some(isolated_run_id),
+    )?;
+    guest_pg_prepare_isolated_fixture(
+        &staging_change,
+        &shared_staging_before,
+        isolated_run_id,
+        CancellationToken::new(),
+    )
+    .await?;
+    guest_pg_prepare_isolated_fixture(
+        &production_change,
+        &shared_production_before,
+        isolated_run_id,
+        CancellationToken::new(),
+    )
+    .await?;
+    trace.mark(
+        TraceStage::Preflight,
+        "CreateIsolatedFixtureTables",
+        TraceBoundary::After,
+        None,
+        Some(isolated_run_id),
+    )?;
+    let shared_production_change = production_change;
+    let shared_production_read = production_read;
+    let shared_staging_change = staging_change;
+    let shared_staging_read = staging_read;
+    let production_change = guest_scope(
+        trace,
+        "IsolatedProductionChangeCredential",
+        &target,
+        55433,
+        "relayne_helper_acceptance",
+        TASK15_TABLE,
+        CredentialPurpose::ControlledChange,
+        "relayne_fixture_owner",
+        guest_secret(&production_secrets, "owner")?,
+    )?;
+    let production_read = guest_scope(
+        trace,
+        "IsolatedProductionReadCredential",
+        &target,
+        55433,
+        "relayne_helper_acceptance",
+        TASK15_TABLE,
+        CredentialPurpose::Read,
+        "relayne_fixture_reader",
+        guest_secret(&production_secrets, "reader")?,
+    )?;
+    let staging_change = guest_scope(
+        trace,
+        "IsolatedStagingChangeCredential",
+        &target,
+        55434,
+        "relayne_helper_rehearsal",
+        TASK15_TABLE,
+        CredentialPurpose::ControlledChange,
+        "relayne_rehearsal_owner",
+        guest_secret(&staging_secrets, "owner")?,
+    )?;
+    let staging_read = guest_scope(
+        trace,
+        "IsolatedStagingReadCredential",
+        &target,
+        55434,
+        "relayne_helper_rehearsal",
+        TASK15_TABLE,
+        CredentialPurpose::Read,
+        "relayne_rehearsal_reader",
+        guest_secret(&staging_secrets, "reader")?,
+    )?;
+    guest_pg_assert_isolated_owned(&production_change, isolated_run_id).await?;
+    guest_pg_assert_isolated_owned(&staging_change, isolated_run_id).await?;
+    let baseline = guest_pg_read_only_witness(
+        &production_change,
+        &production_read,
+        CancellationToken::new(),
+    )
+    .await?;
+    let staging_baseline =
+        guest_pg_read_only_witness(&staging_change, &staging_read, CancellationToken::new())
+            .await?;
     ensure!(
-        baseline.physical_sha256 != staging_baseline.physical_sha256
+        baseline.physical_sha256 == shared_production_before.physical_sha256
+            && staging_baseline.physical_sha256 == shared_staging_before.physical_sha256
             && baseline.row_count == 75_000
+            && staging_baseline.row_count == 75_000
+            && baseline.row_sha256 == shared_production_before.row_sha256
+            && staging_baseline.row_sha256 == shared_staging_before.row_sha256
             && baseline.row_sha256 == staging_baseline.row_sha256
             && !baseline.customer_id_index_present
             && !staging_baseline.customer_id_index_present,
-        "Guest PostgreSQL fixtures are not isolated equivalent-index-free copies"
+        "Task 15 test-owned fixture copy differs before any native product action"
     );
+    let shared_production_after_seed = guest_pg_read_only_witness(
+        &shared_production_change,
+        &shared_production_read,
+        CancellationToken::new(),
+    )
+    .await?;
+    let shared_staging_after_seed = guest_pg_read_only_witness(
+        &shared_staging_change,
+        &shared_staging_read,
+        CancellationToken::new(),
+    )
+    .await?;
+    assert_shared_source_preserved(&shared_production_before, &shared_production_after_seed)?;
+    assert_shared_source_preserved(&shared_staging_before, &shared_staging_after_seed)?;
     let case_path = HelperStore::path()?;
     let journal_path = ActionJournal::path()?;
     let mut store = HelperStore::load(&case_path)?;
@@ -535,7 +721,7 @@ async fn prepare_guest_fixture(trace: &mut GuestTrace) -> Result<GuestFixture> {
         ]),
     )?;
     let case = store.case(case_id).context("New case absent")?.clone();
-    let template = ReviewedSelectTemplate::CustomerOrders {
+    let template = ReviewedSelectTemplate::Task15CustomerOrders {
         customer_id: 424242,
     };
     let workload_digest = template.fingerprint(&production_read)?;
@@ -613,7 +799,7 @@ async fn prepare_guest_fixture(trace: &mut GuestTrace) -> Result<GuestFixture> {
                 name,
                 object_id,
                 ..
-            } if schema == "fixture" && name == "orders" => Some(*object_id),
+            } if schema == "fixture" && name == TASK15_TABLE => Some(*object_id),
             _ => None,
         })
         .context("Guest PostgreSQL object identity absent")?;
@@ -669,7 +855,7 @@ async fn prepare_guest_fixture(trace: &mut GuestTrace) -> Result<GuestFixture> {
             engine: SqlEngine::Postgres,
             database: "relayne_helper_acceptance".into(),
             schema: "fixture".into(),
-            table: "orders".into(),
+            table: TASK15_TABLE.into(),
             object_id,
             scope_sha256: production_change.digest()?,
         },
@@ -802,6 +988,13 @@ async fn prepare_guest_fixture(trace: &mut GuestTrace) -> Result<GuestFixture> {
         production_read,
         staging_change,
         staging_read,
+        shared_production_change,
+        shared_production_read,
+        shared_staging_change,
+        shared_staging_read,
+        shared_production_before,
+        shared_staging_before,
+        isolated_run_id,
         baseline,
         staging_baseline,
         case_path,
@@ -1667,6 +1860,7 @@ async fn run_guest_pg_task15() -> Result<()> {
     ensure!(
         after_readback.row_sha256 == fixture.baseline.row_sha256
             && after_readback.index_set_sha256 == fixture.baseline.index_set_sha256
+            && after_readback.index_identity_sha256 == fixture.baseline.index_identity_sha256
             && !after_readback
                 .indexes
                 .iter()
@@ -1688,6 +1882,36 @@ async fn run_guest_pg_task15() -> Result<()> {
     trace.mark(
         TraceStage::RestorationDurable,
         "ProtectedTerminalJournal",
+        TraceBoundary::After,
+        case_id,
+        Some(receipt.run_id()),
+    )?;
+    guest_pg_assert_isolated_owned(&fixture.production_change, fixture.isolated_run_id).await?;
+    guest_pg_assert_isolated_owned(&fixture.staging_change, fixture.isolated_run_id).await?;
+    trace.mark(
+        TraceStage::Readback,
+        "SharedSourcePreservation",
+        TraceBoundary::Before,
+        case_id,
+        Some(receipt.run_id()),
+    )?;
+    let shared_production_after = guest_pg_read_only_witness(
+        &fixture.shared_production_change,
+        &fixture.shared_production_read,
+        CancellationToken::new(),
+    )
+    .await?;
+    let shared_staging_after = guest_pg_read_only_witness(
+        &fixture.shared_staging_change,
+        &fixture.shared_staging_read,
+        CancellationToken::new(),
+    )
+    .await?;
+    assert_shared_source_preserved(&fixture.shared_production_before, &shared_production_after)?;
+    assert_shared_source_preserved(&fixture.shared_staging_before, &shared_staging_after)?;
+    trace.mark(
+        TraceStage::Readback,
+        "SharedSourcePreservation",
         TraceBoundary::After,
         case_id,
         Some(receipt.run_id()),
@@ -1715,6 +1939,8 @@ async fn run_guest_pg_task15() -> Result<()> {
         &receipt,
         &after_create,
         &after_readback,
+        &shared_production_after,
+        &shared_staging_after,
     )?;
     trace.mark(
         TraceStage::Complete,
@@ -1811,6 +2037,8 @@ fn write_success_witness(
     receipt: &crate::helper::sql::restoration::ProductionReceipt,
     after_create: &GuestPgReadback,
     after_restore: &GuestPgReadback,
+    shared_production_after: &GuestPgReadback,
+    shared_staging_after: &GuestPgReadback,
 ) -> Result<()> {
     let source = required_hex_env("RELAYNE_GUEST_SOURCE_COMMIT", 40)?;
     let tree = required_hex_env("RELAYNE_GUEST_SOURCE_TREE", 40)?;
@@ -1840,18 +2068,25 @@ fn write_success_witness(
         "SourceCommit": source, "SourceTree": tree, "BinarySha256": binary,
         "TeamBinarySha256": team_binary, "DriverSha256": driver,
         "CaseId": case, "StagingRunId": rehearsal.run_id(), "ProductionRunId": receipt.run_id(),
+        "IsolatedFixtureRunId": fixture.isolated_run_id,
         "TeamDb": team.db.file_name().and_then(|name| name.to_str()),
         "ProductionPhysicalSha256": fixture.baseline.physical_sha256,
         "ProductionDatabaseId": fixture.baseline.database_id,
         "ProductionObjectId": fixture.baseline.object_id,
         "OriginalRowSha256": fixture.baseline.row_sha256,
         "OriginalIndexSetSha256": fixture.baseline.index_set_sha256,
+        "OriginalIndexIdentitySha256": fixture.baseline.index_identity_sha256,
         "ProductionAfterCreateIndexSetSha256": after_create.index_set_sha256,
         "ProductionCreatedIndexOid": observed.id,
         "ProductionCreatedIndexDefinitionSha256": observed.definition_sha256,
         "ProductionCreatedIndexMarkerSha256": observed.marker_sha256,
         "AfterRestoreRowSha256": after_restore.row_sha256,
         "AfterRestoreIndexSetSha256": after_restore.index_set_sha256,
+        "AfterRestoreIndexIdentitySha256": after_restore.index_identity_sha256,
+        "SharedProductionBeforeIndexIdentitySha256": fixture.shared_production_before.index_identity_sha256,
+        "SharedProductionAfterIndexIdentitySha256": shared_production_after.index_identity_sha256,
+        "SharedStagingBeforeIndexIdentitySha256": fixture.shared_staging_before.index_identity_sha256,
+        "SharedStagingAfterIndexIdentitySha256": shared_staging_after.index_identity_sha256,
         "StagingReceiptSha256": rehearsal.content_sha256(),
         "ProductionReceiptSha256": receipt.content_sha256(),
         "BoundaryCounts": guest_pg_boundary_counts(),

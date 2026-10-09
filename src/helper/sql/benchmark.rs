@@ -648,6 +648,10 @@ async fn native_pg_data_digest(
         ReviewedSelectTemplate::OrderSort => {
             "SELECT CASE WHEN octet_length(convert_to(to_jsonb(t)::text, 'UTF8')) <= 16384 THEN to_jsonb(t)::text END FROM fixture.spill_events t ORDER BY event_id LIMIT 100001"
         }
+        #[cfg(test)]
+        ReviewedSelectTemplate::Task15CustomerOrders { .. } => {
+            "SELECT CASE WHEN octet_length(convert_to(to_jsonb(t)::text, 'UTF8')) <= 16384 THEN to_jsonb(t)::text END FROM fixture.task15_orders t ORDER BY order_id LIMIT 100001"
+        }
         _ => {
             "SELECT CASE WHEN octet_length(convert_to(to_jsonb(t)::text, 'UTF8')) <= 16384 THEN to_jsonb(t)::text END FROM fixture.orders t ORDER BY order_id LIMIT 100001"
         }

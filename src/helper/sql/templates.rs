@@ -7,6 +7,8 @@ pub const FIXTURE_DATABASE: &str = "relayne_helper_acceptance";
 pub const REHEARSAL_DATABASE: &str = "relayne_helper_rehearsal";
 pub const FIXTURE_SCHEMA: &str = "fixture";
 pub const REHEARSAL_TEMPLATE_MAPPING_VERSION: u16 = 2;
+#[cfg(test)]
+pub(crate) const TASK15_TABLE: &str = "task15_orders";
 pub const TDS_FIXTURE_PORT: u16 = 51433;
 pub const TDS_REHEARSAL_PORT: u16 = 51434;
 
@@ -44,8 +46,16 @@ impl OrderStatus {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ReviewedSelectTemplate {
-    CustomerOrders { customer_id: i32 },
-    StatusCount { status: OrderStatus },
+    CustomerOrders {
+        customer_id: i32,
+    },
+    #[cfg(test)]
+    Task15CustomerOrders {
+        customer_id: i32,
+    },
+    StatusCount {
+        status: OrderStatus,
+    },
     OrderSort,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,6 +75,15 @@ pub struct TemplateStatement {
 impl ReviewedSelectTemplate {
     /// The executable registry recognizes only these immutable fixture bindings.
     pub fn from_fingerprint(scope: &BoundScope, digest: &str) -> Option<Self> {
+        #[cfg(test)]
+        {
+            let task15 = Self::Task15CustomerOrders {
+                customer_id: 424242,
+            };
+            if task15.fingerprint(scope).ok().as_deref() == Some(digest) {
+                return Some(task15);
+            }
+        }
         [
             Self::CustomerOrders {
                 customer_id: 424242,
@@ -80,6 +99,8 @@ impl ReviewedSelectTemplate {
     pub fn label(self) -> &'static str {
         match self {
             Self::CustomerOrders { .. } => "CustomerOrders/v1",
+            #[cfg(test)]
+            Self::Task15CustomerOrders { .. } => "Task15CustomerOrders/v1",
             Self::StatusCount { .. } => "StatusCount/v1",
             Self::OrderSort => "OrderSort/v1",
         }
@@ -87,12 +108,16 @@ impl ReviewedSelectTemplate {
     pub fn object(self) -> &'static str {
         match self {
             Self::OrderSort => "spill_events",
+            #[cfg(test)]
+            Self::Task15CustomerOrders { .. } => TASK15_TABLE,
             _ => "orders",
         }
     }
     pub fn bind(self) -> TemplateBind {
         match self {
             Self::CustomerOrders { customer_id } => TemplateBind::Integer(customer_id),
+            #[cfg(test)]
+            Self::Task15CustomerOrders { customer_id } => TemplateBind::Integer(customer_id),
             Self::StatusCount { status } => TemplateBind::Status(status),
             Self::OrderSort => TemplateBind::None,
         }
@@ -154,6 +179,11 @@ impl ReviewedSelectTemplate {
                 "SELECT order_id FROM \"fixture\".\"orders\" WHERE customer_id = $1 ORDER BY order_id LIMIT 100",
                 "EXPLAIN (FORMAT JSON) SELECT order_id FROM \"fixture\".\"orders\" WHERE customer_id = $1 ORDER BY order_id LIMIT 100",
             ),
+            #[cfg(test)]
+            Self::Task15CustomerOrders { .. } => (
+                "SELECT order_id FROM \"fixture\".\"task15_orders\" WHERE customer_id = $1 ORDER BY order_id LIMIT 100",
+                "EXPLAIN (FORMAT JSON) SELECT order_id FROM \"fixture\".\"task15_orders\" WHERE customer_id = $1 ORDER BY order_id LIMIT 100",
+            ),
             Self::StatusCount { .. } => (
                 "SELECT count(*)::bigint FROM \"fixture\".\"orders\" WHERE status = $1",
                 "EXPLAIN (FORMAT JSON) SELECT count(*)::bigint FROM \"fixture\".\"orders\" WHERE status = $1",
@@ -206,6 +236,10 @@ impl ReviewedSelectTemplate {
         let sql = match self {
             Self::CustomerOrders { .. } => {
                 "SELECT TOP (100) [order_id] FROM [fixture].[orders] WHERE [customer_id] = @P1 ORDER BY [order_id]"
+            }
+            #[cfg(test)]
+            Self::Task15CustomerOrders { .. } => {
+                anyhow::bail!("Task 15 fixture is PostgreSQL only")
             }
             Self::StatusCount { .. } => {
                 "SELECT COUNT_BIG(*) FROM [fixture].[orders] WHERE [status] = @P1"

@@ -6,10 +6,10 @@ use crate::helper::{
     scope::{BoundScope, CredentialPurpose, DatabaseEngine},
 };
 use crate::helper_action::{
-    digest, SortDirection, SqlAction, SqlEngine, VerifiedSqlColumn, VerifiedSqlMetadata,
+    SortDirection, SqlAction, SqlEngine, VerifiedSqlColumn, VerifiedSqlMetadata, digest,
 };
 use crate::helper_approval::RunKind;
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use native_tls::TlsConnector;
@@ -620,6 +620,7 @@ pub(crate) struct GuestPgReadback {
     pub row_count: usize,
     pub row_sha256: String,
     pub index_set_sha256: String,
+    pub index_identity_sha256: String,
     pub indexes: Vec<GuestPgIndexWitness>,
     pub customer_id_index_present: bool,
 }
@@ -640,7 +641,7 @@ pub(crate) async fn guest_pg_read_only_witness(
                 .credential()
                 .is_some_and(|credential| credential.purpose == CredentialPurpose::Read)
             && change_scope.resource_digest()? == read_scope.resource_digest()?
-            && matches!(read_scope, BoundScope::Database { engine: DatabaseEngine::Postgres, schema: Some(schema), object: Some(table), .. } if schema == "fixture" && table == "orders"),
+            && matches!(read_scope, BoundScope::Database { engine: DatabaseEngine::Postgres, schema: Some(schema), object: Some(table), .. } if schema == "fixture" && (table == "orders" || table == super::templates::TASK15_TABLE)),
         "Guest witness requires exact fixture change and reader scopes"
     );
     ensure!(!cancel.is_cancelled(), "Guest readback canceled");
@@ -656,6 +657,21 @@ pub(crate) async fn guest_pg_read_only_witness(
         }
     };
     READ_ONLY_PG_OPENS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let row_sql = match read_scope {
+        BoundScope::Database {
+            object: Some(table),
+            ..
+        } if table == "orders" => {
+            "SELECT row_to_json(t)::text FROM fixture.orders AS t ORDER BY t.order_id LIMIT 100001"
+        }
+        BoundScope::Database {
+            object: Some(table),
+            ..
+        } if table == super::templates::TASK15_TABLE => {
+            "SELECT row_to_json(t)::text FROM fixture.task15_orders AS t ORDER BY t.order_id LIMIT 100001"
+        }
+        _ => anyhow::bail!("Guest witness table is not an attested fixture"),
+    };
     let result = async {
         let state = pg_state(&client, change_scope).await?;
         let rows = tokio::select! {
@@ -663,7 +679,7 @@ pub(crate) async fn guest_pg_read_only_witness(
             result = tokio::time::timeout(
                 ACTION_LIMIT,
                 reader.query(
-                    "SELECT row_to_json(t)::text FROM fixture.orders AS t ORDER BY t.order_id LIMIT 100001",
+                    row_sql,
                     &[],
                 ),
             ) => result.context("Fixture row witness timed out")??,
@@ -698,24 +714,198 @@ pub(crate) async fn guest_pg_read_only_witness(
         Ok(GuestPgReadback {
             physical_sha256: digest(
                 b"relayne-helper-physical-database-v1",
-                &(state.engine, &state.physical_instance, &state.database, state.database_id),
+                &(
+                    state.engine,
+                    &state.physical_instance,
+                    &state.database,
+                    state.database_id,
+                ),
             )?,
             database_id: state.database_id,
             object_id: state.object_id,
             row_count: rows.len(),
             row_sha256: format!("{:x}", row_hash.finalize()),
             index_set_sha256: digest(b"relayne-guest-pg-index-set-v1", &state.indexes)?,
+            index_identity_sha256: digest(b"relayne-guest-pg-index-identities-v1", &indexes)?,
             indexes,
-            customer_id_index_present: state
-                .indexes
-                .iter()
-                .any(|index| index.definition.to_ascii_lowercase().contains("customer_id")),
+            customer_id_index_present: state.indexes.iter().any(|index| {
+                index
+                    .definition
+                    .to_ascii_lowercase()
+                    .contains("customer_id")
+            }),
         })
     }
     .await;
     driver.abort();
     reader_driver.abort();
     result
+}
+
+/// Creates only the fixed Task 15 table. A collision, changed source identity,
+/// partial seed, or timeout leaves the shared fixture untouched and halts the test.
+/// The run-marked table is retained for protected receipt review; no automatic
+/// fixture DROP or retry is performed.
+#[cfg(test)]
+pub(crate) async fn guest_pg_require_isolated_absent(source_scope: &BoundScope) -> Result<()> {
+    ensure!(
+        matches!(source_scope, BoundScope::Database { engine: DatabaseEngine::Postgres, schema: Some(schema), object: Some(table), .. } if schema == "fixture" && table == "orders"),
+        "Task 15 collision preflight requires original shared fixture scope"
+    );
+    let (client, driver, _) = pg_connection(source_scope).await?;
+    let bounded = tokio::time::timeout(ACTION_LIMIT, async {
+        let exists: bool = client
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM pg_class AS c JOIN pg_namespace AS n ON n.oid=c.relnamespace WHERE n.nspname='fixture' AND c.relname='task15_orders')",
+                &[],
+            )
+            .await?
+            .get(0);
+        ensure!(!exists, "Task 15 test-owned table already exists; no reuse");
+        Ok::<(), anyhow::Error>(())
+    })
+    .await;
+    driver.abort();
+    bounded.context("Task 15 collision preflight timed out")?
+}
+
+#[cfg(test)]
+pub(crate) async fn guest_pg_assert_isolated_owned(
+    scope: &BoundScope,
+    run_id: uuid::Uuid,
+) -> Result<()> {
+    ensure!(
+        matches!(scope, BoundScope::Database { engine: DatabaseEngine::Postgres, schema: Some(schema), object: Some(table), .. } if schema == "fixture" && table == super::templates::TASK15_TABLE),
+        "Task 15 ownership check requires isolated table scope"
+    );
+    let (_, port, database, _, _, _) = exact_scope(scope, DatabaseEngine::Postgres)?;
+    let expected_owner = match (port, database) {
+        (55433, "relayne_helper_acceptance") => "relayne_fixture_owner",
+        (55434, "relayne_helper_rehearsal") => "relayne_rehearsal_owner",
+        _ => anyhow::bail!("Task 15 ownership endpoint differs"),
+    };
+    let (client, driver, _) = pg_connection(scope).await?;
+    let bounded = tokio::time::timeout(ACTION_LIMIT, async {
+        let row = client
+            .query_one(
+                "SELECT pg_get_userbyid(c.relowner)::text, obj_description(c.oid,'pg_class')::text, c.relkind::text FROM pg_class AS c JOIN pg_namespace AS n ON n.oid=c.relnamespace WHERE n.nspname='fixture' AND c.relname='task15_orders' AND c.relkind='r'",
+                &[],
+            )
+            .await?;
+        let owner: String = row.get(0);
+        let marker: String = row.get(1);
+        let kind: String = row.get(2);
+        ensure!(
+            owner == expected_owner
+                && marker == format!("Relayne Task 15 isolated run {run_id}")
+                && kind == "r",
+            "Task 15 table owner or exact run marker changed"
+        );
+        Ok::<(), anyhow::Error>(())
+    })
+    .await;
+    driver.abort();
+    bounded.context("Task 15 ownership check timed out")?
+}
+
+#[cfg(test)]
+pub(crate) async fn guest_pg_prepare_isolated_fixture(
+    source_scope: &BoundScope,
+    source: &GuestPgReadback,
+    run_id: uuid::Uuid,
+    cancel: CancellationToken,
+) -> Result<()> {
+    ensure!(
+        matches!(source_scope, BoundScope::Database { engine: DatabaseEngine::Postgres, schema: Some(schema), object: Some(table), .. } if schema == "fixture" && table == "orders"),
+        "Task 15 seed requires original shared fixture scope"
+    );
+    ensure!(
+        source.row_count == 75_000,
+        "Shared fixture row count changed"
+    );
+    ensure!(
+        !cancel.is_cancelled(),
+        "Task 15 fixture preparation canceled"
+    );
+    let (_, port, database, _, _, _) = exact_scope(source_scope, DatabaseEngine::Postgres)?;
+    let reader_role = match (port, database) {
+        (55433, "relayne_helper_acceptance") => "relayne_fixture_reader",
+        (55434, "relayne_helper_rehearsal") => "relayne_rehearsal_reader",
+        _ => anyhow::bail!("Task 15 fixture endpoint is not isolated"),
+    };
+    let (mut client, driver, _) = pg_connection(source_scope).await?;
+    let bounded = tokio::time::timeout(Duration::from_secs(120), async {
+        let current = pg_state(&client, source_scope).await?;
+        ensure!(
+            current.object_id == source.object_id
+                && current.database_id == source.database_id
+                && digest(
+                    b"relayne-helper-physical-database-v1",
+                    &(
+                        current.engine,
+                        &current.physical_instance,
+                        &current.database,
+                        current.database_id,
+                    ),
+                )? == source.physical_sha256
+                && digest(b"relayne-guest-pg-index-set-v1", &current.indexes)?
+                    == source.index_set_sha256,
+            "Shared fixture identity or original indexes changed before isolated seed"
+        );
+        let exists: bool = client
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM pg_class AS c JOIN pg_namespace AS n ON n.oid=c.relnamespace WHERE n.nspname='fixture' AND c.relname='task15_orders')",
+                &[],
+            )
+            .await?
+            .get(0);
+        ensure!(!exists, "Task 15 test-owned table already exists; no reuse");
+        let transaction = client
+            .build_transaction()
+            .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+            .start()
+            .await?;
+        // A second, transactional collision check prevents a concurrent creator.
+        let exists: bool = transaction
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM pg_class AS c JOIN pg_namespace AS n ON n.oid=c.relnamespace WHERE n.nspname='fixture' AND c.relname='task15_orders')",
+                &[],
+            )
+            .await?
+            .get(0);
+        ensure!(!exists, "Task 15 test-owned table collision");
+        transaction
+            .batch_execute(
+                "CREATE TABLE fixture.task15_orders (LIKE fixture.orders INCLUDING DEFAULTS INCLUDING GENERATED INCLUDING IDENTITY INCLUDING CONSTRAINTS); ALTER TABLE fixture.task15_orders ADD PRIMARY KEY (order_id)",
+            )
+            .await?;
+        let first = transaction
+            .execute(
+                "INSERT INTO fixture.task15_orders (order_id,customer_id,status,amount,created_at,detail) OVERRIDING SYSTEM VALUE SELECT order_id,customer_id,status,amount,created_at,detail FROM fixture.orders WHERE order_id <= 60000 ORDER BY order_id",
+                &[],
+            )
+            .await?;
+        ensure!(first == 60_000, "Task 15 first synthetic row segment changed");
+        transaction.batch_execute("ANALYZE fixture.task15_orders; ALTER TABLE fixture.task15_orders SET (autovacuum_enabled=false)").await?;
+        let second = transaction
+            .execute(
+                "INSERT INTO fixture.task15_orders (order_id,customer_id,status,amount,created_at,detail) OVERRIDING SYSTEM VALUE SELECT order_id,customer_id,status,amount,created_at,detail FROM fixture.orders WHERE order_id > 60000 ORDER BY order_id",
+                &[],
+            )
+            .await?;
+        ensure!(second == 15_000, "Task 15 second synthetic row segment changed");
+        transaction
+            .batch_execute(&format!(
+                "GRANT SELECT ON fixture.task15_orders TO {reader_role}; COMMENT ON TABLE fixture.task15_orders IS 'Relayne Task 15 isolated run {run_id}'"
+            ))
+            .await?;
+        ensure!(!cancel.is_cancelled(), "Task 15 fixture preparation canceled");
+        transaction.commit().await?;
+        Ok::<(), anyhow::Error>(())
+    })
+    .await;
+    driver.abort();
+    bounded.context("Task 15 isolated fixture preparation timed out")?
 }
 
 #[cfg(test)]
