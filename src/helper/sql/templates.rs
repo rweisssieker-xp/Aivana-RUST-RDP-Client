@@ -6,7 +6,9 @@ use sha2::{Digest, Sha256};
 pub const FIXTURE_DATABASE: &str = "relayne_helper_acceptance";
 pub const REHEARSAL_DATABASE: &str = "relayne_helper_rehearsal";
 pub const FIXTURE_SCHEMA: &str = "fixture";
-pub const REHEARSAL_TEMPLATE_MAPPING_VERSION: u16 = 1;
+pub const REHEARSAL_TEMPLATE_MAPPING_VERSION: u16 = 2;
+pub const TDS_FIXTURE_PORT: u16 = 51433;
+pub const TDS_REHEARSAL_PORT: u16 = 51434;
 
 /// Reviewed, literal endpoint/database pairs. This is a closed compatibility
 /// mapping, never a database-name alias or SQL-text parameter.
@@ -15,6 +17,14 @@ fn reviewed_pg_fixture(host: &str, port: u16, database: &str) -> bool {
         && matches!(
             (port, database),
             (55433, FIXTURE_DATABASE) | (55434, REHEARSAL_DATABASE)
+        )
+}
+
+fn reviewed_tds_fixture(host: &str, port: u16, database: &str) -> bool {
+    host == "127.0.0.1"
+        && matches!(
+            (port, database),
+            (TDS_FIXTURE_PORT, FIXTURE_DATABASE) | (TDS_REHEARSAL_PORT, REHEARSAL_DATABASE)
         )
 }
 
@@ -101,6 +111,15 @@ impl ReviewedSelectTemplate {
     }
     pub fn reviewed_statement(self, scope: &BoundScope) -> Result<TemplateStatement> {
         scope.validate()?;
+        if matches!(
+            scope,
+            BoundScope::Database {
+                engine: DatabaseEngine::SqlServer,
+                ..
+            }
+        ) {
+            return self.sql_server_statement(scope);
+        }
         let BoundScope::Database {
             target,
             engine,
@@ -160,6 +179,7 @@ impl ReviewedSelectTemplate {
         let BoundScope::Database {
             target,
             engine: DatabaseEngine::SqlServer,
+            port,
             database,
             schema,
             object,
@@ -170,16 +190,11 @@ impl ReviewedSelectTemplate {
             anyhow::bail!("SQL Server database scope required")
         };
         ensure!(
-            target
-                .host
-                .parse::<std::net::IpAddr>()
-                .is_ok_and(|ip| ip.is_loopback()),
-            "SQL Server fixture requires literal loopback endpoint"
+            reviewed_tds_fixture(&target.host, *port, database),
+            "SQL Server fixture endpoint/database is not in reviewed v2 mapping"
         );
         ensure!(
-            database == FIXTURE_DATABASE
-                && schema.as_deref() == Some(FIXTURE_SCHEMA)
-                && object.as_deref() == Some(self.object()),
+            schema.as_deref() == Some(FIXTURE_SCHEMA) && object.as_deref() == Some(self.object()),
             "SQL Server fixture database/object mismatch"
         );
         ensure!(

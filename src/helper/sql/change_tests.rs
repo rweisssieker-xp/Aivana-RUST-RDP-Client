@@ -4,6 +4,192 @@ use crate::helper_action::{PlainIndexColumn, VerifiedSqlObject};
 use crate::mission::Target;
 use uuid::Uuid;
 
+#[tokio::test]
+async fn missing_mismatched_or_corrupt_started_intent_makes_zero_target_contacts() {
+    use crate::helper_action::{RestorationSpec, SQL_ACTION_VERSION, StatisticsLimitation};
+    use crate::helper_approval::{
+        ACTION_BINDING_VERSION, ActionBindingV2, ActionProof, ConsumeReceiptV2,
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let scope = BoundScope::Database {
+        target: Target {
+            profile_id: Uuid::new_v4(),
+            name: "intent gate".into(),
+            host: "127.0.0.1".into(),
+            port: 3389,
+            protocol: "RDP".into(),
+            username: "operator".into(),
+            domain: String::new(),
+            route: String::new(),
+        },
+        engine: DatabaseEngine::Postgres,
+        port,
+        database: "relayne_helper_rehearsal".into(),
+        schema: Some("fixture".into()),
+        object: Some("orders".into()),
+        credential: None,
+    };
+    let object = VerifiedSqlObject {
+        engine: SqlEngine::Postgres,
+        database: "relayne_helper_rehearsal".into(),
+        schema: "fixture".into(),
+        table: "orders".into(),
+        object_id: 1,
+        scope_sha256: scope.digest().unwrap(),
+    };
+    let action = SqlAction::PostgresAnalyze {
+        object: object.clone(),
+    };
+    let metadata = VerifiedSqlMetadata {
+        object,
+        columns: vec![],
+        existing_indexes: vec![],
+        base_table: true,
+        source_evidence_sha256: "a".repeat(64),
+    };
+    let now = Utc::now();
+    let binding = ActionBindingV2 {
+        version: ACTION_BINDING_VERSION,
+        case_id: Uuid::new_v4(),
+        case_revision: 1,
+        evidence_revision: 1,
+        run_id: Uuid::new_v4(),
+        run_kind: RunKind::Rehearsal,
+        organization_sha256: "a".repeat(64),
+        scope_sha256: scope.digest().unwrap(),
+        credential_scope_sha256: scope.credential_scope_digest().unwrap(),
+        action_version: SQL_ACTION_VERSION,
+        action: action.clone(),
+        metadata_sha256: digest(b"relayne-helper-sql-metadata-v2", &metadata).unwrap(),
+        before_sha256: "b".repeat(64),
+        plan_sha256: "c".repeat(64),
+        verification_sha256: "d".repeat(64),
+        proof: ActionProof::StagingReviewProof {
+            review_id: Uuid::new_v4(),
+            review_sha256: "e".repeat(64),
+            mapping_sha256: "f".repeat(64),
+            staging_scope_sha256: scope.digest().unwrap(),
+            staging_physical_sha256: "1".repeat(64),
+            expires_at: now + chrono::Duration::minutes(5),
+        },
+        restoration: RestorationSpec::ManualOrUnavailable {
+            limitation: StatisticsLimitation::PriorStatisticsCannotBeRestoredExactly,
+        },
+        statistics_limit_acknowledged: true,
+        captured_at: now,
+        expires_at: now + chrono::Duration::minutes(3),
+    };
+    let receipt = ConsumeReceiptV2 {
+        approval_id: Uuid::new_v4(),
+        consume_id: Uuid::new_v4(),
+        fingerprint: binding.fingerprint().unwrap(),
+        organization_sha256: binding.organization_sha256.clone(),
+    };
+    let trial = NativeTrialTarget {
+        preflight: NativePreflight {
+            state: NativeState {
+                engine: SqlEngine::Postgres,
+                physical_instance: "fixture".into(),
+                database: "relayne_helper_rehearsal".into(),
+                database_id: 1,
+                schema: "fixture".into(),
+                schema_id: 1,
+                table: "orders".into(),
+                object_id: 1,
+                principal: "reader".into(),
+                version: "test".into(),
+                columns: vec![],
+                indexes: vec![],
+                statistics: String::new(),
+                grants: vec![],
+                configuration: vec![],
+            },
+            metadata_sha256: binding.metadata_sha256.clone(),
+            before_sha256: binding.before_sha256.clone(),
+            credential_scope_sha256: binding.credential_scope_sha256.clone(),
+            observed_at: now,
+        },
+        action,
+        metadata,
+    };
+    let journal_path =
+        std::env::temp_dir().join(format!("task14-missing-intent-{}.dpapi", Uuid::new_v4()));
+    let permit = || DispatchPermit::test_only(binding.clone(), receipt.clone());
+    let missing = execute_sql_change(
+        permit(),
+        Uuid::new_v4(),
+        &journal_path,
+        &scope,
+        &trial,
+        CancellationToken::new(),
+    )
+    .await
+    .err()
+    .unwrap();
+    assert!(missing.to_string().contains("Durable native intent"));
+    let mut journal = ActionJournal::load(&journal_path).unwrap();
+    let id = journal.record_intent(permit()).unwrap();
+    journal.mark_dispatch_started(id).unwrap();
+    let mismatch = execute_sql_change(
+        permit(),
+        Uuid::new_v4(),
+        &journal_path,
+        &scope,
+        &trial,
+        CancellationToken::new(),
+    )
+    .await
+    .err()
+    .unwrap();
+    assert!(mismatch.to_string().contains("Durable native intent"));
+    std::fs::write(&journal_path, b"corrupt protected journal").unwrap();
+    assert!(
+        execute_sql_change(
+            permit(),
+            id,
+            &journal_path,
+            &scope,
+            &trial,
+            CancellationToken::new(),
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), listener.accept())
+            .await
+            .is_err()
+    );
+    let _ = std::fs::remove_file(journal_path);
+}
+
+async fn execute_with_started_test_intent(
+    permit: DispatchPermit,
+    scope: &BoundScope,
+    trial: &NativeTrialTarget,
+) -> Result<NativeActionProof> {
+    let journal_path = crate::security::app_data_file(&format!(
+        "task14-native-journal-{}.dpapi",
+        permit.binding().run_id
+    ))?;
+    let mut journal = ActionJournal::load(&journal_path)?;
+    let recorded = DispatchPermit::test_only(permit.binding().clone(), permit.receipt().clone());
+    let intent_id = journal.record_intent(recorded)?;
+    journal.mark_dispatch_started(intent_id)?;
+    let proof = execute_sql_change(
+        permit,
+        intent_id,
+        &journal_path,
+        scope,
+        trial,
+        CancellationToken::new(),
+    )
+    .await?;
+    journal.record_native_outcome(intent_id, &proof, None)?;
+    Ok(proof)
+}
+
 #[test]
 fn shared_native_failure_state_requires_ack_and_preserves_commit_ambiguity() {
     assert_eq!(
@@ -271,7 +457,7 @@ async fn guest_native_rehearsal_executor_rolls_back_drift_and_marks_created_inde
         let receipt = ConsumeReceiptV2 {
             approval_id: Uuid::new_v4(),
             consume_id: Uuid::new_v4(),
-            fingerprint: "4".repeat(64),
+            fingerprint: binding.fingerprint().unwrap(),
             organization_sha256: "a".repeat(64),
         };
         DispatchPermit::test_only(binding, receipt)
@@ -292,12 +478,10 @@ async fn guest_native_rehearsal_executor_rolls_back_drift_and_marks_created_inde
         metadata: metadata.clone(),
     };
     let drift_trial = make_trial(initial, "0".repeat(64), &action, &metadata);
-    let drift = execute_sql_change(
+    let drift = execute_with_started_test_intent(
         make_permit(&action, "0".repeat(64)),
-        Uuid::new_v4(),
         &scope,
         &drift_trial,
-        CancellationToken::new(),
     )
     .await
     .unwrap();
@@ -310,12 +494,10 @@ async fn guest_native_rehearsal_executor_rolls_back_drift_and_marks_created_inde
     );
     let trial = make_trial(fresh, original_sha, &action, &metadata);
     arm_guest_native_fault(NativeFaultPhase::PgMarker);
-    let marker_failure = execute_sql_change(
+    let marker_failure = execute_with_started_test_intent(
         make_permit(&action, trial.preflight.before_sha256.clone()),
-        Uuid::new_v4(),
         &scope,
         &trial,
-        CancellationToken::new(),
     )
     .await
     .unwrap();
@@ -335,12 +517,10 @@ async fn guest_native_rehearsal_executor_rolls_back_drift_and_marks_created_inde
         .unwrap(),
         trial.preflight.before_sha256,
     );
-    let applied = execute_sql_change(
+    let applied = execute_with_started_test_intent(
         make_permit(&action, trial.preflight.before_sha256.clone()),
-        Uuid::new_v4(),
         &scope,
         &trial,
-        CancellationToken::new(),
     )
     .await
     .unwrap();
@@ -388,15 +568,13 @@ async fn guest_native_rehearsal_executor_rolls_back_drift_and_marks_created_inde
         &unknown_metadata,
     );
     arm_guest_native_fault(NativeFaultPhase::PgCommittedReadback);
-    let ambiguous_commit = execute_sql_change(
+    let ambiguous_commit = execute_with_started_test_intent(
         make_permit(
             &unknown_action,
             unknown_trial.preflight.before_sha256.clone(),
         ),
-        Uuid::new_v4(),
         &scope,
         &unknown_trial,
-        CancellationToken::new(),
     )
     .await
     .unwrap();

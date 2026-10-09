@@ -1,6 +1,6 @@
 //! Native, closed SQL change plans. No caller can submit SQL text.
 use crate::helper::approval::DispatchPermit;
-use crate::helper::journal::{IntentId, IntentState};
+use crate::helper::journal::{ActionJournal, IntentId, IntentState};
 use crate::helper::{
     credentials::{PersistentSecretResolver, SecretResolver},
     scope::{BoundScope, CredentialPurpose, DatabaseEngine},
@@ -15,7 +15,7 @@ use futures_util::StreamExt;
 use native_tls::TlsConnector;
 use postgres_native_tls::MakeTlsConnector;
 use serde::Serialize;
-use std::time::Duration;
+use std::{path::Path, time::Duration};
 use tiberius::{
     AuthMethod, Client as TdsClient, Config as TdsConfig, EncryptionLevel, Query, QueryItem, Row,
 };
@@ -882,17 +882,81 @@ pub enum NativeActionState {
 }
 
 /// A sealed report of an actual native attempt. No public success constructor.
-pub struct NativeActionProof {
+#[derive(Clone)]
+pub(crate) struct NativeActionIdentity {
     run_id: uuid::Uuid,
-    pub(crate) state: NativeActionState,
-    pub(crate) before_sha256: String,
-    pub(crate) after_sha256: Option<String>,
-    pub(crate) created_index_id: Option<u64>,
-    pub(crate) created_index_definition_sha256: Option<String>,
-    pub(crate) ownership_marker_sha256: Option<String>,
+    case_id: uuid::Uuid,
+    approval_id: uuid::Uuid,
+    consume_id: uuid::Uuid,
+    binding_fingerprint: String,
+    scope_sha256: String,
+    action_sha256: String,
+}
+
+impl NativeActionIdentity {
+    pub(crate) fn from_permit(permit: &DispatchPermit) -> Result<Self> {
+        Ok(Self {
+            run_id: permit.binding().run_id,
+            case_id: permit.binding().case_id,
+            approval_id: permit.receipt().approval_id,
+            consume_id: permit.receipt().consume_id,
+            binding_fingerprint: permit.binding().fingerprint()?,
+            scope_sha256: permit.binding().scope_sha256.clone(),
+            action_sha256: digest(b"relayne-helper-sql-action-v1", &permit.binding().action)?,
+        })
+    }
+
+    pub(crate) fn run_id(&self) -> uuid::Uuid {
+        self.run_id
+    }
+    pub(crate) fn case_id(&self) -> uuid::Uuid {
+        self.case_id
+    }
+    pub(crate) fn approval_id(&self) -> uuid::Uuid {
+        self.approval_id
+    }
+    pub(crate) fn consume_id(&self) -> uuid::Uuid {
+        self.consume_id
+    }
+    pub(crate) fn binding_fingerprint(&self) -> &str {
+        &self.binding_fingerprint
+    }
+    pub(crate) fn scope_sha256(&self) -> &str {
+        &self.scope_sha256
+    }
+    pub(crate) fn action_sha256(&self) -> &str {
+        &self.action_sha256
+    }
+}
+
+pub struct NativeActionProof {
+    identity: NativeActionIdentity,
+    state: NativeActionState,
+    before_sha256: String,
+    after_sha256: Option<String>,
+    created_index_id: Option<u64>,
+    created_index_definition_sha256: Option<String>,
+    ownership_marker_sha256: Option<String>,
 }
 
 impl NativeActionProof {
+    #[cfg(test)]
+    pub(crate) fn test_verified_from_permit(
+        permit: &DispatchPermit,
+        before_sha256: String,
+        after_sha256: String,
+    ) -> Result<Self> {
+        Ok(Self {
+            identity: NativeActionIdentity::from_permit(permit)?,
+            state: NativeActionState::Verified,
+            before_sha256,
+            after_sha256: Some(after_sha256),
+            created_index_id: None,
+            created_index_definition_sha256: None,
+            ownership_marker_sha256: None,
+        })
+    }
+
     pub(crate) fn needs_intervention(&mut self) {
         if self.state == NativeActionState::Verified {
             self.state = NativeActionState::NeedsIntervention;
@@ -900,9 +964,9 @@ impl NativeActionProof {
     }
     /// A dispatch intent exists, but the executor could not establish that no
     /// mutation was sent. Preserve the uncertainty rather than retrying SQL.
-    pub(crate) fn uncertain(run_id: uuid::Uuid, before_sha256: String) -> Self {
+    pub(crate) fn uncertain(identity: NativeActionIdentity, before_sha256: String) -> Self {
         Self {
-            run_id,
+            identity,
             state: NativeActionState::OutcomeUnknown,
             before_sha256,
             after_sha256: None,
@@ -912,7 +976,28 @@ impl NativeActionProof {
         }
     }
     pub(crate) fn run_id(&self) -> uuid::Uuid {
-        self.run_id
+        self.identity.run_id
+    }
+    pub(crate) fn identity(&self) -> &NativeActionIdentity {
+        &self.identity
+    }
+    pub(crate) fn state(&self) -> NativeActionState {
+        self.state
+    }
+    pub(crate) fn before_sha256(&self) -> &str {
+        &self.before_sha256
+    }
+    pub(crate) fn after_sha256(&self) -> Option<&str> {
+        self.after_sha256.as_deref()
+    }
+    pub(crate) fn created_index_id(&self) -> Option<u64> {
+        self.created_index_id
+    }
+    pub(crate) fn created_index_definition_sha256(&self) -> Option<&str> {
+        self.created_index_definition_sha256.as_deref()
+    }
+    pub(crate) fn ownership_marker_sha256(&self) -> Option<&str> {
+        self.ownership_marker_sha256.as_deref()
     }
     pub(crate) fn intent_state(&self) -> IntentState {
         match self.state {
@@ -1018,10 +1103,11 @@ async fn pg_execute(
     prepared: &PreparedSqlChange,
     before: &NativePreflight,
     permit: &DispatchPermit,
+    identity: NativeActionIdentity,
     cancel: CancellationToken,
 ) -> NativeActionProof {
     let mut proof = NativeActionProof {
-        run_id: permit.binding().run_id,
+        identity,
         state: NativeActionState::OutcomeUnknown,
         before_sha256: before.before_sha256.clone(),
         after_sha256: None,
@@ -1149,10 +1235,11 @@ async fn tds_execute(
     prepared: &PreparedSqlChange,
     before: &NativePreflight,
     permit: &DispatchPermit,
+    identity: NativeActionIdentity,
     cancel: CancellationToken,
 ) -> NativeActionProof {
     let mut proof = NativeActionProof {
-        run_id: permit.binding().run_id,
+        identity,
         state: NativeActionState::OutcomeUnknown,
         before_sha256: before.before_sha256.clone(),
         after_sha256: None,
@@ -1271,10 +1358,12 @@ async fn tds_execute(
 pub(crate) async fn execute_sql_change(
     permit: DispatchPermit,
     intent_id: IntentId,
+    journal_path: &Path,
     stage_scope: &BoundScope,
     trial: &NativeTrialTarget,
     cancel: CancellationToken,
 ) -> Result<NativeActionProof> {
+    ActionJournal::require_durable_started(journal_path, intent_id, &permit)?;
     ensure!(
         permit.binding().run_kind == RunKind::Rehearsal
             && matches!(
@@ -1294,6 +1383,7 @@ pub(crate) async fn execute_sql_change(
         "Staging credential changed"
     );
     let prepared = prepare_sql_change(&trial.action, stage_scope, &trial.metadata)?;
+    let identity = NativeActionIdentity::from_permit(&permit)?;
     let proof = match trial.action.object().engine {
         SqlEngine::Postgres => {
             pg_execute(
@@ -1302,6 +1392,7 @@ pub(crate) async fn execute_sql_change(
                 &prepared,
                 &trial.preflight,
                 &permit,
+                identity,
                 cancel,
             )
             .await
@@ -1313,13 +1404,14 @@ pub(crate) async fn execute_sql_change(
                 &prepared,
                 &trial.preflight,
                 &permit,
+                identity,
                 cancel,
             )
             .await
         }
     };
     ensure!(
-        proof.run_id == permit.binding().run_id && intent_id != uuid::Uuid::nil(),
+        proof.run_id() == permit.binding().run_id,
         "Native run identity changed"
     );
     Ok(proof)

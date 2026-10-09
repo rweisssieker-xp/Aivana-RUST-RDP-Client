@@ -204,12 +204,58 @@ fn mapping() -> SqlTrialMapping {
 
 fn receipt(mapping: &SqlTrialMapping, statistics: bool) -> SqlRehearsalReceipt {
     let now = Utc::now();
+    let check_outcomes = vec![
+        SqlCheckOutcome {
+            check: RequiredCheck::SqlFunctional {
+                scope_sha256: d('1'),
+                object_id: 1,
+                expected_row_count: 100,
+                window: "after change".into(),
+            },
+            criterion: CriterionRequirement {
+                measure: "SQL row count".into(),
+                comparator: CriterionComparator::Equal,
+                threshold_bits: 100f64.to_bits(),
+                unit: "rows".into(),
+                window: "after change".into(),
+            },
+            observation: SqlCheckObservation::RowCount { rows: 100 },
+            passed: true,
+        },
+        SqlCheckOutcome {
+            check: RequiredCheck::Performance {
+                scope_sha256: d('1'),
+                object_id: 1,
+                workload_sha256: d('2'),
+                maximum_median_ms: 10,
+                maximum_p95_ms: 20,
+                minimum_warmups: 3,
+                minimum_samples: 15,
+                window: "after change".into(),
+            },
+            criterion: CriterionRequirement {
+                measure: "Median latency".into(),
+                comparator: CriterionComparator::AtMost,
+                threshold_bits: 10f64.to_bits(),
+                unit: "ms".into(),
+                window: "after change".into(),
+            },
+            observation: SqlCheckObservation::Performance {
+                median_ms: 8.0,
+                p95_ms: 12.0,
+                warmups: 3,
+                samples: 15,
+            },
+            passed: true,
+        },
+    ];
     let mut receipt = SqlRehearsalReceipt {
         schema: RECEIPT_SCHEMA,
         receipt_id: Uuid::new_v4(),
         run_id: Uuid::new_v4(),
         approval_id: Uuid::new_v4(),
         consume_id: Uuid::new_v4(),
+        binding_fingerprint: d('9'),
         case_id: mapping.case_id,
         case_revision: mapping.case_revision,
         mapping_sha256: mapping.fingerprint().unwrap(),
@@ -225,6 +271,7 @@ fn receipt(mapping: &SqlTrialMapping, statistics: bool) -> SqlRehearsalReceipt {
         workload_result_sha256: d('8'),
         workload_before_median_ms: 12.0,
         workload_after_median_ms: 8.0,
+        check_outcomes,
         complete_native_compatibility: true,
         created_index_id: (!statistics).then_some(7),
         created_index_definition_sha256: (!statistics).then(|| d('9')),
@@ -237,6 +284,75 @@ fn receipt(mapping: &SqlTrialMapping, statistics: bool) -> SqlRehearsalReceipt {
     };
     receipt.content_sha256 = receipt.fingerprint().unwrap();
     receipt
+}
+
+#[test]
+fn every_required_sql_check_uses_actual_rows_latency_and_criteria() {
+    let receipt = receipt(&mapping(), false);
+    let spec = VerificationSpec {
+        checks: receipt
+            .check_outcomes
+            .iter()
+            .map(|o| o.check.clone())
+            .collect(),
+        criteria: receipt
+            .check_outcomes
+            .iter()
+            .map(|o| o.criterion.clone())
+            .collect(),
+    };
+    let mut samples = benchmark::WorkloadSamples {
+        policy_version: benchmark::POLICY_VERSION,
+        case_id: Uuid::new_v4(),
+        case_revision: 1,
+        review_evidence_id: Uuid::new_v4(),
+        review_content_sha256: d('a'),
+        scope_sha256: d('b'),
+        workload_fingerprint: d('2'),
+        result_sha256: d('c'),
+        environment_fingerprint: d('d'),
+        live_metadata_sha256: d('e'),
+        compatibility: benchmark::CompatibilityEvidence::native_complete(
+            benchmark::CompatibilityEngine::Postgres,
+            d('f'),
+            d('f'),
+        )
+        .unwrap(),
+        warmups: 3,
+        milliseconds: vec![8.0; 15],
+        median_ms: 8.0,
+        p95_ms: 12.0,
+        mad_ms: 0.0,
+        approved_change_sha256: None,
+    };
+    let mut data = benchmark::FixtureDataObservation {
+        sha256: d('a'),
+        row_count: 100,
+    };
+    let evaluate = |data: &benchmark::FixtureDataObservation,
+                    samples: &benchmark::WorkloadSamples,
+                    spec: &VerificationSpec| {
+        evaluate_required_checks(spec, &d('1'), 1, &d('2'), data, samples)
+    };
+    assert_eq!(evaluate(&data, &samples, &spec).unwrap().len(), 2);
+    data.row_count = 99;
+    assert!(evaluate(&data, &samples, &spec).is_err());
+    data.row_count = 100;
+    samples.p95_ms = 21.0;
+    assert!(evaluate(&data, &samples, &spec).is_err());
+    samples.p95_ms = 12.0;
+    samples.median_ms = 11.0;
+    assert!(evaluate(&data, &samples, &spec).is_err());
+    samples.median_ms = 8.0;
+    samples.milliseconds.truncate(14);
+    assert!(evaluate(&data, &samples, &spec).is_err());
+    samples.milliseconds.push(8.0);
+    let mut changed_criteria = spec.clone();
+    changed_criteria.criteria[1].threshold_bits = 7f64.to_bits();
+    assert!(evaluate(&data, &samples, &changed_criteria).is_err());
+    let mut partial = spec;
+    partial.criteria.pop();
+    assert!(evaluate(&data, &samples, &partial).is_err());
 }
 
 #[test]
@@ -293,6 +409,72 @@ fn protected_receipt_load_detects_tamper_and_wrong_run_path() {
     assert!(load_sql_rehearsal(&path).is_err());
     std::fs::remove_file(&path).unwrap();
     std::fs::remove_file(&wrong_path).unwrap();
+}
+
+#[test]
+fn journal_rejects_receipt_or_native_after_state_mismatch() {
+    let permit = crate::helper::journal::tests::permit();
+    let mut receipt = receipt(&mapping(), true);
+    receipt.run_id = permit.binding().run_id;
+    receipt.approval_id = permit.receipt().approval_id;
+    receipt.consume_id = permit.receipt().consume_id;
+    receipt.binding_fingerprint = permit.binding().fingerprint().unwrap();
+    receipt.case_id = permit.binding().case_id;
+    receipt.case_revision = permit.binding().case_revision;
+    receipt.production_scope_sha256 = permit.binding().scope_sha256.clone();
+    receipt.action_sha256 =
+        digest(b"relayne-helper-sql-action-v1", &permit.binding().action).unwrap();
+    receipt.before_sha256 = permit.binding().before_sha256.clone();
+    receipt.content_sha256 = receipt.fingerprint().unwrap();
+    let receipt_path = receipt.save().unwrap();
+
+    let journal_path =
+        std::env::temp_dir().join(format!("task14-exact-receipt-{}.dpapi", Uuid::new_v4()));
+    let mut journal = ActionJournal::load(&journal_path).unwrap();
+    let recorded_permit = crate::helper::approval::DispatchPermit::test_only(
+        permit.binding().clone(),
+        permit.receipt().clone(),
+    );
+    let intent_id = journal.record_intent(recorded_permit).unwrap();
+    journal.mark_dispatch_started(intent_id).unwrap();
+    let proof = changes::NativeActionProof::test_verified_from_permit(
+        &permit,
+        receipt.before_sha256.clone(),
+        receipt.after_sha256.clone(),
+    )
+    .unwrap();
+    let mut altered_receipt = receipt.clone();
+    altered_receipt.consume_id = Uuid::new_v4();
+    altered_receipt.content_sha256 = altered_receipt.fingerprint().unwrap();
+    assert!(
+        journal
+            .record_native_outcome(intent_id, &proof, Some(&altered_receipt))
+            .is_err()
+    );
+    let altered_proof = changes::NativeActionProof::test_verified_from_permit(
+        &permit,
+        receipt.before_sha256.clone(),
+        d('f'),
+    )
+    .unwrap();
+    assert!(
+        journal
+            .record_native_outcome(intent_id, &altered_proof, Some(&receipt))
+            .is_err()
+    );
+    assert_eq!(
+        ActionJournal::load(&journal_path).unwrap().intents()[0].state,
+        IntentState::DispatchStarted
+    );
+    let event = journal
+        .record_native_outcome(intent_id, &proof, Some(&receipt))
+        .unwrap();
+    assert_eq!(
+        event.outcome,
+        crate::helper_approval::ActionOutcomeV2::Verified
+    );
+    let _ = std::fs::remove_file(receipt_path);
+    let _ = std::fs::remove_file(journal_path);
 }
 
 #[tokio::test]
@@ -507,9 +689,10 @@ async fn guest_reviewed_native_rehearsal_mints_protected_receipt() {
     };
     let source_id = evidence.id;
     case.append_evidence(evidence).unwrap();
+    let run_id = Uuid::new_v4();
     let action = SqlAction::PostgresCreateIndex {
         object: metadata.object.clone(),
-        index: "idx_task14_receipt_v1".into(),
+        index: format!("idx_task14_receipt_{}", run_id.simple()),
         columns: vec![
             PlainIndexColumn {
                 name: "customer_id".into(),
@@ -608,7 +791,7 @@ async fn guest_reviewed_native_rehearsal_mints_protected_receipt() {
         case_id: case.id(),
         case_revision: case.revision(),
         evidence_revision: case.evidence_revision(),
-        run_id: Uuid::new_v4(),
+        run_id,
         run_kind: RunKind::Rehearsal,
         organization_sha256: d('e'),
         scope_sha256: production_change.digest().unwrap(),
@@ -707,7 +890,7 @@ async fn guest_reviewed_native_rehearsal_mints_protected_receipt() {
                 "JournalState": journal_state,
             });
             std::fs::write(
-                r"C:\FixtureEvidence\task14-rehearsal-api-failure-v1.json",
+                r"C:\FixtureEvidence\task14-rehearsal-api-failure-v2.json",
                 serde_json::to_vec(&witness).unwrap(),
             )
             .unwrap();
@@ -715,6 +898,18 @@ async fn guest_reviewed_native_rehearsal_mints_protected_receipt() {
         }
     };
     receipt.validate_for(&mapping, &proposal).unwrap();
+    let mut changed_proposal = proposal.clone();
+    if let RequiredCheck::SqlFunctional {
+        expected_row_count, ..
+    } = &mut changed_proposal.verification.checks[0]
+    {
+        *expected_row_count += 1;
+    }
+    assert!(receipt.validate_for(&mapping, &changed_proposal).is_err());
+    let mut changed_receipt = receipt.clone();
+    changed_receipt.check_outcomes[0].observation = SqlCheckObservation::RowCount { rows: 0 };
+    changed_receipt.content_sha256 = changed_receipt.fingerprint().unwrap();
+    assert!(changed_receipt.validate_for(&mapping, &proposal).is_err());
     let loaded = load_sql_rehearsal(&receipt.path().unwrap()).unwrap();
     assert_eq!(loaded.content_sha256(), receipt.content_sha256());
     let journal = ActionJournal::load(&journal_path).unwrap();
@@ -733,7 +928,7 @@ async fn guest_reviewed_native_rehearsal_mints_protected_receipt() {
         "JournalVerified": true,
     });
     std::fs::write(
-        r"C:\FixtureEvidence\task14-rehearsal-api-witness-v1.json",
+        r"C:\FixtureEvidence\task14-rehearsal-api-witness-v2.json",
         serde_json::to_vec(&witness).unwrap(),
     )
     .unwrap();

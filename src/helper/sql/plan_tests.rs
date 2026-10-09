@@ -317,7 +317,7 @@ fn sqlserver_fixture_scope(object: &str) -> BoundScope {
     } = &mut scope
     {
         *engine = DatabaseEngine::SqlServer;
-        *port = 1433;
+        *port = crate::helper::sql::templates::TDS_FIXTURE_PORT;
         *credential = None;
     }
     let resource = scope.resource_digest().unwrap();

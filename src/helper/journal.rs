@@ -2,6 +2,7 @@
 //! independently observed; reopening a journal never replays an intent.
 use super::approval::DispatchPermit;
 use super::sql::changes::{NativeActionProof, NativeActionState};
+use super::sql::rehearsal::SqlRehearsalReceipt;
 use crate::helper_approval::{ActionOutcomeAckV2, ActionOutcomeEventV2, ActionOutcomeV2};
 use anyhow::{Result, ensure};
 use chrono::{DateTime, Utc};
@@ -267,6 +268,49 @@ impl ActionJournal {
     pub fn intents(&self) -> &[IntentRecord] {
         &self.intents
     }
+
+    /// Reload the protected journal at the last boundary before native contact.
+    /// Its binding fingerprint covers the reviewed action, scope and before-state.
+    pub(crate) fn require_durable_started(
+        path: &Path,
+        id: IntentId,
+        permit: &DispatchPermit,
+    ) -> Result<Self> {
+        let now = Utc::now();
+        permit.binding().validate(now)?;
+        let fingerprint = permit.binding().fingerprint()?;
+        ensure!(
+            permit.receipt().fingerprint == fingerprint
+                && permit.receipt().organization_sha256 == permit.binding().organization_sha256
+                && permit.receipt().approval_id != Uuid::nil()
+                && permit.receipt().consume_id != Uuid::nil(),
+            "Consumed approval does not bind the native action"
+        );
+        let journal = Self::load(path)?;
+        let matches = journal
+            .intents
+            .iter()
+            .filter(|intent| intent.id == id)
+            .collect::<Vec<_>>();
+        ensure!(
+            matches.len() == 1,
+            "Durable native intent missing or duplicate"
+        );
+        let intent = matches[0];
+        ensure!(
+            intent.state == IntentState::DispatchStarted
+                && intent.case_id == permit.binding().case_id
+                && intent.run_id == permit.binding().run_id
+                && intent.approval_id == permit.receipt().approval_id
+                && intent.consume_id == permit.receipt().consume_id
+                && intent.binding_fingerprint == fingerprint
+                && intent.outcome_event.is_none()
+                && intent.native_receipt_sha256.is_none()
+                && intent.native_after_sha256.is_none(),
+            "Durable native intent differs from consumed dispatch"
+        );
+        Ok(journal)
+    }
     pub fn review(&self, case_id: Uuid) -> Option<&ReviewRecord> {
         self.reviews.iter().rev().find(|r| r.case_id == case_id)
     }
@@ -315,6 +359,11 @@ impl ActionJournal {
         );
         let now = Utc::now();
         permit.binding().validate(now)?;
+        ensure!(
+            permit.receipt().fingerprint == permit.binding().fingerprint()?
+                && permit.receipt().organization_sha256 == permit.binding().organization_sha256,
+            "Consumed approval binding differs from native intent"
+        );
         let id = Uuid::new_v4();
         self.intents.push(IntentRecord {
             id,
@@ -569,7 +618,7 @@ impl ActionJournal {
         &mut self,
         id: IntentId,
         proof: &NativeActionProof,
-        receipt_sha256: Option<&str>,
+        receipt: Option<&SqlRehearsalReceipt>,
     ) -> Result<ActionOutcomeEventV2> {
         let mut next = self.clone();
         let item = next
@@ -577,14 +626,26 @@ impl ActionJournal {
             .iter()
             .find(|i| i.id == id)
             .ok_or_else(|| anyhow::anyhow!("Native action intent missing"))?;
+        let identity = proof.identity();
         ensure!(
-            item.run_id == proof.run_id() && item.state == IntentState::DispatchStarted,
-            "Native action is not the launched durable run"
+            item.state == IntentState::DispatchStarted
+                && item.run_id == identity.run_id()
+                && item.case_id == identity.case_id()
+                && item.approval_id == identity.approval_id()
+                && item.consume_id == identity.consume_id()
+                && item.binding_fingerprint == identity.binding_fingerprint(),
+            "Native action does not match the exact durable started intent"
         );
-        let (state, outcome) = match (proof.state, receipt_sha256) {
-            (NativeActionState::Verified, Some(digest))
-                if crate::helper_action::valid_digest(digest) =>
-            {
+        ensure!(
+            receipt.is_none() || proof.state() == NativeActionState::Verified,
+            "Nonverified action cannot attach a success receipt"
+        );
+        if let Some(receipt) = receipt {
+            receipt.validate_native_proof(proof, item)?;
+        }
+        let receipt_sha256 = receipt.map(SqlRehearsalReceipt::content_sha256);
+        let (state, outcome) = match (proof.state(), receipt_sha256) {
+            (NativeActionState::Verified, Some(_)) => {
                 (IntentState::Verified, ActionOutcomeV2::Verified)
             }
             (NativeActionState::Verified, _) => (
@@ -607,7 +668,7 @@ impl ActionJournal {
             .find(|i| i.id == id)
             .ok_or_else(|| anyhow::anyhow!("Native action intent missing"))?;
         item.native_receipt_sha256 = receipt_sha256.map(str::to_owned);
-        item.native_after_sha256 = proof.after_sha256.clone();
+        item.native_after_sha256 = proof.after_sha256().map(str::to_owned);
         let event = next.queue_outcome_inner(id, outcome, None, false)?;
         next.save()?;
         *self = next;
@@ -659,4 +720,4 @@ impl ActionJournal {
 
 #[cfg(test)]
 #[path = "journal_tests.rs"]
-mod tests;
+pub(crate) mod tests;

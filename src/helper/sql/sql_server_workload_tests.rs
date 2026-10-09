@@ -87,7 +87,7 @@ fn fixture_scope() -> BoundScope {
             route: String::new(),
         },
         engine: DatabaseEngine::SqlServer,
-        port: 1433,
+        port: crate::helper::sql::templates::TDS_FIXTURE_PORT,
         database: FIXTURE_DATABASE.into(),
         schema: Some(FIXTURE_SCHEMA.into()),
         object: Some("orders".into()),
@@ -105,6 +105,45 @@ fn fixture_scope() -> BoundScope {
         });
     }
     scope
+}
+
+#[test]
+fn tds_v2_rehearsal_template_has_only_two_fixed_fixture_endpoints() {
+    let template = ReviewedSelectTemplate::CustomerOrders {
+        customer_id: 424242,
+    };
+    let production = fixture_scope();
+    assert!(template.reviewed_statement(&production).is_ok());
+    let mut stage = production.clone();
+    let stage_credential = if let BoundScope::Database { credential, .. } = &mut stage {
+        credential.take()
+    } else {
+        None
+    };
+    if let BoundScope::Database { port, database, .. } = &mut stage {
+        *port = crate::helper::sql::templates::TDS_REHEARSAL_PORT;
+        *database = crate::helper::sql::templates::REHEARSAL_DATABASE.into();
+    }
+    let resource = stage.resource_digest().unwrap();
+    if let (
+        BoundScope::Database {
+            credential: slot, ..
+        },
+        Some(mut credential),
+    ) = (&mut stage, stage_credential)
+    {
+        credential.context_digest = resource;
+        *slot = Some(credential);
+    }
+    assert!(template.reviewed_statement(&stage).is_ok());
+    if let BoundScope::Database { port, .. } = &mut stage {
+        *port = 1433;
+    }
+    assert!(template.reviewed_statement(&stage).is_err());
+    assert_eq!(
+        crate::helper::sql::templates::REHEARSAL_TEMPLATE_MAPPING_VERSION,
+        2
+    );
 }
 
 fn reviewed() -> (ReviewedWorkload, TemplateStatement) {
@@ -154,7 +193,7 @@ fn fake() -> FakeWorkloadSession {
             database_principal: "reader".into(),
             product_version: "16.0.1000.6".into(),
             server_ip: "127.0.0.1".into(),
-            server_port: 1433,
+            server_port: crate::helper::sql::templates::TDS_FIXTURE_PORT,
             tls_required: true,
             server_state_access: None,
             server_performance_access: None,
@@ -169,7 +208,12 @@ fn fake() -> FakeWorkloadSession {
 }
 
 fn expected_identity() -> (&'static str, &'static str, &'static str, u16) {
-    (FIXTURE_DATABASE, "reader", "127.0.0.1", 1433)
+    (
+        FIXTURE_DATABASE,
+        "reader",
+        "127.0.0.1",
+        crate::helper::sql::templates::TDS_FIXTURE_PORT,
+    )
 }
 
 #[tokio::test]

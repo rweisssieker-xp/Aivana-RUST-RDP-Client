@@ -1,6 +1,7 @@
 //! Repeated, bounded execution of the closed SQL Server fixture SELECTs.
 
 use super::*;
+use crate::helper::credentials::{PersistentSecretResolver, SecretResolver};
 use crate::helper::sql::{
     benchmark::{
         self, CompatibilityEngine, CompatibilityEvidence, POLICY_VERSION, ReviewedWorkload,
@@ -8,6 +9,7 @@ use crate::helper::sql::{
     },
     templates::{FIXTURE_SCHEMA, TemplateBind, TemplateStatement},
 };
+use anyhow::Context;
 
 trait WorkloadSession: Send {
     fn compatibility_snapshot<'a>(
@@ -257,6 +259,173 @@ pub(in crate::helper::sql) async fn run_sandbox_workload(
         deadline,
     )
     .await
+}
+
+async fn open_rehearsal_fixture(
+    scope: &BoundScope,
+    template: crate::helper::sql::templates::ReviewedSelectTemplate,
+    cancel: &CancellationToken,
+    deadline: Instant,
+) -> Result<NativeSession> {
+    template.sql_server_statement(scope)?;
+    let BoundScope::Database {
+        target,
+        port,
+        database,
+        credential: Some(credential),
+        ..
+    } = scope
+    else {
+        anyhow::bail!("Attested SQL Server fixture scope required")
+    };
+    ensure!(
+        credential.purpose == CredentialPurpose::Read,
+        "SQL Server read credential required"
+    );
+    let secret = PersistentSecretResolver::new()?
+        .resolve(credential, CredentialPurpose::Read)
+        .context("SQL Server fixture credential unavailable")?;
+    ensure!(
+        secret.username() == credential.principal && secret.domain().is_empty(),
+        "SQL Server fixture principal changed"
+    );
+    let session = tokio::select! {
+        _ = cancel.cancelled() => anyhow::bail!("SQL Server fixture canceled"),
+        result = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            NativeTransport::open_session(
+                &target.host,
+                *port,
+                database,
+                &credential.principal,
+                secret.password(),
+            ),
+        ) => result.context("SQL Server fixture connection timed out")?
+            .map_err(|_| anyhow::anyhow!("SQL Server fixture connection unavailable"))?,
+    };
+    drop(secret);
+    Ok(session)
+}
+
+pub(in crate::helper::sql) async fn run_rehearsal_workload(
+    request: &ReviewedWorkload,
+    policy: &SamplingPolicy,
+    cancel: CancellationToken,
+) -> Result<WorkloadSamples> {
+    policy.validate()?;
+    let statement = request.template.sql_server_statement(&request.scope)?;
+    let BoundScope::Database {
+        target,
+        port,
+        database,
+        credential: Some(credential),
+        ..
+    } = &request.scope
+    else {
+        anyhow::bail!("SQL Server rehearsal scope required")
+    };
+    let deadline = Instant::now() + Duration::from_secs(u64::from(policy.deadline_secs));
+    let mut session =
+        open_rehearsal_fixture(&request.scope, request.template, &cancel, deadline).await?;
+    collect_with_session(
+        &mut session,
+        request,
+        &statement,
+        policy,
+        (database, &credential.principal, &target.host, *port),
+        &cancel,
+        deadline,
+    )
+    .await
+}
+
+const TDS_ORDER_DATA_SQL: &str = "SELECT TOP (100001) CASE WHEN DATALENGTH(j.json_row) <= 16384 THEN j.json_row END FROM [fixture].[orders] AS t CROSS APPLY (SELECT (SELECT t.[order_id], t.[customer_id], t.[status], t.[amount], t.[created_at], t.[detail] FOR JSON PATH, WITHOUT_ARRAY_WRAPPER) AS json_row) AS j ORDER BY t.[order_id]";
+const TDS_SORT_DATA_SQL: &str = "SELECT TOP (100001) CASE WHEN DATALENGTH(j.json_row) <= 16384 THEN j.json_row END FROM [fixture].[spill_events] AS t CROSS APPLY (SELECT (SELECT t.[event_id], t.[payload] FOR JSON PATH, WITHOUT_ARRAY_WRAPPER) AS json_row) AS j ORDER BY t.[event_id]";
+
+pub(in crate::helper::sql) async fn fixture_data_observation(
+    scope: &BoundScope,
+    template: crate::helper::sql::templates::ReviewedSelectTemplate,
+    cancel: CancellationToken,
+) -> Result<benchmark::FixtureDataObservation> {
+    let statement = template.sql_server_statement(scope)?;
+    let BoundScope::Database {
+        target,
+        port,
+        database,
+        credential: Some(credential),
+        ..
+    } = scope
+    else {
+        anyhow::bail!("SQL Server rehearsal scope required")
+    };
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut session = open_rehearsal_fixture(scope, template, &cancel, deadline).await?;
+    let identity = gated(
+        &cancel,
+        deadline,
+        session.read(SqlServerReadProbe::Identity, "", ""),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("SQL Server fixture identity unavailable"))?;
+    verify_identity(
+        &identity,
+        database,
+        &credential.principal,
+        &target.host,
+        *port,
+    )?;
+    let object = gated(
+        &cancel,
+        deadline,
+        session.read(
+            SqlServerReadProbe::Objects,
+            FIXTURE_SCHEMA,
+            statement.object,
+        ),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("SQL Server fixture metadata unavailable"))?;
+    ensure!(
+        benchmark::sql_server_metadata_matches(&object, template),
+        "SQL Server fixture column identity changed"
+    );
+    let sql = if matches!(
+        template,
+        crate::helper::sql::templates::ReviewedSelectTemplate::OrderSort
+    ) {
+        TDS_SORT_DATA_SQL
+    } else {
+        TDS_ORDER_DATA_SQL
+    };
+    let mut stream = tokio::select! {
+        _ = cancel.cancelled() => anyhow::bail!("SQL Server data digest canceled"),
+        result = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            Query::new(sql).query(&mut session.client),
+        ) => result.context("SQL Server data digest timed out")?
+            .map_err(|_| anyhow::anyhow!("SQL Server data digest unavailable"))?,
+    };
+    let mut bounded = benchmark::BoundedFixtureHasher::new();
+    loop {
+        let item = tokio::select! {
+            _ = cancel.cancelled() => anyhow::bail!("SQL Server data digest canceled"),
+            result = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                stream.next(),
+            ) => result.context("SQL Server data digest timed out")?,
+        };
+        let Some(item) = item else { break };
+        if let QueryItem::Row(row) =
+            item.map_err(|_| anyhow::anyhow!("SQL Server data digest unavailable"))?
+        {
+            let value = row
+                .try_get::<&str, _>(0)
+                .map_err(|_| anyhow::anyhow!("SQL Server data row invalid"))?
+                .context("SQL Server data row exceeds field bound")?;
+            bounded.push(value)?;
+        }
+    }
+    bounded.finish()
 }
 
 #[cfg(test)]

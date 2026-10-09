@@ -35,7 +35,7 @@ pub(super) use plan::estimated_plan;
 
 #[path = "sql_server_workload.rs"]
 mod workload;
-pub(super) use workload::run_sandbox_workload;
+pub(super) use workload::{fixture_data_observation, run_rehearsal_workload, run_sandbox_workload};
 
 #[path = "sql_server_compat.rs"]
 mod compat;

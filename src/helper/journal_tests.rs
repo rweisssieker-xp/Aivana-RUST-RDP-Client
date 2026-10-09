@@ -8,7 +8,7 @@ use chrono::Duration;
 fn d() -> String {
     "a".repeat(64)
 }
-fn permit() -> DispatchPermit {
+pub(crate) fn permit() -> DispatchPermit {
     let now = Utc::now();
     let run = Uuid::new_v4();
     let binding = ActionBindingV2 {
@@ -61,6 +61,37 @@ fn permit() -> DispatchPermit {
 }
 fn path() -> PathBuf {
     std::env::temp_dir().join(format!("relayne-action-journal-{}.dpapi", Uuid::new_v4()))
+}
+
+#[test]
+fn native_verified_without_protected_exact_receipt_never_verifies_journal() {
+    let journal_path = path();
+    let mut journal = ActionJournal::load(&journal_path).unwrap();
+    let permit = permit();
+    let recorded = DispatchPermit::test_only(permit.binding().clone(), permit.receipt().clone());
+    let intent_id = journal.record_intent(recorded).unwrap();
+    journal.mark_dispatch_started(intent_id).unwrap();
+    let proof = crate::helper::sql::changes::NativeActionProof::test_verified_from_permit(
+        &permit,
+        d(),
+        d(),
+    )
+    .unwrap();
+    let event = journal
+        .record_native_outcome(intent_id, &proof, None)
+        .unwrap();
+    assert_eq!(event.outcome, ActionOutcomeV2::NeedsIntervention);
+    let loaded = ActionJournal::load(&journal_path).unwrap();
+    assert_eq!(
+        loaded
+            .intents()
+            .iter()
+            .find(|item| item.id == intent_id)
+            .unwrap()
+            .state,
+        IntentState::NeedsIntervention
+    );
+    let _ = std::fs::remove_file(journal_path);
 }
 
 #[test]

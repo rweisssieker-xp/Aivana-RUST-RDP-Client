@@ -1,10 +1,14 @@
 //! Explicit, reviewed sandbox workload execution and conservative comparison.
 use super::templates::{ReviewedSelectTemplate, TemplateBind, connect_fixture};
 use crate::helper::{
-    case::HelperCase, evidence::Eligibility, manifest::CapabilityId, scope::BoundScope,
+    case::HelperCase,
+    evidence::Eligibility,
+    manifest::CapabilityId,
+    scope::{BoundScope, DatabaseEngine},
     sql::types::SqlObservation,
 };
 use anyhow::{Context, Result, ensure};
+use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
@@ -419,31 +423,222 @@ impl<'a> tokio_postgres::types::FromSql<'a> for BoundedPlanJson {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FixtureDataObservation {
+    pub sha256: String,
+    pub row_count: u64,
+}
+
+pub(in crate::helper::sql) struct BoundedFixtureHasher {
+    hash: Sha256,
+    row_count: u64,
+    byte_count: u64,
+    row_limit: u64,
+    field_limit: usize,
+    byte_limit: u64,
+}
+
+impl BoundedFixtureHasher {
+    pub(in crate::helper::sql) fn new() -> Self {
+        let mut hash = Sha256::new();
+        hash.update(b"relayne-helper-fixture-full-data-v2\0");
+        Self {
+            hash,
+            row_count: 0,
+            byte_count: 0,
+            row_limit: 100_000,
+            field_limit: 16 * 1024,
+            byte_limit: 128 * 1024 * 1024,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_test_limits(row_limit: u64, field_limit: usize, byte_limit: u64) -> Self {
+        let mut bounded = Self::new();
+        bounded.row_limit = row_limit;
+        bounded.field_limit = field_limit;
+        bounded.byte_limit = byte_limit;
+        bounded
+    }
+
+    pub(in crate::helper::sql) fn push(&mut self, value: &str) -> Result<()> {
+        let next_row_count = self
+            .row_count
+            .checked_add(1)
+            .context("Data row count overflow")?;
+        ensure!(
+            next_row_count <= self.row_limit,
+            "Data coverage exceeds row bound"
+        );
+        ensure!(
+            value.len() <= self.field_limit,
+            "Data row exceeds field bound"
+        );
+        let next_byte_count = self
+            .byte_count
+            .checked_add(value.len() as u64)
+            .context("Data byte count overflow")?;
+        ensure!(
+            next_byte_count <= self.byte_limit,
+            "Data digest exceeds byte bound"
+        );
+        self.row_count = next_row_count;
+        self.byte_count = next_byte_count;
+        self.hash.update(value.len().to_be_bytes());
+        self.hash.update(value.as_bytes());
+        Ok(())
+    }
+
+    pub(in crate::helper::sql) fn finish(mut self) -> Result<FixtureDataObservation> {
+        ensure!(self.row_count > 0, "Data coverage incomplete");
+        self.hash.update(self.row_count.to_be_bytes());
+        Ok(FixtureDataObservation {
+            sha256: format!("{:x}", self.hash.finalize()),
+            row_count: self.row_count,
+        })
+    }
+}
+
+#[cfg(test)]
+mod streamed_fixture_tests {
+    use super::*;
+    use futures_util::stream;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[test]
+    fn running_field_and_aggregate_bounds_fail_before_hash_completion() {
+        let mut field = BoundedFixtureHasher::with_test_limits(3, 4, 8);
+        assert!(field.push("12345").is_err());
+        let mut total = BoundedFixtureHasher::with_test_limits(3, 4, 8);
+        total.push("1234").unwrap();
+        total.push("5678").unwrap();
+        assert!(total.push("x").is_err());
+        let mut rows = BoundedFixtureHasher::with_test_limits(2, 4, 12);
+        rows.push("a").unwrap();
+        rows.push("b").unwrap();
+        assert!(rows.push("c").is_err());
+    }
+
+    #[tokio::test]
+    async fn lazy_stream_stops_at_row_bound_without_collecting_all_rows() {
+        let read = Arc::new(AtomicUsize::new(0));
+        let counter = read.clone();
+        let values = stream::unfold(counter, |counter| async move {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Some((Ok(Some("x".to_owned())), counter))
+        });
+        assert!(
+            hash_bounded_stream(
+                values,
+                &CancellationToken::new(),
+                tokio::time::Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(read.load(Ordering::SeqCst), 100_001);
+    }
+
+    #[tokio::test]
+    async fn pending_stream_honors_cancel_and_deadline() {
+        let pending = || stream::pending::<Result<Option<String>>>();
+        let canceled = CancellationToken::new();
+        canceled.cancel();
+        assert!(
+            hash_bounded_stream(
+                pending(),
+                &canceled,
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            hash_bounded_stream(
+                pending(),
+                &CancellationToken::new(),
+                tokio::time::Instant::now(),
+            )
+            .await
+            .is_err()
+        );
+    }
+}
+
+async fn hash_bounded_stream<S>(
+    stream: S,
+    cancel: &CancellationToken,
+    deadline: tokio::time::Instant,
+) -> Result<FixtureDataObservation>
+where
+    S: Stream<Item = Result<Option<String>>>,
+{
+    futures_util::pin_mut!(stream);
+    let mut bounded = BoundedFixtureHasher::new();
+    loop {
+        let row = tokio::select! {
+            _ = cancel.cancelled() => anyhow::bail!("Data digest canceled"),
+            result = tokio::time::timeout_at(deadline, stream.next()) => result.context("Data digest timed out")?,
+        };
+        let Some(row) = row else { break };
+        bounded.push(&row?.context("Data row exceeds field bound")?)?;
+    }
+    bounded.finish()
+}
+
 async fn native_pg_data_digest(
     session: &super::templates::VerifiedPgSession,
     template: ReviewedSelectTemplate,
-) -> Result<String> {
+    cancel: &CancellationToken,
+) -> Result<FixtureDataObservation> {
     let data_sql = match template {
         ReviewedSelectTemplate::OrderSort => {
-            "SELECT to_jsonb(t)::text FROM fixture.spill_events t ORDER BY event_id LIMIT 100001"
+            "SELECT CASE WHEN octet_length(convert_to(to_jsonb(t)::text, 'UTF8')) <= 16384 THEN to_jsonb(t)::text END FROM fixture.spill_events t ORDER BY event_id LIMIT 100001"
         }
-        _ => "SELECT to_jsonb(t)::text FROM fixture.orders t ORDER BY order_id LIMIT 100001",
+        _ => {
+            "SELECT CASE WHEN octet_length(convert_to(to_jsonb(t)::text, 'UTF8')) <= 16384 THEN to_jsonb(t)::text END FROM fixture.orders t ORDER BY order_id LIMIT 100001"
+        }
     };
-    let rows = session.client.query(data_sql, &[]).await?;
-    ensure!(
-        !rows.is_empty() && rows.len() <= 100_000,
-        "Data coverage incomplete"
-    );
-    let mut hash = Sha256::new();
-    hash.update(b"relayne-helper-fixture-full-data-v1\0");
-    hash.update((rows.len() as u64).to_be_bytes());
-    for row in rows {
-        let value: String = row.try_get(0)?;
-        ensure!(value.len() <= 16 * 1024, "Data row exceeds bound");
-        hash.update(value.len().to_be_bytes());
-        hash.update(value.as_bytes());
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    let rows = tokio::select! {
+        _ = cancel.cancelled() => anyhow::bail!("Data digest canceled"),
+        result = tokio::time::timeout_at(deadline, session.client.query_raw(data_sql, std::iter::empty::<i32>())) => {
+            result.context("Data digest timed out")??
+        }
+    };
+    hash_bounded_stream(
+        rows.map(|row| Ok(row?.try_get::<_, Option<String>>(0)?)),
+        cancel,
+        deadline,
+    )
+    .await
+}
+
+pub(crate) async fn fixture_data_observation(
+    scope: &BoundScope,
+    template: ReviewedSelectTemplate,
+    cancel: CancellationToken,
+) -> Result<FixtureDataObservation> {
+    if matches!(
+        scope,
+        BoundScope::Database {
+            engine: DatabaseEngine::SqlServer,
+            ..
+        }
+    ) {
+        return super::sql_server::fixture_data_observation(scope, template, cancel).await;
     }
-    Ok(format!("{:x}", hash.finalize()))
+    let session = connect_fixture(scope, template, &cancel).await?;
+    session
+        .client
+        .batch_execute("BEGIN READ ONLY; SET LOCAL statement_timeout = '15000ms'")
+        .await?;
+    let value = native_pg_data_digest(&session, template, &cancel).await;
+    let _ = session.client.batch_execute("ROLLBACK").await;
+    value
 }
 
 pub(crate) async fn fixture_data_digest(
@@ -451,20 +646,16 @@ pub(crate) async fn fixture_data_digest(
     template: ReviewedSelectTemplate,
     cancel: CancellationToken,
 ) -> Result<String> {
-    let session = connect_fixture(scope, template, &cancel).await?;
-    session
-        .client
-        .batch_execute("BEGIN READ ONLY; SET LOCAL statement_timeout = '15000ms'")
-        .await?;
-    let value = native_pg_data_digest(&session, template).await;
-    let _ = session.client.batch_execute("ROLLBACK").await;
-    value
+    Ok(fixture_data_observation(scope, template, cancel)
+        .await?
+        .sha256)
 }
 
 async fn native_pg_compatibility_snapshot(
     session: &super::templates::VerifiedPgSession,
     template: ReviewedSelectTemplate,
     statement: &super::templates::TemplateStatement,
+    cancel: &CancellationToken,
 ) -> Result<String> {
     let mut hash = Sha256::new();
     hash.update(b"relayne-helper-native-pg-compatibility-v2\0");
@@ -543,7 +734,12 @@ async fn native_pg_compatibility_snapshot(
             )?;
         }
     }
-    hash.update(native_pg_data_digest(session, template).await?.as_bytes());
+    hash.update(
+        native_pg_data_digest(session, template, cancel)
+            .await?
+            .sha256
+            .as_bytes(),
+    );
     let plan = match statement.bind {
         TemplateBind::None => session.client.query_one(statement.explain_sql, &[]).await?,
         TemplateBind::Integer(value) => {
@@ -718,6 +914,15 @@ pub async fn run_sandbox_workload(
     policy: &SamplingPolicy,
     cancel: CancellationToken,
 ) -> Result<WorkloadSamples> {
+    if matches!(
+        &request.scope,
+        BoundScope::Database {
+            engine: DatabaseEngine::SqlServer,
+            ..
+        }
+    ) {
+        return super::sql_server::run_rehearsal_workload(request, policy, cancel).await;
+    }
     policy.validate()?;
     ensure!(!cancel.is_cancelled(), "workload canceled");
     ensure!(
@@ -730,7 +935,8 @@ pub async fn run_sandbox_workload(
     let run = async {
         session.client.batch_execute("BEGIN READ ONLY; SET LOCAL statement_timeout = '15000ms'; SET LOCAL lock_timeout = '1000ms'").await?;
         let compatibility_before =
-            native_pg_compatibility_snapshot(&session, request.template, &statement).await?;
+            native_pg_compatibility_snapshot(&session, request.template, &statement, &cancel)
+                .await?;
         let mut samples = Vec::with_capacity(policy.samples as usize);
         let mut result_digest: Option<String> = None;
         for i in 0..usize::from(policy.warmups + policy.samples) {
@@ -773,7 +979,8 @@ pub async fn run_sandbox_workload(
         }
         let (median_ms, p95_ms, mad_ms) = summary(&samples)?;
         let compatibility_after =
-            native_pg_compatibility_snapshot(&session, request.template, &statement).await?;
+            native_pg_compatibility_snapshot(&session, request.template, &statement, &cancel)
+                .await?;
         let mut environment = Sha256::new();
         environment.update(b"relayne-pg-disposable-fixture-v1\0");
         environment.update(request.scope.resource_digest()?.as_bytes());

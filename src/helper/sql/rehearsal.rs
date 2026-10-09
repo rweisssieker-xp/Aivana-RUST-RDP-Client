@@ -9,10 +9,12 @@ use crate::helper::{
     case::HelperCase,
     catalog::{CatalogAction, HelperProposal},
     evidence::is_digest,
-    journal::{ActionJournal, IntentId, IntentState},
+    journal::{ActionJournal, IntentId, IntentRecord, IntentState},
     scope::{BoundScope, CredentialPurpose, DatabaseEngine},
 };
-use crate::helper_action::{RequiredCheck, digest};
+use crate::helper_action::{
+    CriterionComparator, CriterionRequirement, RequiredCheck, VerificationSpec, digest,
+};
 use crate::helper_approval::{ActionProof, RunKind};
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Duration, Utc};
@@ -24,8 +26,180 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-const RECEIPT_SCHEMA: u16 = 1;
+const RECEIPT_SCHEMA: u16 = 2;
 const MAX_RECEIPT_BYTES: usize = 128 * 1024;
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SqlCheckObservation {
+    RowCount {
+        rows: u64,
+    },
+    Performance {
+        median_ms: f64,
+        p95_ms: f64,
+        warmups: u8,
+        samples: u8,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SqlCheckOutcome {
+    check: RequiredCheck,
+    criterion: CriterionRequirement,
+    observation: SqlCheckObservation,
+    passed: bool,
+}
+
+impl SqlCheckOutcome {
+    fn observed_criterion_value(&self) -> Result<f64> {
+        match (
+            &self.check,
+            &self.observation,
+            self.criterion.measure.as_str(),
+        ) {
+            (
+                RequiredCheck::SqlFunctional { .. },
+                SqlCheckObservation::RowCount { rows },
+                "SQL row count",
+            ) => {
+                ensure!(*rows <= 100_000, "SQL row count exceeds fixture bound");
+                Ok(*rows as f64)
+            }
+            (
+                RequiredCheck::Performance { .. },
+                SqlCheckObservation::Performance { median_ms, .. },
+                "Median latency",
+            ) => Ok(*median_ms),
+            (
+                RequiredCheck::Performance { .. },
+                SqlCheckObservation::Performance { p95_ms, .. },
+                "P95 latency",
+            ) => Ok(*p95_ms),
+            _ => anyhow::bail!("SQL check observation does not prove criterion"),
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        self.check.validate()?;
+        self.criterion.validate()?;
+        ensure!(
+            self.check.implies_criterion(&self.criterion),
+            "SQL criterion differs from check"
+        );
+        let check_passed = match (&self.check, &self.observation) {
+            (
+                RequiredCheck::SqlFunctional {
+                    expected_row_count, ..
+                },
+                SqlCheckObservation::RowCount { rows },
+            ) => rows == expected_row_count,
+            (
+                RequiredCheck::Performance {
+                    maximum_median_ms,
+                    maximum_p95_ms,
+                    minimum_warmups,
+                    minimum_samples,
+                    ..
+                },
+                SqlCheckObservation::Performance {
+                    median_ms,
+                    p95_ms,
+                    warmups,
+                    samples,
+                },
+            ) => {
+                median_ms.is_finite()
+                    && p95_ms.is_finite()
+                    && *median_ms > 0.0
+                    && *p95_ms >= *median_ms
+                    && *median_ms <= *maximum_median_ms as f64
+                    && *p95_ms <= *maximum_p95_ms as f64
+                    && warmups >= minimum_warmups
+                    && samples >= minimum_samples
+                    && *samples <= 64
+            }
+            _ => false,
+        };
+        let observed = self.observed_criterion_value()?;
+        ensure!(
+            observed.is_finite(),
+            "SQL criterion observation is not finite"
+        );
+        let threshold = f64::from_bits(self.criterion.threshold_bits);
+        let criterion_passed = match self.criterion.comparator {
+            CriterionComparator::AtMost => observed <= threshold,
+            CriterionComparator::AtLeast => observed >= threshold,
+            CriterionComparator::Equal => observed == threshold,
+        };
+        ensure!(
+            self.passed && check_passed && criterion_passed,
+            "Required SQL check or paired criterion failed"
+        );
+        Ok(())
+    }
+}
+
+fn evaluate_required_checks(
+    spec: &VerificationSpec,
+    production_scope_sha256: &str,
+    object_id: u64,
+    workload_sha256: &str,
+    data: &benchmark::FixtureDataObservation,
+    samples: &benchmark::WorkloadSamples,
+) -> Result<Vec<SqlCheckOutcome>> {
+    spec.validate()?;
+    ensure!(
+        samples.compatibility.is_complete(),
+        "Native SQL compatibility incomplete"
+    );
+    let mut outcomes = Vec::with_capacity(spec.checks.len());
+    for (check, criterion) in spec.checks.iter().zip(&spec.criteria) {
+        let observation = match check {
+            RequiredCheck::SqlFunctional {
+                scope_sha256,
+                object_id: check_object,
+                ..
+            } if scope_sha256 == production_scope_sha256 && *check_object == object_id => {
+                SqlCheckObservation::RowCount {
+                    rows: data.row_count,
+                }
+            }
+            RequiredCheck::Performance {
+                scope_sha256,
+                object_id: check_object,
+                workload_sha256: check_workload,
+                ..
+            } if scope_sha256 == production_scope_sha256
+                && *check_object == object_id
+                && check_workload == workload_sha256 =>
+            {
+                SqlCheckObservation::Performance {
+                    median_ms: samples.median_ms,
+                    p95_ms: samples.p95_ms,
+                    warmups: samples.warmups,
+                    samples: u8::try_from(samples.milliseconds.len())
+                        .context("SQL sample count exceeds bound")?,
+                }
+            }
+            _ => anyhow::bail!("Required SQL check is outside reviewed object or workload"),
+        };
+        let outcome = SqlCheckOutcome {
+            check: check.clone(),
+            criterion: criterion.clone(),
+            observation,
+            passed: true,
+        };
+        outcome.validate()?;
+        outcomes.push(outcome);
+    }
+    ensure!(
+        outcomes.len() == spec.checks.len(),
+        "Required SQL checks incomplete"
+    );
+    Ok(outcomes)
+}
 
 /// Only review() can construct a mapping; the digest is part of the v2
 /// staging proof before remote approval.
@@ -160,9 +334,13 @@ impl SqlTrialMapping {
         let production_statement = template.reviewed_statement(production_read)?;
         let staging_statement = template.reviewed_statement(staging_read)?;
         ensure!(
-            matches!(staging_change, BoundScope::Database { engine: DatabaseEngine::Postgres, port: 55434, database, .. }
-            if database == templates::REHEARSAL_DATABASE),
-            "Only versioned isolated guest rehearsal fixture is reviewed"
+            matches!(staging_change, BoundScope::Database { target, engine: DatabaseEngine::Postgres, port: 55434, database, .. }
+                if target.host == "127.0.0.1" && database == templates::REHEARSAL_DATABASE)
+                || matches!(staging_change, BoundScope::Database { target, engine: DatabaseEngine::SqlServer, port, database, .. }
+                    if target.host == "127.0.0.1"
+                        && *port == templates::TDS_REHEARSAL_PORT
+                        && database == templates::REHEARSAL_DATABASE),
+            "Only versioned isolated SQL rehearsal fixtures are reviewed"
         );
         let trial = changes::collect_trial_target(
             production.native(),
@@ -251,7 +429,7 @@ fn reviewed_template(
     selected.context("Reviewed performance workload missing")
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SqlRehearsalReceipt {
     schema: u16,
@@ -259,6 +437,7 @@ pub struct SqlRehearsalReceipt {
     run_id: Uuid,
     approval_id: Uuid,
     consume_id: Uuid,
+    binding_fingerprint: String,
     case_id: Uuid,
     case_revision: u64,
     mapping_sha256: String,
@@ -274,6 +453,7 @@ pub struct SqlRehearsalReceipt {
     workload_result_sha256: String,
     workload_before_median_ms: f64,
     workload_after_median_ms: f64,
+    check_outcomes: Vec<SqlCheckOutcome>,
     complete_native_compatibility: bool,
     created_index_id: Option<u64>,
     created_index_definition_sha256: Option<String>,
@@ -286,10 +466,45 @@ pub struct SqlRehearsalReceipt {
 }
 
 impl SqlRehearsalReceipt {
+    /// Terminal verification uses the actual protected receipt, not a caller
+    /// supplied digest. Every identity and native after-state must be exact.
+    pub(crate) fn validate_native_proof(
+        &self,
+        proof: &changes::NativeActionProof,
+        intent: &IntentRecord,
+    ) -> Result<()> {
+        self.validate(Utc::now())?;
+        let stored = load_sql_rehearsal(&self.path()?)?;
+        ensure!(
+            stored == *self,
+            "Protected SQL receipt differs from native outcome"
+        );
+        let identity = proof.identity();
+        ensure!(
+            proof.state() == NativeActionState::Verified
+                && self.run_id == identity.run_id()
+                && self.case_id == identity.case_id()
+                && self.approval_id == identity.approval_id()
+                && self.consume_id == identity.consume_id()
+                && self.binding_fingerprint == identity.binding_fingerprint()
+                && self.binding_fingerprint == intent.binding_fingerprint
+                && self.production_scope_sha256 == identity.scope_sha256()
+                && self.action_sha256 == identity.action_sha256()
+                && self.before_sha256 == proof.before_sha256()
+                && proof.after_sha256() == Some(self.after_sha256.as_str())
+                && self.created_index_id == proof.created_index_id()
+                && self.created_index_definition_sha256.as_deref()
+                    == proof.created_index_definition_sha256()
+                && self.ownership_marker_sha256.as_deref() == proof.ownership_marker_sha256(),
+            "Protected SQL receipt is not the native terminal proof"
+        );
+        Ok(())
+    }
+
     fn fingerprint(&self) -> Result<String> {
         let mut content = self.clone();
         content.content_sha256.clear();
-        digest(b"relayne-helper-sql-rehearsal-receipt-v1", &content)
+        digest(b"relayne-helper-sql-rehearsal-receipt-v2", &content)
     }
     pub fn validate(&self, now: DateTime<Utc>) -> Result<()> {
         ensure!(
@@ -308,11 +523,18 @@ impl SqlRehearsalReceipt {
                 && self.workload_after_median_ms.is_finite()
                 && self.workload_before_median_ms > 0.0
                 && self.workload_after_median_ms > 0.0
+                && !self.check_outcomes.is_empty()
+                && self.check_outcomes.len() <= 16
+                && self
+                    .check_outcomes
+                    .iter()
+                    .all(|check| check.validate().is_ok())
                 && self.content_sha256 == self.fingerprint()?,
             "Invalid, stale or tampered SQL rehearsal receipt"
         );
         for digest in [
             &self.mapping_sha256,
+            &self.binding_fingerprint,
             &self.production_scope_sha256,
             &self.production_physical_sha256,
             &self.staging_scope_sha256,
@@ -354,6 +576,23 @@ impl SqlRehearsalReceipt {
         let CatalogAction::Sql { action, .. } = &proposal.action else {
             anyhow::bail!("SQL proposal required for rehearsal receipt")
         };
+        ensure!(
+            self.check_outcomes.len() == proposal.verification.checks.len()
+                && self
+                    .check_outcomes
+                    .iter()
+                    .zip(
+                        proposal
+                            .verification
+                            .checks
+                            .iter()
+                            .zip(&proposal.verification.criteria)
+                    )
+                    .all(|(outcome, (check, criterion))| {
+                        &outcome.check == check && &outcome.criterion == criterion
+                    }),
+            "Protected SQL receipt omits or changes required checks"
+        );
         ensure!(
             self.case_id == mapping.case_id
                 && self.case_revision == mapping.case_revision
@@ -452,7 +691,10 @@ pub async fn run_sql_rehearsal(
     journal_path: &Path,
     cancel: CancellationToken,
 ) -> Result<SqlRehearsalReceipt> {
-    let run_id = permit.binding().run_id;
+    // Verify the protected started intent before any native connection.
+    ActionJournal::require_durable_started(journal_path, intent_id, &permit)?;
+    let native_identity = changes::NativeActionIdentity::from_permit(&permit)?;
+    let run_id = native_identity.run_id();
     let before_sha256 = permit.binding().before_sha256.clone();
     let result = run_sql_rehearsal_inner(
         mapping,
@@ -473,7 +715,7 @@ pub async fn run_sql_rehearsal(
                 && intent.run_id == run_id
                 && intent.state == IntentState::DispatchStarted
         }) {
-            let uncertain = changes::NativeActionProof::uncertain(run_id, before_sha256);
+            let uncertain = changes::NativeActionProof::uncertain(native_identity, before_sha256);
             journal.record_native_outcome(intent_id, &uncertain, None)?;
         }
     }
@@ -556,6 +798,14 @@ async fn run_sql_rehearsal_inner(
         .iter()
         .find(|e| e.content_sha256 == metadata.source_evidence_sha256)
         .context("Reviewed live SQL evidence missing")?;
+    let source_matches = match action.object().engine {
+        crate::helper_action::SqlEngine::Postgres => {
+            benchmark::metadata_matches(&source.sql_observations, mapping.template)
+        }
+        crate::helper_action::SqlEngine::SqlServer => {
+            benchmark::sql_server_metadata_matches(&source.sql_observations, mapping.template)
+        }
+    };
     ensure!(
         source.capability_id == crate::helper::manifest::CapabilityId::SqlRead
             && source.binding.case_id == case.id()
@@ -565,7 +815,7 @@ async fn run_sql_rehearsal_inner(
                 == production_read.credential_scope_digest()?
             && source.eligibility(Utc::now(), Duration::minutes(5))
                 == crate::helper::evidence::Eligibility::Eligible
-            && benchmark::metadata_matches(&source.sql_observations, mapping.template),
+            && source_matches,
         "Reviewed live SQL source no longer covers exact workload object"
     );
     let workload = ReviewedWorkload {
@@ -585,25 +835,31 @@ async fn run_sql_rehearsal_inner(
                 == mapping.synthetic_data_sha256,
         "Native baseline or staged data coverage incomplete"
     );
-    let run_id = permit.binding().run_id;
-    let proof =
-        match changes::execute_sql_change(permit, intent_id, stage_change, &trial, cancel.clone())
-            .await
-        {
-            Ok(proof) => proof,
-            Err(error) => {
-                let uncertain = changes::NativeActionProof::uncertain(
-                    run_id,
-                    trial.preflight.before_sha256().to_owned(),
-                );
-                let mut journal = ActionJournal::load(journal_path)?;
-                journal.record_native_outcome(intent_id, &uncertain, None)?;
-                return Err(error.context(
-                    "Native dispatch outcome uncertain; reconcile before another action",
-                ));
-            }
-        };
-    if proof.state != NativeActionState::Verified {
+    let native_identity = changes::NativeActionIdentity::from_permit(&permit)?;
+    let proof = match changes::execute_sql_change(
+        permit,
+        intent_id,
+        journal_path,
+        stage_change,
+        &trial,
+        cancel.clone(),
+    )
+    .await
+    {
+        Ok(proof) => proof,
+        Err(error) => {
+            let uncertain = changes::NativeActionProof::uncertain(
+                native_identity,
+                trial.preflight.before_sha256().to_owned(),
+            );
+            let mut journal = ActionJournal::load(journal_path)?;
+            journal.record_native_outcome(intent_id, &uncertain, None)?;
+            return Err(
+                error.context("Native dispatch outcome uncertain; reconcile before another action")
+            );
+        }
+    };
+    if proof.state() != NativeActionState::Verified {
         let mut journal = ActionJournal::load(journal_path)?;
         journal.record_native_outcome(intent_id, &proof, None)?;
         anyhow::bail!(
@@ -614,22 +870,32 @@ async fn run_sql_rehearsal_inner(
     // dispatch as needing intervention. The consumed permit is never retried.
     let completed: Result<SqlRehearsalReceipt> = async {
         let after = benchmark::run_sandbox_workload(&workload, &policy, cancel.clone()).await?;
+        let after_data =
+            benchmark::fixture_data_observation(stage_read, mapping.template, cancel).await?;
         ensure!(
             after.compatibility.is_complete()
                 && before.result_sha256 == after.result_sha256
                 && after.warmups >= 3
                 && after.milliseconds.len() >= 15
-                && benchmark::fixture_data_digest(stage_read, mapping.template, cancel).await?
-                    == mapping.synthetic_data_sha256,
+                && after_data.sha256 == mapping.synthetic_data_sha256,
             "Staged workload/result/coverage incomplete after action"
         );
+        let check_outcomes = evaluate_required_checks(
+            &proposal.verification,
+            &production_read.digest()?,
+            metadata.object.object_id,
+            &mapping.template.fingerprint(production_read)?,
+            &after_data,
+            &after,
+        )?;
         let now = Utc::now();
         let mut receipt = SqlRehearsalReceipt {
             schema: RECEIPT_SCHEMA,
             receipt_id: Uuid::new_v4(),
             run_id: proof.run_id(),
-            approval_id: Uuid::nil(),
-            consume_id: Uuid::nil(),
+            approval_id: proof.identity().approval_id(),
+            consume_id: proof.identity().consume_id(),
+            binding_fingerprint: proof.identity().binding_fingerprint().to_owned(),
             case_id: case.id(),
             case_revision: case.revision(),
             mapping_sha256: mapping.fingerprint()?,
@@ -639,38 +905,32 @@ async fn run_sql_rehearsal_inner(
             staging_physical_sha256: mapping.staging_physical_sha256.clone(),
             action_sha256: mapping.action_sha256.clone(),
             verification_sha256: mapping.verification_sha256.clone(),
-            before_sha256: proof.before_sha256.clone(),
+            before_sha256: proof.before_sha256().to_owned(),
             after_sha256: proof
-                .after_sha256
-                .clone()
-                .context("Native SQL committed readback missing")?,
+                .after_sha256()
+                .context("Native SQL committed readback missing")?
+                .to_owned(),
             synthetic_data_sha256: mapping.synthetic_data_sha256.clone(),
             workload_result_sha256: after.result_sha256,
             workload_before_median_ms: before.median_ms,
             workload_after_median_ms: after.median_ms,
+            check_outcomes,
             complete_native_compatibility: true,
-            created_index_id: proof.created_index_id,
-            created_index_definition_sha256: proof.created_index_definition_sha256.clone(),
-            ownership_marker_sha256: proof.ownership_marker_sha256.clone(),
+            created_index_id: proof.created_index_id(),
+            created_index_definition_sha256: proof
+                .created_index_definition_sha256()
+                .map(str::to_owned),
+            ownership_marker_sha256: proof.ownership_marker_sha256().map(str::to_owned),
             statistics_nonrestorable: action.is_statistics(),
             reviewed_limits: mapping.reviewed_limits.clone(),
             created_at: now,
             expires_at: now + Duration::hours(1),
             content_sha256: String::new(),
         };
-        // The permit is consumed by the native executor. Recover exact IDs
-        // from the durable intent, never from UI text.
         let mut journal = ActionJournal::load(journal_path)?;
-        let intent = journal
-            .intents()
-            .iter()
-            .find(|i| i.id == intent_id && i.run_id == receipt.run_id)
-            .context("Durable native intent missing")?;
-        receipt.approval_id = intent.approval_id;
-        receipt.consume_id = intent.consume_id;
         receipt.content_sha256 = receipt.fingerprint()?;
         receipt.save()?;
-        journal.record_native_outcome(intent_id, &proof, Some(receipt.content_sha256()))?;
+        journal.record_native_outcome(intent_id, &proof, Some(&receipt))?;
         Ok(receipt)
     }
     .await;
