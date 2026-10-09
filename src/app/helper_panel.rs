@@ -15,6 +15,27 @@ mod intake_ui;
 mod planning_ui;
 mod scope_ui;
 mod sql_ui;
+mod verification_ui;
+
+#[derive(Default)]
+struct VerificationUiState {
+    pending: Option<
+        std::sync::mpsc::Receiver<anyhow::Result<crate::helper::verification::FunctionalReceipt>>,
+    >,
+    latest: Option<crate::helper::verification::FunctionalReceipt>,
+    performance_pending: Option<
+        std::sync::mpsc::Receiver<
+            anyhow::Result<(
+                crate::helper::verification::PerformanceReceipt,
+                Option<crate::helper_approval::ActionApprovalV2>,
+                HelperCase,
+            )>,
+        >,
+    >,
+    resolution_reason: String,
+    resolution_coverage: String,
+    resolution_kind: Option<crate::helper::case::CaseResolution>,
+}
 
 #[derive(Default)]
 struct ActionUiState {
@@ -107,6 +128,7 @@ pub(super) struct HelperState {
     recipe_entry_reviewed: bool,
     notice: String,
     action_ui: ActionUiState,
+    verification_ui: VerificationUiState,
 }
 
 impl HelperState {
@@ -140,6 +162,7 @@ impl HelperState {
                 recipe_entry_reviewed: false,
                 notice: format!("Helper storage unavailable: {e}"),
                 action_ui: ActionUiState::default(),
+                verification_ui: VerificationUiState::default(),
             },
         }
     }
@@ -192,6 +215,7 @@ impl HelperState {
                             .into()
                     },
                     action_ui: ActionUiState::default(),
+                    verification_ui: VerificationUiState::default(),
                 }
             }
             Err(e) => Self {
@@ -223,6 +247,7 @@ impl HelperState {
                     "Helper store could not be loaded: {e}. Repair or restore the file before editing."
                 ),
                 action_ui: ActionUiState::default(),
+                verification_ui: VerificationUiState::default(),
             },
         }
     }
@@ -242,6 +267,7 @@ impl HelperState {
         self.scope_editor.clear_cloud_draft();
         self.reviewed_proposal = None;
         self.action_ui.clear_case_bound();
+        self.verification_ui = VerificationUiState::default();
         self.statistics_limit_acknowledged = false;
         self.statistics_ack_case = None;
         if let Some(cancel) = self.advisory_cancel.take() {
@@ -273,6 +299,7 @@ impl HelperState {
     fn revise(&mut self, edit: CaseEdit) {
         self.reviewed_proposal = None;
         self.action_ui.clear_case_bound();
+        self.verification_ui = VerificationUiState::default();
         self.statistics_limit_acknowledged = false;
         self.statistics_ack_case = None;
         if let Some(cancel) = self.advisory_cancel.take() {
@@ -346,6 +373,7 @@ impl HelperState {
             recipe_entry_reviewed: false,
             notice,
             action_ui: ActionUiState::default(),
+            verification_ui: VerificationUiState::default(),
         }
     }
     pub(super) fn adopt_incident(&mut self, source: crate::incident::Source) {
@@ -534,6 +562,7 @@ impl AivanaApp {
             }
             planning_ui::show(&mut self.helper, ui, &case);
             change_ui::show(&mut self.helper, ui, &case, &self.team);
+            verification_ui::show(&mut self.helper, ui, &case);
         } else if self.helper.store.is_some() {
             ui.label("Create or select a case to begin.");
         }

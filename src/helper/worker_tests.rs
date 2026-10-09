@@ -614,6 +614,10 @@ fn http_assertion_distinguishes_status_and_body_from_transport() {
         panic!("HTTP assertion failed")
     };
     assert_eq!(envelope.records[0].observation, Observation::Healthy);
+    assert!(matches!(
+        envelope.records[0].detail,
+        Some(crate::helper::evidence::SystemDetail::HttpStatus { status: 503 })
+    ));
     server.join().unwrap();
 }
 

@@ -39,6 +39,8 @@ pub struct IntentRecord {
     pub consume_id: Uuid,
     pub run_id: Uuid,
     pub binding_fingerprint: String,
+    #[serde(default)]
+    pub verification_sha256: Option<String>,
     pub state: IntentState,
     pub prepared_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -165,6 +167,7 @@ impl ActionJournal {
             consume_id,
             run_id,
             binding_fingerprint,
+            verification_sha256: None,
             state: IntentState::Verified,
             prepared_at: now,
             updated_at: now,
@@ -223,7 +226,11 @@ impl ActionJournal {
                     && item.case_id != Uuid::nil()
                     && item.approval_id != Uuid::nil()
                     && item.run_id != Uuid::nil()
-                    && crate::helper_action::valid_digest(&item.binding_fingerprint),
+                    && crate::helper_action::valid_digest(&item.binding_fingerprint)
+                    && item
+                        .verification_sha256
+                        .as_deref()
+                        .is_none_or(crate::helper_action::valid_digest),
                 "Invalid/duplicate action intent"
             );
             ensure!(
@@ -431,6 +438,7 @@ impl ActionJournal {
             consume_id: permit.receipt().consume_id,
             run_id: permit.binding().run_id,
             binding_fingerprint: permit.receipt().fingerprint.clone(),
+            verification_sha256: Some(permit.binding().verification_sha256.clone()),
             state: IntentState::Prepared,
             prepared_at: now,
             updated_at: now,

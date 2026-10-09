@@ -293,8 +293,82 @@ pub struct Run {
     pub diagnostic: Option<DiagnosticLink>,
     #[serde(default)]
     pub approval_mode: ApprovalMode,
+    #[serde(default)]
+    pub helper_handoff: Option<HelperServiceHandoff>,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HelperServiceHandoff {
+    pub case_id: Uuid,
+    pub case_revision: u64,
+    pub plan_sha256: String,
+    pub target_index: usize,
+    pub target_sha256: String,
+}
+
+/// Read-only proof derived from the existing journal success predicate.
+/// A no-op or rehearsal never constitutes a helper repair.
+#[derive(Clone, Debug)]
+pub struct VerifiedExecutionEvidence {
+    pub run_id: Uuid,
+    pub target_index: usize,
+    pub target: Target,
+    pub plan_sha256: String,
+    pub diagnostic: Option<DiagnosticLink>,
+}
+
 impl Run {
+    pub fn bind_helper_case(
+        &mut self,
+        case_id: Uuid,
+        case_revision: u64,
+        target_index: usize,
+        target: &Target,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            !self.rehearsal
+                && !case_id.is_nil()
+                && case_revision > 0
+                && self.helper_handoff.is_none()
+                && self.finished.is_none()
+                && self.targets.iter().all(|item| item.phase == Phase::Capture),
+            "Helper handoff requires fresh production run"
+        );
+        let selected = self
+            .targets
+            .get(target_index)
+            .ok_or_else(|| anyhow::anyhow!("Helper target missing"))?;
+        anyhow::ensure!(
+            serde_json::to_vec(&selected.target)? == serde_json::to_vec(target)?,
+            "Helper target differs exact execution plan"
+        );
+        let target_sha256 = format!("{:x}", sha2::Sha256::digest(serde_json::to_vec(target)?));
+        self.helper_handoff = Some(HelperServiceHandoff {
+            case_id,
+            case_revision,
+            plan_sha256: self.hash.clone(),
+            target_index,
+            target_sha256,
+        });
+        Ok(())
+    }
+    pub fn verified_target_evidence(&self, index: usize) -> Option<VerifiedExecutionEvidence> {
+        let target = self.targets.get(index)?;
+        if self.rehearsal
+            || !evidenced_success(self, target)
+            || (target.before == Some(self.plan.desired) && !self.plan.restart)
+        {
+            return None;
+        }
+        Some(VerifiedExecutionEvidence {
+            run_id: self.id,
+            target_index: index,
+            target: target.target.clone(),
+            plan_sha256: self.hash.clone(),
+            diagnostic: self.diagnostic.clone(),
+        })
+    }
     pub fn new(plan: ExecutionPlan, rehearsal: bool) -> Result<Self> {
         if rehearsal
             && plan
@@ -337,30 +411,37 @@ impl Run {
             recovery_case: None,
             diagnostic: None,
             approval_mode: ApprovalMode::Standalone,
+            helper_handoff: None,
         })
     }
     pub fn bind_diagnostic(&mut self, link: DiagnosticLink) -> Result<()> {
-        anyhow::ensure!(self.diagnostic.is_none() && self.recovery_case.is_none()
-            && self.finished.is_none() && self.targets.iter().all(|t| t.phase == Phase::Capture),
-            "Only a fresh execution run can receive a diagnostic link");
+        anyhow::ensure!(
+            self.diagnostic.is_none()
+                && self.recovery_case.is_none()
+                && self.finished.is_none()
+                && self.targets.iter().all(|t| t.phase == Phase::Capture),
+            "Only a fresh execution run can receive a diagnostic link"
+        );
         self.validate_diagnostic_link(&link)?;
         self.diagnostic = Some(link);
         Ok(())
     }
     fn validate_diagnostic_link(&self, link: &DiagnosticLink) -> Result<()> {
-        anyhow::ensure!(link.case_id != Uuid::nil()
-            && link.case_binding.len() == 64
-            && link.case_binding.bytes().all(|c| c.is_ascii_hexdigit())
-            && self.plan.hash()? == self.hash
-            && self.plan.mappings.len() == 1
-            && self.targets.len() == 1
-            && self.plan.mappings[0].production.same_endpoint(&link.target)
-            && self.targets[0].target.same_endpoint(if self.rehearsal {
-                &self.plan.mappings[0].staging
-            } else {
-                &link.target
-            }),
-            "Diagnostic run must use exactly the original production target and unchanged check plan");
+        anyhow::ensure!(
+            link.case_id != Uuid::nil()
+                && link.case_binding.len() == 64
+                && link.case_binding.bytes().all(|c| c.is_ascii_hexdigit())
+                && self.plan.hash()? == self.hash
+                && self.plan.mappings.len() == 1
+                && self.targets.len() == 1
+                && self.plan.mappings[0].production.same_endpoint(&link.target)
+                && self.targets[0].target.same_endpoint(if self.rehearsal {
+                    &self.plan.mappings[0].staging
+                } else {
+                    &link.target
+                }),
+            "Diagnostic run must use exactly the original production target and unchanged check plan"
+        );
         Ok(())
     }
     pub fn matches_diagnostic(&self, link: &DiagnosticLink) -> bool {
@@ -391,7 +472,12 @@ impl Run {
             FunctionalOutcome::Failed
         } else if target.phase == Phase::Passed && evidenced_success(self, target) {
             FunctionalOutcome::Succeeded
-        } else if self.finished.is_some() || matches!(target.phase, Phase::Failed | Phase::Restored | Phase::Passed) {
+        } else if self.finished.is_some()
+            || matches!(
+                target.phase,
+                Phase::Failed | Phase::Restored | Phase::Passed
+            )
+        {
             FunctionalOutcome::Unknown
         } else {
             FunctionalOutcome::Pending
@@ -638,7 +724,9 @@ fn evidenced_success(run: &Run, target: &TargetRun) -> bool {
 }
 impl Journal {
     pub fn functional_result_for(&self, link: &DiagnosticLink) -> Option<(Uuid, FunctionalResult)> {
-        self.runs.iter().rev()
+        self.runs
+            .iter()
+            .rev()
             .find(|run| !run.rehearsal && run.matches_diagnostic(link))
             .map(|run| (run.id, run.functional_result(link)))
     }
@@ -744,16 +832,31 @@ impl Journal {
                 bail!("Journal contains inconsistent target or plan binding");
             }
             if let ApprovalMode::TeamControlled { server_origin } = &run.approval_mode {
-                anyhow::ensure!(matches!(&book.approval_mode, ApprovalMode::TeamControlled { server_origin: configured } if configured == server_origin), "Journal contains inconsistent repair authority");
+                anyhow::ensure!(
+                    matches!(&book.approval_mode, ApprovalMode::TeamControlled { server_origin: configured } if configured == server_origin),
+                    "Journal contains inconsistent repair authority"
+                );
             }
             for (index, target) in run.targets.iter().enumerate() {
-                if target.apply_attempted || target.approval_id.is_some() || target.outcome.is_some() {
-                    anyhow::ensure!(!run.rehearsal && matches!(run.approval_mode, ApprovalMode::TeamControlled { .. })
-                        && target.apply_attempted && target.approval_id.is_some(), "Journal contains inconsistent repair authority");
+                if target.apply_attempted
+                    || target.approval_id.is_some()
+                    || target.outcome.is_some()
+                {
+                    anyhow::ensure!(
+                        !run.rehearsal
+                            && matches!(run.approval_mode, ApprovalMode::TeamControlled { .. })
+                            && target.apply_attempted
+                            && target.approval_id.is_some(),
+                        "Journal contains inconsistent repair authority"
+                    );
                 }
                 if let Some(marker) = &target.outcome {
-                    anyhow::ensure!(marker.event.run_id == run.id && marker.event.target_index as usize == index
-                        && Some(marker.event.approval_id) == target.approval_id, "Journal contains inconsistent repair outcome");
+                    anyhow::ensure!(
+                        marker.event.run_id == run.id
+                            && marker.event.target_index as usize == index
+                            && Some(marker.event.approval_id) == target.approval_id,
+                        "Journal contains inconsistent repair outcome"
+                    );
                 }
             }
             run.interrupt_after_restart();

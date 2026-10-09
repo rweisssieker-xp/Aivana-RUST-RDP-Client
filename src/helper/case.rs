@@ -244,6 +244,64 @@ pub enum CaseResolution {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ResolutionReview {
+    pub outcome: CaseResolution,
+    pub reason: String,
+    pub coverage: String,
+    pub evidence_refs: Vec<Uuid>,
+    pub proof_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof_links: Option<ResolutionProofLinks>,
+    pub reviewed_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolutionProofLinks {
+    pub run_id: Uuid,
+    pub intent_id: Uuid,
+    pub production_receipt_sha256: String,
+    pub functional_receipt_id: Uuid,
+    pub functional_receipt_sha256: String,
+    pub baseline_receipt_id: Option<Uuid>,
+    pub baseline_receipt_sha256: Option<String>,
+    pub after_receipt_id: Option<Uuid>,
+    pub after_receipt_sha256: Option<String>,
+}
+
+impl ResolutionProofLinks {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            !self.run_id.is_nil()
+                && !self.intent_id.is_nil()
+                && !self.functional_receipt_id.is_nil()
+                && super::evidence::is_digest(&self.production_receipt_sha256)
+                && super::evidence::is_digest(&self.functional_receipt_sha256)
+                && self.baseline_receipt_id.is_some() == self.baseline_receipt_sha256.is_some()
+                && self.after_receipt_id.is_some() == self.after_receipt_sha256.is_some()
+                && self.baseline_receipt_id.is_some() == self.after_receipt_id.is_some()
+                && self
+                    .baseline_receipt_id
+                    .is_none_or(|id| !id.is_nil() && id != self.functional_receipt_id)
+                && self.after_receipt_id.is_none_or(|id| !id.is_nil()
+                    && id != self.functional_receipt_id
+                    && Some(id) != self.baseline_receipt_id)
+                && self
+                    .baseline_receipt_sha256
+                    .as_deref()
+                    .is_none_or(super::evidence::is_digest)
+                && self
+                    .after_receipt_sha256
+                    .as_deref()
+                    .is_none_or(super::evidence::is_digest),
+            "Invalid resolution receipt links"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HelperCase {
     schema: u16,
     id: Uuid,
@@ -265,6 +323,8 @@ pub struct HelperCase {
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     resolution: Option<CaseResolution>,
+    #[serde(default)]
+    resolution_review: Option<ResolutionReview>,
 }
 
 #[derive(Clone, Debug)]
@@ -456,6 +516,38 @@ impl HelperCase {
     pub fn resolution(&self) -> Option<CaseResolution> {
         self.resolution
     }
+    pub fn resolution_review(&self) -> Option<&ResolutionReview> {
+        self.resolution_review.as_ref()
+    }
+    pub(crate) fn before_resolution_snapshot(&self) -> Result<Self> {
+        ensure!(
+            self.resolution == Some(CaseResolution::VerifiedRelayneRepair),
+            "Verified resolution required"
+        );
+        let mut prior = self.clone();
+        prior.revision = prior
+            .revision
+            .checked_sub(1)
+            .ok_or_else(|| anyhow::anyhow!("Invalid resolution revision"))?;
+        prior.resolution = None;
+        prior.resolution_review = None;
+        prior.validate()?;
+        Ok(prior)
+    }
+    pub(super) fn record_resolution(&mut self, review: ResolutionReview) -> Result<()> {
+        ensure!(self.resolution.is_none(), "Case already resolved");
+        let mut next = self.clone();
+        next.resolution = Some(review.outcome);
+        next.resolution_review = Some(review);
+        next.revision = next
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("Case revision exhausted"))?;
+        next.updated_at = Utc::now();
+        next.validate()?;
+        *self = next;
+        Ok(())
+    }
     pub fn new(intake: ProblemIntake) -> Result<Self> {
         let intake = intake.sanitized()?;
         let now = Utc::now();
@@ -476,6 +568,7 @@ impl HelperCase {
             created_at: now,
             updated_at: now,
             resolution: None,
+            resolution_review: None,
         })
     }
     pub fn from_incident(mut source: crate::incident::Source) -> Result<Self> {
@@ -583,10 +676,49 @@ impl HelperCase {
             }
         }
         // Task 16 will add a receipt-backed transition; intake edits cannot claim repair.
-        ensure!(
-            self.resolution.is_none(),
-            "Case resolution requires a verified result"
-        );
+        match (&self.resolution, &self.resolution_review) {
+            (None, None) => {}
+            (Some(outcome), Some(review)) => {
+                ensure!(
+                    *outcome == review.outcome
+                        && review.reason.trim().len() >= 3
+                        && review.reason.len() <= 512
+                        && !review.reason.chars().any(char::is_control)
+                        && !review.coverage.trim().is_empty()
+                        && review.coverage.len() <= 256
+                        && !review.coverage.chars().any(char::is_control)
+                        && review.evidence_refs.len() <= 16
+                        && review
+                            .evidence_refs
+                            .iter()
+                            .all(|id| self.evidence.iter().any(|item| item.id == *id)),
+                    "Invalid resolution review"
+                );
+                ensure!(
+                    review.reviewed_at >= self.created_at
+                        && review.reviewed_at <= self.updated_at
+                        && review
+                            .proof_sha256
+                            .as_deref()
+                            .is_none_or(super::evidence::is_digest),
+                    "Invalid resolution proof"
+                );
+                ensure!(
+                    (*outcome == CaseResolution::VerifiedRelayneRepair)
+                        == review.proof_sha256.is_some(),
+                    "Repair requires independent proof"
+                );
+                ensure!(
+                    (*outcome == CaseResolution::VerifiedRelayneRepair)
+                        == review.proof_links.is_some(),
+                    "Repair requires exact persisted receipt links"
+                );
+                if let Some(links) = &review.proof_links {
+                    links.validate()?;
+                }
+            }
+            _ => anyhow::bail!("Unpaired case resolution"),
+        }
         if let Some(t) = &self.ticket_ref {
             validate_text(&t.origin, MAX_FIELD)?;
             validate_text(&t.source_id, MAX_FIELD)?;
@@ -603,6 +735,7 @@ impl HelperCase {
         Ok(())
     }
     pub fn revise(&mut self, expected_revision: u64, edit: CaseEdit) -> Result<u64> {
+        ensure!(self.resolution.is_none(), "Resolved case cannot be edited");
         ensure!(
             self.revision == expected_revision,
             "Stale case revision; reload"

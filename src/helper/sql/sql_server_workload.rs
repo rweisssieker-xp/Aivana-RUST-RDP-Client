@@ -4,10 +4,10 @@ use super::*;
 use crate::helper::credentials::{PersistentSecretResolver, SecretResolver};
 use crate::helper::sql::{
     benchmark::{
-        self, CompatibilityEngine, CompatibilityEvidence, POLICY_VERSION,
-        PostcommitWorkloadAdmission, ReviewedWorkload, SamplingPolicy, WorkloadSamples,
+        self, CompatibilityEngine, CompatibilityEvidence, PostcommitWorkloadAdmission,
+        ReviewedWorkload, SamplingPolicy, WorkloadSamples, POLICY_VERSION,
     },
-    templates::{FIXTURE_SCHEMA, TemplateBind, TemplateStatement},
+    templates::{TemplateBind, TemplateStatement, FIXTURE_SCHEMA},
 };
 use anyhow::Context;
 
@@ -340,6 +340,35 @@ pub(in crate::helper::sql) async fn run_rehearsal_workload(
     run_rehearsal_workload_inner(request, policy, cancel, true).await
 }
 
+pub(in crate::helper::sql) async fn functional_row_count(
+    request: &ReviewedWorkload,
+    cancel: CancellationToken,
+) -> Result<u64> {
+    let statement = request.template.sql_server_statement(&request.scope)?;
+    let deadline = Instant::now() + std::time::Duration::from_secs(30);
+    let mut session =
+        open_rehearsal_fixture(&request.scope, request.template, &cancel, deadline).await?;
+    let values = gated(&cancel, deadline, session.run_once(&statement))
+        .await
+        .map_err(|_| anyhow::anyhow!("SQL Server functional observation incomplete"))?;
+    ensure!(
+        values.len() <= 100,
+        "SQL Server functional result exceeds bound"
+    );
+    if matches!(
+        request.template,
+        crate::helper::sql::templates::ReviewedSelectTemplate::StatusCount { .. }
+    ) {
+        ensure!(
+            values.len() == 1 && values[0] >= 0,
+            "SQL Server count projection invalid"
+        );
+        Ok(values[0] as u64)
+    } else {
+        Ok(values.len() as u64)
+    }
+}
+
 pub(in crate::helper::sql) async fn run_admitted_rehearsal_workload(
     admission: &PostcommitWorkloadAdmission,
     policy: &SamplingPolicy,
@@ -391,6 +420,185 @@ async fn run_rehearsal_workload_inner(
 
 const TDS_ORDER_DATA_SQL: &str = "SELECT TOP (100001) CASE WHEN DATALENGTH(j.json_row) <= 16384 THEN j.json_row END FROM [fixture].[orders] AS t CROSS APPLY (SELECT (SELECT t.[order_id], t.[customer_id], t.[status], t.[amount], t.[created_at], t.[detail] FOR JSON PATH, WITHOUT_ARRAY_WRAPPER) AS json_row) AS j ORDER BY t.[order_id]";
 const TDS_SORT_DATA_SQL: &str = "SELECT TOP (100001) CASE WHEN DATALENGTH(j.json_row) <= 16384 THEN j.json_row END FROM [fixture].[spill_events] AS t CROSS APPLY (SELECT (SELECT t.[event_id], t.[group_id], t.[payload] FOR JSON PATH, WITHOUT_ARRAY_WRAPPER) AS json_row) AS j ORDER BY t.[event_id]";
+
+async fn typed_rows(
+    session: &mut NativeSession,
+    sql: &'static str,
+    binds: &[&str],
+    cap: usize,
+) -> Result<Vec<Row>> {
+    let mut query = Query::new(sql);
+    for value in binds {
+        query.bind(*value);
+    }
+    let mut stream = query
+        .query(&mut session.client)
+        .await
+        .context("SQL Server typed metadata unavailable")?;
+    let mut rows = Vec::new();
+    while let Some(item) = stream.next().await {
+        if let QueryItem::Row(row) = item.context("SQL Server typed metadata unavailable")? {
+            ensure!(rows.len() < cap, "SQL Server typed metadata truncated");
+            rows.push(row);
+        }
+    }
+    Ok(rows)
+}
+
+pub(in crate::helper::sql) async fn capture_typed_compatibility(
+    request: &ReviewedWorkload,
+    cancel: CancellationToken,
+) -> Result<benchmark::TypedCompatibilitySnapshot> {
+    let statement = request.template.sql_server_statement(&request.scope)?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut session =
+        open_rehearsal_fixture(&request.scope, request.template, &cancel, deadline).await?;
+    let metadata = gated(
+        &cancel,
+        deadline,
+        session.read(
+            SqlServerReadProbe::Objects,
+            FIXTURE_SCHEMA,
+            statement.object,
+        ),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("SQL Server typed object unavailable"))?;
+    ensure!(
+        benchmark::sql_server_metadata_matches(&metadata, request.template),
+        "SQL Server typed object changed"
+    );
+    let schema_sha256 = crate::helper_action::digest(b"relayne-typed-tds-schema-v1", &metadata)?;
+    let setting_rows = typed_rows(&mut session,
+        "SELECT v.name, CONVERT(nvarchar(128), SESSIONPROPERTY(v.name)) FROM (VALUES (N'ANSI_NULLS'),(N'ANSI_PADDING'),(N'ANSI_WARNINGS'),(N'ARITHABORT'),(N'CONCAT_NULL_YIELDS_NULL'),(N'NUMERIC_ROUNDABORT'),(N'QUOTED_IDENTIFIER'),(N'ANSI_NULL_DFLT_ON'),(N'ANSI_NULL_DFLT_OFF')) v(name) ORDER BY v.name",
+        &[], 10).await?;
+    ensure!(
+        setting_rows.len() == 9,
+        "SQL Server optimizer setting coverage incomplete"
+    );
+    let mut settings = Vec::new();
+    for row in setting_rows {
+        let name = row
+            .try_get::<&str, _>(0)?
+            .context("SQL Server setting name missing")?
+            .to_owned();
+        let value = row
+            .try_get::<&str, _>(1)?
+            .context("SQL Server setting value missing")?
+            .to_owned();
+        settings.push((name, value));
+    }
+    settings.sort_by(|left, right| left.0.cmp(&right.0));
+    let index_rows = typed_rows(&mut session,
+        "SELECT TOP (21) CONVERT(bigint,i.index_id), i.name, CONCAT(i.type_desc,':',i.is_unique,':',i.has_filter,':',i.is_disabled,':',i.is_hypothetical,':',i.fill_factor), CONVERT(bit,CASE WHEN i.type=2 AND i.is_unique=0 AND i.has_filter=0 AND i.is_disabled=0 AND i.is_hypothetical=0 THEN 1 ELSE 0 END), CONVERT(nvarchar(256),ep.value) FROM sys.indexes i LEFT JOIN sys.extended_properties ep ON ep.class=7 AND ep.major_id=i.object_id AND ep.minor_id=i.index_id AND ep.name=N'Relayne.CreatedByRunV1' WHERE i.object_id=OBJECT_ID(QUOTENAME(N'fixture')+'.'+QUOTENAME(@P1),'U') AND i.name IS NOT NULL ORDER BY i.name",
+        &[statement.object], 21).await?;
+    ensure!(
+        index_rows.len() <= 20,
+        "SQL Server index coverage incomplete"
+    );
+    let mut indexes = Vec::new();
+    for row in index_rows {
+        let index_name = row
+            .try_get::<&str, _>(1)?
+            .context("SQL Server index name missing")?
+            .to_owned();
+        let mut definition = row
+            .try_get::<&str, _>(2)?
+            .context("SQL Server index definition missing")?
+            .to_owned();
+        let plain: bool = row.try_get(3)?.context("SQL Server index shape missing")?;
+        let marker = row.try_get::<&str, _>(4)?.map(str::to_owned);
+        let keys = typed_rows(&mut session,
+            "SELECT TOP (33) c.name, CONVERT(bit,ic.is_descending_key), CONVERT(int,ic.key_ordinal), CONVERT(bit,ic.is_included_column) FROM sys.index_columns ic JOIN sys.columns c ON c.object_id=ic.object_id AND c.column_id=ic.column_id WHERE ic.object_id=OBJECT_ID(QUOTENAME(N'fixture')+'.'+QUOTENAME(@P1),'U') AND ic.index_id=(SELECT i.index_id FROM sys.indexes i WHERE i.object_id=OBJECT_ID(QUOTENAME(N'fixture')+'.'+QUOTENAME(@P1),'U') AND i.name=@P2) ORDER BY ic.index_column_id",
+            &[statement.object, &index_name], 33).await?;
+        ensure!(keys.len() <= 32, "SQL Server index key coverage incomplete");
+        let mut columns = Vec::new();
+        let mut all_plain_keys = plain;
+        for key in keys {
+            let name = key
+                .try_get::<&str, _>(0)?
+                .context("SQL Server key name missing")?
+                .to_owned();
+            let descending: bool = key
+                .try_get(1)?
+                .context("SQL Server key direction missing")?;
+            let ordinal: i32 = key.try_get(2)?.context("SQL Server key ordinal missing")?;
+            let included: bool = key
+                .try_get(3)?
+                .context("SQL Server key inclusion missing")?;
+            definition.push_str(&format!(":{name}:{descending}:{ordinal}:{included}"));
+            if included || ordinal <= 0 || columns.len() >= 4 {
+                all_plain_keys = false;
+            }
+            if all_plain_keys {
+                columns.push(crate::helper_action::PlainIndexColumn {
+                    name,
+                    direction: if descending {
+                        crate::helper_action::SortDirection::Desc
+                    } else {
+                        crate::helper_action::SortDirection::Asc
+                    },
+                });
+            }
+        }
+        ensure!(
+            definition.len() <= 4096 && marker.as_ref().is_none_or(|m| m.len() <= 256),
+            "SQL Server index definition exceeds bound"
+        );
+        indexes.push(benchmark::TypedIndexDefinition {
+            name: index_name,
+            definition_sha256: crate::helper_action::digest(
+                b"relayne-helper-created-index-definition-v1",
+                &definition,
+            )?,
+            marker_sha256: marker
+                .as_ref()
+                .map(|m| crate::helper_action::digest(b"relayne-helper-created-index-marker-v1", m))
+                .transpose()?,
+            plain_nonunique_btree: all_plain_keys && !columns.is_empty(),
+            columns: if all_plain_keys { columns } else { Vec::new() },
+        });
+    }
+    let stat_rows = typed_rows(&mut session,
+        "SELECT TOP (21) st.name, CONVERT(bigint,sp.rows), CONVERT(bigint,sp.modification_counter), CONVERT(nvarchar(48),sp.last_updated,126) FROM sys.stats st OUTER APPLY sys.dm_db_stats_properties(st.object_id,st.stats_id) sp WHERE st.object_id=OBJECT_ID(QUOTENAME(N'fixture')+'.'+QUOTENAME(@P1),'U') ORDER BY st.name",
+        &[statement.object], 21).await?;
+    ensure!(
+        stat_rows.len() <= 20,
+        "SQL Server statistics coverage incomplete"
+    );
+    let mut statistics = Vec::new();
+    for row in stat_rows {
+        let name = row
+            .try_get::<&str, _>(0)?
+            .context("SQL Server statistic name missing")?
+            .to_owned();
+        let state = (
+            row.try_get::<i64, _>(1)?,
+            row.try_get::<i64, _>(2)?,
+            row.try_get::<&str, _>(3)?.map(str::to_owned),
+        );
+        statistics.push((
+            name,
+            crate::helper_action::digest(b"relayne-typed-tds-statistic-v1", &state)?,
+        ));
+    }
+    indexes.sort_by(|left, right| left.name.cmp(&right.name));
+    statistics.sort_by(|left, right| left.0.cmp(&right.0));
+    let statistics_sha256 =
+        crate::helper_action::digest(b"relayne-typed-tds-statistics-v1", &statistics)?;
+    let data = fixture_data_observation(&request.scope, request.template, cancel).await?;
+    let snapshot = benchmark::TypedCompatibilitySnapshot {
+        engine: CompatibilityEngine::SqlServer,
+        schema_sha256,
+        settings,
+        indexes,
+        statistics,
+        statistics_sha256,
+        data_sha256: data.sha256,
+    };
+    snapshot.validate()?;
+    Ok(snapshot)
+}
 
 pub(in crate::helper::sql) async fn fixture_data_observation(
     scope: &BoundScope,

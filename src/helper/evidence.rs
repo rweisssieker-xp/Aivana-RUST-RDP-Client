@@ -147,6 +147,9 @@ pub struct NormalizedRecord {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SystemDetail {
+    HttpStatus {
+        status: u16,
+    },
     Os {
         family: OsFamily,
         reported_host_sha256: Option<String>,
@@ -200,6 +203,7 @@ impl SystemDetail {
     fn validate(&self) -> bool {
         let finite = |value: &Option<f64>| value.is_none_or(|v| v.is_finite() && v >= 0.0);
         match self {
+            Self::HttpStatus { status } => (100..=599).contains(status),
             Self::Os {
                 reported_host_sha256,
                 version,

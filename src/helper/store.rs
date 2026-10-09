@@ -72,6 +72,241 @@ fn lock(path: &Path) -> Result<std::fs::File> {
 }
 
 impl HelperStore {
+    /// Closes only from protected receipts that still match the exact durable
+    /// production journal. The case transition is persisted with the same
+    /// optimistic store check as other edits.
+    pub fn finish_verified_from_receipts(
+        &mut self,
+        path: &Path,
+        case_id: Uuid,
+        expected_revision: u64,
+        run_id: Uuid,
+    ) -> Result<()> {
+        use super::case::{CaseResolution, ResolutionProofLinks, ResolutionReview};
+        use super::verification::{ComparisonPolicy, PerformancePhase, ReceiptStore, resolve_case};
+        let journal = super::journal::ActionJournal::load(&super::journal::ActionJournal::path()?)?;
+        let receipts = ReceiptStore::load_checked(&ReceiptStore::path()?, &journal)?;
+        let mut next = self.clone();
+        let case = next
+            .cases
+            .iter_mut()
+            .find(|case| case.id() == case_id)
+            .ok_or_else(|| anyhow::anyhow!("Helper case missing"))?;
+        ensure!(
+            case.revision() == expected_revision && case.resolution().is_none(),
+            "Stale or closed case"
+        );
+        let functional = receipts
+            .functional()
+            .iter()
+            .rev()
+            .find(|receipt| {
+                receipt.case_id == case_id
+                    && receipt.case_revision == expected_revision
+                    && receipt.run.run_id() == run_id
+            })
+            .ok_or_else(|| anyhow::anyhow!("Functional production receipt missing"))?;
+        let needs_performance = functional.verification.checks.iter().any(|check| {
+            matches!(
+                check,
+                crate::helper_action::RequiredCheck::Performance { .. }
+            )
+        });
+        let baseline = receipts.performance().iter().find(|receipt| {
+            receipt.case_id == case_id
+                && receipt.run.run_id() == run_id
+                && receipt.phase == PerformancePhase::BeforeProduction
+        });
+        let after = receipts.performance().iter().find(|receipt| {
+            receipt.case_id == case_id
+                && receipt.run.run_id() == run_id
+                && receipt.phase == PerformancePhase::AfterProduction
+        });
+        let thresholds = functional
+            .verification
+            .checks
+            .iter()
+            .filter_map(|check| match check {
+                crate::helper_action::RequiredCheck::Performance {
+                    maximum_median_ms,
+                    maximum_p95_ms,
+                    ..
+                } => Some((*maximum_median_ms, *maximum_p95_ms)),
+                _ => None,
+            })
+            .reduce(|left, right| (left.0.min(right.0), left.1.min(right.1)));
+        let policy = thresholds.map(|(median, p95)| ComparisonPolicy {
+            maximum_median_ms: median as f64,
+            maximum_p95_ms: p95 as f64,
+        });
+        let performance = if needs_performance {
+            Some((
+                baseline
+                    .ok_or_else(|| anyhow::anyhow!("Pre-effect production baseline missing"))?,
+                after.ok_or_else(|| anyhow::anyhow!("Post-effect production samples missing"))?,
+                policy
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Reviewed performance threshold missing"))?,
+            ))
+        } else {
+            None
+        };
+        ensure!(
+            resolve_case(case, &journal, functional, performance)?
+                == CaseResolution::VerifiedRelayneRepair,
+            "Repair proof incomplete"
+        );
+        let intent = journal
+            .intents()
+            .iter()
+            .find(|item| item.run_id == run_id && item.case_id == case_id)
+            .ok_or_else(|| anyhow::anyhow!("Exact production intent absent"))?;
+        let functional_sha256 = functional.content_sha256()?;
+        let baseline_sha256 = performance
+            .map(|(before, _, _)| before.content_sha256())
+            .transpose()?;
+        let after_sha256 = performance
+            .map(|(_, after, _)| after.content_sha256())
+            .transpose()?;
+        let proof_links = ResolutionProofLinks {
+            run_id,
+            intent_id: intent.id,
+            production_receipt_sha256: intent
+                .production_receipt_sha256
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("Production receipt link missing"))?,
+            functional_receipt_id: functional.id()?,
+            functional_receipt_sha256: functional_sha256.clone(),
+            baseline_receipt_id: performance.map(|(before, _, _)| before.id()).transpose()?,
+            baseline_receipt_sha256: baseline_sha256.clone(),
+            after_receipt_id: performance.map(|(_, after, _)| after.id()).transpose()?,
+            after_receipt_sha256: after_sha256.clone(),
+        };
+        proof_links.validate()?;
+        let production = super::sql::restoration::load_production_receipt(run_id)?;
+        ensure!(
+            intent.production_receipt_sha256.as_deref() == Some(production.content_sha256()),
+            "Production proof changed before closure"
+        );
+        let evidence_refs: Vec<_> = case
+            .evidence()
+            .iter()
+            .filter(|evidence| {
+                (evidence.binding.run_id == Some(run_id) || evidence.binding.run_id.is_none())
+                    && functional
+                        .verification
+                        .checks
+                        .iter()
+                        .any(|check| match check {
+                            crate::helper_action::RequiredCheck::HttpFunctional {
+                                scope_sha256,
+                                ..
+                            }
+                            | crate::helper_action::RequiredCheck::SqlFunctional {
+                                scope_sha256,
+                                ..
+                            }
+                            | crate::helper_action::RequiredCheck::Performance {
+                                scope_sha256,
+                                ..
+                            } => *scope_sha256 == evidence.binding.scope_sha256,
+                        })
+            })
+            .take(16)
+            .map(|evidence| evidence.id)
+            .collect();
+        ensure!(
+            !evidence_refs.is_empty(),
+            "No case evidence supports the reviewed verification scopes"
+        );
+        let evidence_content: Vec<_> = evidence_refs
+            .iter()
+            .filter_map(|id| {
+                case.evidence()
+                    .iter()
+                    .find(|evidence| evidence.id == *id)
+                    .map(|evidence| (*id, evidence.content_sha256.as_str()))
+            })
+            .collect();
+        let proof_sha256 = super::verification::resolution_proof_sha256(
+            case,
+            intent,
+            &production,
+            functional,
+            performance.map(|(before, _, _)| before),
+            performance.map(|(_, after, _)| after),
+            &proof_links,
+            &evidence_content,
+        )?;
+        case.record_resolution(ResolutionReview {
+            outcome: CaseResolution::VerifiedRelayneRepair,
+            reason: "Verified production action and reviewed checks passed".into(),
+            coverage: if let Some((_, after, _)) = performance {
+                format!(
+                    "{} reviewed checks; 3 warmups and {} measured samples per side",
+                    functional.checks.len(),
+                    after.samples_ms.len()
+                )
+            } else {
+                format!("{} reviewed functional checks", functional.checks.len())
+            },
+            evidence_refs,
+            proof_sha256: Some(proof_sha256),
+            proof_links: Some(proof_links),
+            reviewed_at: chrono::Utc::now(),
+        })?;
+        receipts.verify_resolution_from_store(case, &journal)?;
+        next.validate()?;
+        next.save(path)?;
+        *self = next;
+        Ok(())
+    }
+
+    pub fn close_without_repair(
+        &mut self,
+        path: &Path,
+        case_id: Uuid,
+        expected_revision: u64,
+        outcome: super::case::CaseResolution,
+        reason: &str,
+        coverage: &str,
+        evidence_refs: Vec<Uuid>,
+    ) -> Result<()> {
+        use super::case::{CaseResolution, ResolutionReview};
+        ensure!(
+            matches!(
+                outcome,
+                CaseResolution::DiagnosedNoChange
+                    | CaseResolution::ResolvedExternally
+                    | CaseResolution::ClosedUnresolved
+                    | CaseResolution::NeedsIntervention
+            ),
+            "Verified repair requires production receipts"
+        );
+        let mut next = self.clone();
+        let case = next
+            .cases
+            .iter_mut()
+            .find(|case| case.id() == case_id)
+            .ok_or_else(|| anyhow::anyhow!("Helper case missing"))?;
+        ensure!(
+            case.revision() == expected_revision && case.resolution().is_none(),
+            "Stale or closed case"
+        );
+        case.record_resolution(ResolutionReview {
+            outcome,
+            reason: crate::security::redact_secret_text(reason),
+            coverage: crate::security::redact_secret_text(coverage),
+            evidence_refs,
+            proof_sha256: None,
+            proof_links: None,
+            reviewed_at: chrono::Utc::now(),
+        })?;
+        next.validate()?;
+        next.save(path)?;
+        *self = next;
+        Ok(())
+    }
     /// Holds the same OS lock as case saves while the caller inspects the current
     /// protected on-disk state and durably records a dispatch intent.
     pub fn inspect_locked<T>(path: &Path, inspect: impl FnOnce(&Self) -> Result<T>) -> Result<T> {

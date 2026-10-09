@@ -1,5 +1,5 @@
 //! Explicit, reviewed sandbox workload execution and conservative comparison.
-use super::templates::{ReviewedSelectTemplate, TemplateBind, connect_fixture};
+use super::templates::{connect_fixture, ReviewedSelectTemplate, TemplateBind};
 use crate::helper::{
     case::HelperCase,
     evidence::Eligibility,
@@ -7,7 +7,7 @@ use crate::helper::{
     scope::{BoundScope, DatabaseEngine},
     sql::types::SqlObservation,
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{ensure, Context, Result};
 use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -103,6 +103,26 @@ fn ensure_review_freshness_at(
     Ok(())
 }
 impl ReviewedWorkload {
+    pub(crate) fn identity_sha256(&self) -> Result<String> {
+        crate::helper_action::digest(
+            b"relayne-reviewed-workload-identity-v1",
+            &(
+                &self.scope,
+                self.template,
+                self.case_id,
+                self.case_revision,
+                self.review_evidence_id,
+                &self.review_content_sha256,
+                self.reviewed_at,
+            ),
+        )
+    }
+    pub(crate) fn scope_digest(&self) -> Result<String> {
+        self.scope.digest()
+    }
+    pub(crate) fn case_binding(&self) -> (Uuid, u64) {
+        (self.case_id, self.case_revision)
+    }
     pub(crate) fn from_validated_request(
         request: &crate::helper::capability::ProbeRequest,
         template: ReviewedSelectTemplate,
@@ -189,6 +209,203 @@ impl ReviewedWorkload {
     pub fn fingerprint(&self) -> Result<String> {
         self.template.fingerprint(&self.scope)
     }
+}
+
+/// Executes one fixed, reviewed SELECT for post-action row-count proof.
+/// The caller must bind this native observation to the production run.
+pub(crate) async fn run_functional_row_count(
+    request: &ReviewedWorkload,
+    cancel: CancellationToken,
+) -> Result<u64> {
+    ensure_review_freshness(request)?;
+    if matches!(
+        &request.scope,
+        BoundScope::Database {
+            engine: DatabaseEngine::SqlServer,
+            ..
+        }
+    ) {
+        return super::sql_server::functional_row_count(request, cancel).await;
+    }
+    let statement = request.template.reviewed_statement(&request.scope)?;
+    let session = connect_fixture(&request.scope, request.template, &cancel).await?;
+    let run = async {
+        session.client.batch_execute("BEGIN READ ONLY; SET LOCAL statement_timeout = '15000ms'; SET LOCAL lock_timeout = '1000ms'").await?;
+        ensure!(!cancel.is_cancelled(), "SQL functional check canceled");
+        let rows = match statement.bind {
+            TemplateBind::None => session.client.query(statement.sql, &[]).await?,
+            TemplateBind::Integer(value) => session.client.query(statement.sql, &[&value]).await?,
+            TemplateBind::Status(status) => session.client.query(statement.sql, &[&status.as_str()]).await?,
+        };
+        ensure!(rows.len() <= 100, "SQL functional result exceeds fixed bound");
+        if matches!(request.template, ReviewedSelectTemplate::StatusCount { .. }) {
+            ensure!(rows.len() == 1, "SQL count projection missing");
+            let count: i64 = rows[0].try_get(0)?;
+            ensure!(count >= 0, "Invalid SQL count");
+            Ok(count as u64)
+        } else { Ok(rows.len() as u64) }
+    }.await;
+    let _ = session.client.batch_execute("ROLLBACK").await;
+    run
+}
+
+pub(crate) async fn capture_typed_compatibility(
+    request: &ReviewedWorkload,
+    cancel: CancellationToken,
+) -> Result<TypedCompatibilitySnapshot> {
+    ensure_review_freshness(request)?;
+    if matches!(
+        &request.scope,
+        BoundScope::Database {
+            engine: DatabaseEngine::SqlServer,
+            ..
+        }
+    ) {
+        return super::sql_server::capture_typed_compatibility(request, cancel).await;
+    }
+    ensure!(
+        matches!(
+            &request.scope,
+            BoundScope::Database {
+                engine: DatabaseEngine::Postgres,
+                ..
+            }
+        ),
+        "Typed native context unavailable for this engine"
+    );
+    let statement = request.template.reviewed_statement(&request.scope)?;
+    let session = connect_fixture(&request.scope, request.template, &cancel).await?;
+    ensure!(!cancel.is_cancelled(), "Compatibility capture canceled");
+    let setting_names = [
+        "default_statistics_target",
+        "effective_cache_size",
+        "enable_indexscan",
+        "enable_seqscan",
+        "jit",
+        "max_parallel_workers_per_gather",
+        "random_page_cost",
+        "search_path",
+        "work_mem",
+    ];
+    let mut settings = Vec::with_capacity(setting_names.len());
+    for name in setting_names {
+        let row = session
+            .client
+            .query_one("SELECT current_setting($1)", &[&name])
+            .await?;
+        let value: String = row.try_get(0)?;
+        ensure!(
+            value.len() <= 128 && !value.chars().any(char::is_control),
+            "Optimizer setting unavailable"
+        );
+        settings.push((name.to_owned(), value));
+    }
+    let index_rows = session.client.query(
+        "SELECT ic.oid, ic.relname::text, pg_get_indexdef(ic.oid)::text, am.amname::text, i.indisunique, i.indisprimary, i.indpred IS NULL, i.indexprs IS NULL, i.indnkeyatts::int, i.indnatts::int, obj_description(ic.oid,'pg_class')::text FROM pg_index i JOIN pg_class ic ON ic.oid=i.indexrelid JOIN pg_am am ON am.oid=ic.relam JOIN pg_class t ON t.oid=i.indrelid JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname='fixture' AND t.relname=$1 ORDER BY ic.relname LIMIT 21",
+        &[&statement.object],
+    ).await?;
+    ensure!(index_rows.len() <= 20, "Index set truncated");
+    let mut indexes = Vec::with_capacity(index_rows.len());
+    for row in index_rows {
+        let oid: u32 = row.try_get(0)?;
+        let name: String = row.try_get(1)?;
+        let definition: String = row.try_get(2)?;
+        ensure!(definition.len() <= 2048, "Index definition exceeds bound");
+        let access_method: String = row.try_get(3)?;
+        let unique: bool = row.try_get(4)?;
+        let primary: bool = row.try_get(5)?;
+        let no_predicate: bool = row.try_get(6)?;
+        let no_expression: bool = row.try_get(7)?;
+        let key_count: i32 = row.try_get(8)?;
+        let total_count: i32 = row.try_get(9)?;
+        let marker: Option<String> = row.try_get(10)?;
+        ensure!(
+            marker.as_ref().is_none_or(|value| value.len() <= 256),
+            "Index marker exceeds bound"
+        );
+        let plain = access_method == "btree"
+            && !unique
+            && !primary
+            && no_predicate
+            && no_expression
+            && key_count == total_count
+            && (1..=4).contains(&key_count);
+        let columns = if plain {
+            let rows = session.client.query(
+                "SELECT a.attname::text, ((i.indoption[k - 1]::int & 1) = 1) AS descending FROM pg_index i CROSS JOIN generate_series(1, i.indnkeyatts) AS k LEFT JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=i.indkey[k - 1] WHERE i.indexrelid=$1 ORDER BY k",
+                &[&oid],
+            ).await?;
+            ensure!(
+                rows.len() == key_count as usize,
+                "Index key coverage incomplete"
+            );
+            let mut keys = Vec::with_capacity(rows.len());
+            for key in rows {
+                let column: Option<String> = key.try_get(0)?;
+                let column = column.ok_or_else(|| anyhow::anyhow!("Expression index not plain"))?;
+                let descending: bool = key.try_get(1)?;
+                keys.push(crate::helper_action::PlainIndexColumn {
+                    name: column,
+                    direction: if descending {
+                        crate::helper_action::SortDirection::Desc
+                    } else {
+                        crate::helper_action::SortDirection::Asc
+                    },
+                });
+            }
+            keys
+        } else {
+            Vec::new()
+        };
+        indexes.push(TypedIndexDefinition {
+            name,
+            definition_sha256: crate::helper_action::digest(
+                b"relayne-helper-created-index-definition-v1",
+                &definition,
+            )?,
+            marker_sha256: marker
+                .as_ref()
+                .map(|value| {
+                    crate::helper_action::digest(b"relayne-helper-created-index-marker-v1", value)
+                })
+                .transpose()?,
+            plain_nonunique_btree: plain,
+            columns,
+        });
+    }
+    let stats_rows = session.client.query(
+        "SELECT attname::text, md5(row_to_json(s)::text)::text FROM pg_stats s WHERE schemaname='fixture' AND tablename=$1 ORDER BY attname LIMIT 21",
+        &[&statement.object],
+    ).await?;
+    ensure!(stats_rows.len() <= 20, "Statistics coverage incomplete");
+    let mut stats_hash = Sha256::new();
+    stats_hash.update(b"relayne-typed-pg-statistics-v1\0");
+    let mut statistics = Vec::with_capacity(stats_rows.len());
+    for row in stats_rows {
+        let name: String = row.try_get(0)?;
+        let hash: String = row.try_get(1)?;
+        ensure!(
+            name.len() <= 128 && hash.len() == 32,
+            "Statistics projection invalid"
+        );
+        stats_hash.update(name.as_bytes());
+        stats_hash.update(hash.as_bytes());
+        statistics.push((name, hash));
+    }
+    let data = fixture_data_observation(&request.scope, request.template, cancel).await?;
+    indexes.sort_by(|left, right| left.name.cmp(&right.name));
+    statistics.sort_by(|left, right| left.0.cmp(&right.0));
+    let snapshot = TypedCompatibilitySnapshot {
+        engine: CompatibilityEngine::Postgres,
+        schema_sha256: session.metadata_sha256.clone(),
+        settings,
+        indexes,
+        statistics,
+        statistics_sha256: format!("{:x}", stats_hash.finalize()),
+        data_sha256: data.sha256,
+    };
+    snapshot.validate()?;
+    Ok(snapshot)
 }
 
 pub(super) fn metadata_matches(
@@ -313,6 +530,86 @@ pub struct WorkloadSamples {
     pub approved_change_sha256: Option<String>,
 }
 
+/// Bounded native context used by production verification. OIDs are excluded
+/// from index definitions; object identity is retained separately.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TypedCompatibilitySnapshot {
+    pub engine: CompatibilityEngine,
+    pub schema_sha256: String,
+    pub settings: Vec<(String, String)>,
+    pub indexes: Vec<TypedIndexDefinition>,
+    pub statistics: Vec<(String, String)>,
+    pub statistics_sha256: String,
+    pub data_sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TypedIndexDefinition {
+    pub name: String,
+    pub definition_sha256: String,
+    pub marker_sha256: Option<String>,
+    pub plain_nonunique_btree: bool,
+    pub columns: Vec<crate::helper_action::PlainIndexColumn>,
+}
+
+impl TypedCompatibilitySnapshot {
+    pub fn validate(&self) -> Result<()> {
+        use crate::helper::evidence::is_digest;
+        ensure!(
+            self.engine != CompatibilityEngine::Unknown
+                && is_digest(&self.schema_sha256)
+                && is_digest(&self.statistics_sha256)
+                && is_digest(&self.data_sha256),
+            "Typed compatibility context incomplete"
+        );
+        ensure!(
+            self.settings.len() == 9
+                && self.settings.iter().all(|(name, value)| !name.is_empty()
+                    && name.len() <= 48
+                    && value.len() <= 128
+                    && !value.chars().any(char::is_control))
+                && self.settings.windows(2).all(|pair| pair[0].0 < pair[1].0),
+            "Optimizer setting coverage incomplete"
+        );
+        ensure!(
+            self.indexes.len() <= 20
+                && self
+                    .indexes
+                    .windows(2)
+                    .all(|pair| pair[0].name < pair[1].name),
+            "Index coverage incomplete"
+        );
+        ensure!(
+            self.statistics.len() <= 20
+                && self.statistics.iter().all(|(name, hash)| !name.is_empty()
+                    && name.len() <= 128
+                    && !hash.is_empty()
+                    && hash.len() <= 64
+                    && hash.chars().all(|c| c.is_ascii_hexdigit()))
+                && self.statistics.windows(2).all(|pair| pair[0].0 < pair[1].0),
+            "Statistics coverage incomplete"
+        );
+        for index in &self.indexes {
+            ensure!(
+                !index.name.is_empty()
+                    && index.name.len() <= 128
+                    && !index.name.chars().any(char::is_control)
+                    && is_digest(&index.definition_sha256)
+                    && index.marker_sha256.as_deref().is_none_or(is_digest)
+                    && index.columns.len() <= 4,
+                "Index definition invalid"
+            );
+            ensure!(
+                !index.plain_nonunique_btree || !index.columns.is_empty(),
+                "Plain index columns missing"
+            );
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompatibilityGap {
@@ -364,6 +661,9 @@ impl Default for CompatibilityEvidence {
 }
 
 impl CompatibilityEvidence {
+    pub(crate) fn engine(&self) -> CompatibilityEngine {
+        self.engine
+    }
     /// Called only after native pre/post observations in one live session.
     /// Imported JSON never restores verified_complete.
     pub(crate) fn native_complete(
@@ -554,8 +854,8 @@ mod streamed_fixture_tests {
     use super::*;
     use futures_util::stream;
     use std::sync::{
-        Arc,
         atomic::{AtomicUsize, Ordering},
+        Arc,
     };
 
     #[test]
@@ -580,15 +880,13 @@ mod streamed_fixture_tests {
             counter.fetch_add(1, Ordering::SeqCst);
             Some((Ok(Some("x".to_owned())), counter))
         });
-        assert!(
-            hash_bounded_stream(
-                values,
-                &CancellationToken::new(),
-                tokio::time::Instant::now() + Duration::from_secs(5),
-            )
-            .await
-            .is_err()
-        );
+        assert!(hash_bounded_stream(
+            values,
+            &CancellationToken::new(),
+            tokio::time::Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .is_err());
         assert_eq!(read.load(Ordering::SeqCst), 100_001);
     }
 
@@ -597,24 +895,20 @@ mod streamed_fixture_tests {
         let pending = || stream::pending::<Result<Option<String>>>();
         let canceled = CancellationToken::new();
         canceled.cancel();
-        assert!(
-            hash_bounded_stream(
-                pending(),
-                &canceled,
-                tokio::time::Instant::now() + Duration::from_secs(1),
-            )
-            .await
-            .is_err()
-        );
-        assert!(
-            hash_bounded_stream(
-                pending(),
-                &CancellationToken::new(),
-                tokio::time::Instant::now(),
-            )
-            .await
-            .is_err()
-        );
+        assert!(hash_bounded_stream(
+            pending(),
+            &canceled,
+            tokio::time::Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .is_err());
+        assert!(hash_bounded_stream(
+            pending(),
+            &CancellationToken::new(),
+            tokio::time::Instant::now(),
+        )
+        .await
+        .is_err());
     }
 }
 

@@ -20,4 +20,5 @@ pub(crate) mod process;
 pub mod scope;
 pub mod sql;
 pub mod store;
+pub mod verification;
 pub mod worker;

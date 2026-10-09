@@ -603,7 +603,9 @@ impl ProbeAdapter for HttpProbe {
                         Observation::Degraded
                     },
                     subject_sha256: request.scope.resource_digest()?,
-                    detail: None,
+                    detail: Some(super::evidence::SystemDetail::HttpStatus {
+                        status: actual_status.as_u16(),
+                    }),
                 }],
                 metrics: Vec::new(),
                 sql_observations: Vec::new(),
