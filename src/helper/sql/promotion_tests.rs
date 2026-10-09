@@ -20,10 +20,10 @@ use crate::helper::{
     scope::{CredentialPurpose, CredentialScope, DatabaseEngine},
     sql::{
         changes::{
-            GuestPgBoundaryCounts, GuestPgReadback, guest_pg_assert_isolated_owned,
-            guest_pg_boundary_counts, guest_pg_prepare_isolated_fixture,
-            guest_pg_read_only_witness, guest_pg_require_isolated_absent,
-            reset_guest_pg_boundary_counts,
+            GuestPgBoundaryCounts, GuestPgIsolatedIdentity, GuestPgReadback,
+            guest_pg_assert_isolated_owned, guest_pg_boundary_counts,
+            guest_pg_prepare_isolated_fixture, guest_pg_read_only_witness,
+            guest_pg_require_isolated_absent, reset_guest_pg_boundary_counts,
         },
         postgres::PostgresAdapter,
         rehearsal::{SqlTrialMapping, load_sql_rehearsal, run_sql_rehearsal},
@@ -1886,8 +1886,22 @@ async fn run_guest_pg_task15() -> Result<()> {
         case_id,
         Some(receipt.run_id()),
     )?;
-    guest_pg_assert_isolated_owned(&fixture.production_change, fixture.isolated_run_id).await?;
-    guest_pg_assert_isolated_owned(&fixture.staging_change, fixture.isolated_run_id).await?;
+    let isolated_production =
+        guest_pg_assert_isolated_owned(&fixture.production_change, fixture.isolated_run_id).await?;
+    let isolated_staging =
+        guest_pg_assert_isolated_owned(&fixture.staging_change, fixture.isolated_run_id).await?;
+    let expected_marker = format!("Relayne Task 15 isolated run {}", fixture.isolated_run_id);
+    ensure!(
+        isolated_production.scope == "fixture.task15_orders"
+            && isolated_staging.scope == isolated_production.scope
+            && isolated_production.owner == "relayne_fixture_owner"
+            && isolated_staging.owner == "relayne_rehearsal_owner"
+            && isolated_production.marker == expected_marker
+            && isolated_staging.marker == expected_marker
+            && isolated_production.run_id == fixture.isolated_run_id
+            && isolated_staging.run_id == fixture.isolated_run_id,
+        "Task 15 witness fixture scope, owner, or run marker differs from checked tables"
+    );
     trace.mark(
         TraceStage::Readback,
         "SharedSourcePreservation",
@@ -1934,6 +1948,7 @@ async fn run_guest_pg_task15() -> Result<()> {
     )?;
     write_success_witness(
         &fixture,
+        &isolated_production,
         &team,
         &rehearsal,
         &receipt,
@@ -2032,6 +2047,7 @@ fn validate_guest_package_before_mutation() -> Result<()> {
 
 fn write_success_witness(
     fixture: &GuestFixture,
+    isolated_production: &GuestPgIsolatedIdentity,
     team: &GuestTeam,
     rehearsal: &crate::helper::sql::rehearsal::SqlRehearsalReceipt,
     receipt: &crate::helper::sql::restoration::ProductionReceipt,
@@ -2068,7 +2084,10 @@ fn write_success_witness(
         "SourceCommit": source, "SourceTree": tree, "BinarySha256": binary,
         "TeamBinarySha256": team_binary, "DriverSha256": driver,
         "CaseId": case, "StagingRunId": rehearsal.run_id(), "ProductionRunId": receipt.run_id(),
-        "IsolatedFixtureRunId": fixture.isolated_run_id,
+        "IsolatedFixtureScope": &isolated_production.scope,
+        "IsolatedFixtureOwner": &isolated_production.owner,
+        "IsolatedFixtureRunMarker": &isolated_production.marker,
+        "IsolatedFixtureRunId": isolated_production.run_id,
         "TeamDb": team.db.file_name().and_then(|name| name.to_str()),
         "ProductionPhysicalSha256": fixture.baseline.physical_sha256,
         "ProductionDatabaseId": fixture.baseline.database_id,

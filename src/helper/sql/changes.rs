@@ -770,10 +770,18 @@ pub(crate) async fn guest_pg_require_isolated_absent(source_scope: &BoundScope) 
 }
 
 #[cfg(test)]
+pub(crate) struct GuestPgIsolatedIdentity {
+    pub(crate) scope: String,
+    pub(crate) owner: String,
+    pub(crate) marker: String,
+    pub(crate) run_id: uuid::Uuid,
+}
+
+#[cfg(test)]
 pub(crate) async fn guest_pg_assert_isolated_owned(
     scope: &BoundScope,
     run_id: uuid::Uuid,
-) -> Result<()> {
+) -> Result<GuestPgIsolatedIdentity> {
     ensure!(
         matches!(scope, BoundScope::Database { engine: DatabaseEngine::Postgres, schema: Some(schema), object: Some(table), .. } if schema == "fixture" && table == super::templates::TASK15_TABLE),
         "Task 15 ownership check requires isolated table scope"
@@ -801,7 +809,12 @@ pub(crate) async fn guest_pg_assert_isolated_owned(
                 && kind == "r",
             "Task 15 table owner or exact run marker changed"
         );
-        Ok::<(), anyhow::Error>(())
+        Ok::<GuestPgIsolatedIdentity, anyhow::Error>(GuestPgIsolatedIdentity {
+            scope: format!("fixture.{}", super::templates::TASK15_TABLE),
+            owner,
+            marker,
+            run_id,
+        })
     })
     .await;
     driver.abort();
