@@ -454,6 +454,8 @@ pub struct SqlRehearsalReceipt {
     mapping_sha256: String,
     production_scope_sha256: String,
     production_physical_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    production_before_sha256: Option<String>,
     staging_scope_sha256: String,
     staging_physical_sha256: String,
     action_sha256: String,
@@ -477,6 +479,91 @@ pub struct SqlRehearsalReceipt {
 }
 
 impl SqlRehearsalReceipt {
+    pub(crate) fn production_physical_sha256(&self) -> &str {
+        &self.production_physical_sha256
+    }
+
+    pub(crate) fn validate_for_production(
+        &self,
+        case: &HelperCase,
+        proposal: &HelperProposal,
+        binding: &crate::helper_approval::ActionBindingV2,
+        journal: &ActionJournal,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        self.validate(now)?;
+        ensure!(
+            load_sql_rehearsal(&self.path()?)? == *self,
+            "Protected SQL rehearsal receipt differs"
+        );
+        let staged = journal.intents().iter().find(|intent| {
+            intent.run_id == self.run_id
+                && intent.case_id == self.case_id
+                && intent.approval_id == self.approval_id
+                && intent.consume_id == self.consume_id
+                && intent.binding_fingerprint == self.binding_fingerprint
+                && intent.state == IntentState::Verified
+                && intent.native_receipt_sha256.as_deref() == Some(self.content_sha256.as_str())
+        });
+        ensure!(
+            staged.is_some(),
+            "Protected rehearsal is not a verified native journal outcome"
+        );
+        self.validate_production_coverage(case.id(), case.revision(), proposal, binding)?;
+        Ok(())
+    }
+    fn validate_production_coverage(
+        &self,
+        case_id: Uuid,
+        case_revision: u64,
+        proposal: &HelperProposal,
+        binding: &crate::helper_approval::ActionBindingV2,
+    ) -> Result<()> {
+        let CatalogAction::Sql { action, .. } = &proposal.action else {
+            anyhow::bail!("Current proposal is not typed SQL action")
+        };
+        ensure!(
+            self.case_id == case_id
+                && self.case_revision == case_revision
+                && binding.case_id == case_id
+                && binding.case_revision == case_revision
+                && self.production_scope_sha256 == binding.scope_sha256
+                && self.action_sha256 == digest(b"relayne-helper-sql-action-v1", action)?
+                && binding.action == *action
+                && self.verification_sha256
+                    == digest(
+                        b"relayne-helper-reviewed-verification-v2",
+                        &proposal.verification
+                    )?
+                && binding.verification_sha256 == self.verification_sha256
+                && self.production_before_sha256.as_deref() == Some(binding.before_sha256.as_str())
+                && self.staging_scope_sha256 != self.production_scope_sha256
+                && self.staging_physical_sha256 != self.production_physical_sha256
+                && self.complete_native_compatibility
+                && self.check_outcomes.iter().all(|outcome| outcome.passed)
+                && self.check_outcomes.len() == proposal.verification.checks.len()
+                && self
+                    .check_outcomes
+                    .iter()
+                    .zip(
+                        proposal
+                            .verification
+                            .checks
+                            .iter()
+                            .zip(&proposal.verification.criteria)
+                    )
+                    .all(|(outcome, (check, criterion))| {
+                        &outcome.check == check && &outcome.criterion == criterion
+                    })
+                && self.statistics_nonrestorable == action.is_statistics()
+                && (!action.is_statistics()
+                    || (proposal.statistics_limit_acknowledged
+                        && binding.statistics_limit_acknowledged)),
+            "Rehearsal receipt does not cover current production action and checks"
+        );
+        Ok(())
+    }
+
     /// Terminal verification uses the actual protected receipt, not a caller
     /// supplied digest. Every identity and native after-state must be exact.
     pub(crate) fn validate_native_proof(
@@ -518,6 +605,12 @@ impl SqlRehearsalReceipt {
         digest(b"relayne-helper-sql-rehearsal-receipt-v2", &content)
     }
     pub fn validate(&self, now: DateTime<Utc>) -> Result<()> {
+        ensure!(
+            self.production_before_sha256
+                .as_deref()
+                .is_none_or(is_digest),
+            "Invalid production before-state in rehearsal receipt"
+        );
         ensure!(
             self.schema == RECEIPT_SCHEMA
                 && self.receipt_id != Uuid::nil()
@@ -625,6 +718,9 @@ impl SqlRehearsalReceipt {
     pub fn receipt_id(&self) -> Uuid {
         self.receipt_id
     }
+    pub(crate) fn expires_at(&self) -> DateTime<Utc> {
+        self.expires_at
+    }
     pub fn content_sha256(&self) -> &str {
         &self.content_sha256
     }
@@ -691,6 +787,35 @@ pub fn load_sql_rehearsal(path: &Path) -> Result<SqlRehearsalReceipt> {
     receipt.validate(Utc::now())?;
     ensure!(receipt.path()? == path, "Receipt path/run identity differs");
     Ok(receipt)
+}
+
+/// Resolve a team binding's opaque receipt ID only through protected local
+/// files. The earlier staging format names files by run ID, not receipt ID.
+pub(crate) fn load_protected_rehearsal_by_id(id: Uuid) -> Result<SqlRehearsalReceipt> {
+    ensure!(id != Uuid::nil(), "Rehearsal receipt ID missing");
+    let directory = crate::security::app_data_file("relayne-helper-sql-rehearsal-index.dpapi")?
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Protected receipt directory missing"))?
+        .to_path_buf();
+    let mut seen = 0usize;
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("relayne-helper-sql-rehearsal-") || !name.ends_with(".dpapi") {
+            continue;
+        }
+        seen += 1;
+        ensure!(seen <= 10_000, "Protected receipt search bound exceeded");
+        let Ok(receipt) = load_sql_rehearsal(&entry.path()) else {
+            // Historical expired or unreadable receipts carry no authority.
+            continue;
+        };
+        if receipt.receipt_id == id {
+            return Ok(receipt);
+        }
+    }
+    anyhow::bail!("Protected SQL rehearsal receipt missing")
 }
 
 pub async fn run_sql_rehearsal(
@@ -925,6 +1050,7 @@ async fn run_sql_rehearsal_inner(
             mapping_sha256: admitted_mapping_sha256,
             production_scope_sha256: mapping.production_scope_sha256.clone(),
             production_physical_sha256: mapping.production_physical_sha256.clone(),
+            production_before_sha256: Some(mapping.production_before_sha256.clone()),
             staging_scope_sha256: mapping.staging_scope_sha256.clone(),
             staging_physical_sha256: mapping.staging_physical_sha256.clone(),
             action_sha256: mapping.action_sha256.clone(),

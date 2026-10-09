@@ -1,5 +1,91 @@
 use super::*;
 
+#[test]
+fn serialized_wave14_receipt_keeps_original_integrity_but_lacks_promotion_before_proof() {
+    #[derive(serde::Serialize)]
+    struct Wave14Receipt<'a> {
+        schema: u16,
+        receipt_id: Uuid,
+        run_id: Uuid,
+        approval_id: Uuid,
+        consume_id: Uuid,
+        binding_fingerprint: &'a str,
+        case_id: Uuid,
+        case_revision: u64,
+        mapping_sha256: &'a str,
+        production_scope_sha256: &'a str,
+        production_physical_sha256: &'a str,
+        staging_scope_sha256: &'a str,
+        staging_physical_sha256: &'a str,
+        action_sha256: &'a str,
+        verification_sha256: &'a str,
+        before_sha256: &'a str,
+        after_sha256: &'a str,
+        synthetic_data_sha256: &'a str,
+        workload_result_sha256: &'a str,
+        workload_before_median_ms: f64,
+        workload_after_median_ms: f64,
+        check_outcomes: &'a [SqlCheckOutcome],
+        complete_native_compatibility: bool,
+        created_index_id: Option<u64>,
+        created_index_definition_sha256: &'a Option<String>,
+        ownership_marker_sha256: &'a Option<String>,
+        statistics_nonrestorable: bool,
+        reviewed_limits: &'a str,
+        created_at: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
+        content_sha256: &'a str,
+    }
+    fn old_schema<'a>(receipt: &'a SqlRehearsalReceipt, hash: &'a str) -> Wave14Receipt<'a> {
+        Wave14Receipt {
+            schema: receipt.schema,
+            receipt_id: receipt.receipt_id,
+            run_id: receipt.run_id,
+            approval_id: receipt.approval_id,
+            consume_id: receipt.consume_id,
+            binding_fingerprint: &receipt.binding_fingerprint,
+            case_id: receipt.case_id,
+            case_revision: receipt.case_revision,
+            mapping_sha256: &receipt.mapping_sha256,
+            production_scope_sha256: &receipt.production_scope_sha256,
+            production_physical_sha256: &receipt.production_physical_sha256,
+            staging_scope_sha256: &receipt.staging_scope_sha256,
+            staging_physical_sha256: &receipt.staging_physical_sha256,
+            action_sha256: &receipt.action_sha256,
+            verification_sha256: &receipt.verification_sha256,
+            before_sha256: &receipt.before_sha256,
+            after_sha256: &receipt.after_sha256,
+            synthetic_data_sha256: &receipt.synthetic_data_sha256,
+            workload_result_sha256: &receipt.workload_result_sha256,
+            workload_before_median_ms: receipt.workload_before_median_ms,
+            workload_after_median_ms: receipt.workload_after_median_ms,
+            check_outcomes: &receipt.check_outcomes,
+            complete_native_compatibility: receipt.complete_native_compatibility,
+            created_index_id: receipt.created_index_id,
+            created_index_definition_sha256: &receipt.created_index_definition_sha256,
+            ownership_marker_sha256: &receipt.ownership_marker_sha256,
+            statistics_nonrestorable: receipt.statistics_nonrestorable,
+            reviewed_limits: &receipt.reviewed_limits,
+            created_at: receipt.created_at,
+            expires_at: receipt.expires_at,
+            content_sha256: hash,
+        }
+    }
+    let mapping = mapping();
+    let current = receipt(&mapping, false);
+    let old_hash = digest(
+        b"relayne-helper-sql-rehearsal-receipt-v2",
+        &old_schema(&current, ""),
+    )
+    .unwrap();
+    let old_wire = serde_json::to_vec(&old_schema(&current, &old_hash)).unwrap();
+    assert!(!String::from_utf8_lossy(&old_wire).contains("production_before_sha256"));
+    let old: SqlRehearsalReceipt = serde_json::from_slice(&old_wire).unwrap();
+    old.validate(Utc::now()).unwrap();
+    assert_eq!(old.content_sha256(), old_hash);
+    assert!(old.production_before_sha256.is_none());
+}
+
 // Only fixed vocabulary crosses the guest evidence boundary. Native errors
 // may contain SQL or connection details and are never serialized.
 fn guest_failure_classification(error: &anyhow::Error) -> (&'static str, &'static str) {
@@ -345,6 +431,7 @@ fn receipt(mapping: &SqlTrialMapping, statistics: bool) -> SqlRehearsalReceipt {
         mapping_sha256: mapping.fingerprint().unwrap(),
         production_scope_sha256: mapping.production_scope_sha256.clone(),
         production_physical_sha256: mapping.production_physical_sha256.clone(),
+        production_before_sha256: Some(mapping.production_before_sha256.clone()),
         staging_scope_sha256: mapping.staging_scope_sha256.clone(),
         staging_physical_sha256: mapping.staging_physical_sha256.clone(),
         action_sha256: mapping.action_sha256.clone(),
@@ -454,8 +541,7 @@ fn mapping_requires_distinct_physical_database_and_exact_review_window() {
     assert!(alias.validate().is_err());
 }
 
-#[test]
-fn admitted_mapping_expiry_preserves_content_binding_and_receipt_hour() {
+fn production_coverage_fixture() -> (SqlTrialMapping, SqlRehearsalReceipt, HelperProposal) {
     use crate::helper_action::{
         RestorationSpec, SqlAction, SqlEngine, StatisticsLimitation, VerifiedSqlColumn,
         VerifiedSqlMetadata, VerifiedSqlObject,
@@ -548,6 +634,12 @@ fn admitted_mapping_expiry_preserves_content_binding_and_receipt_hour() {
         evidence_ids: vec![],
         statistics_limit_acknowledged: true,
     };
+    (mapping, checked, proposal)
+}
+
+#[test]
+fn admitted_mapping_expiry_preserves_content_binding_and_receipt_hour() {
+    let (mapping, checked, proposal) = production_coverage_fixture();
     let admitted_at = mapping.expires_at - Duration::milliseconds(1);
     let after_commit = mapping.expires_at + Duration::milliseconds(1);
     assert!(mapping.validate_at(admitted_at).is_ok());
@@ -555,6 +647,115 @@ fn admitted_mapping_expiry_preserves_content_binding_and_receipt_hour() {
     assert!(mapping.validate().is_err());
     assert_eq!(mapping.fingerprint().unwrap(), checked.mapping_sha256);
     assert!(checked.validate_for(&mapping, &proposal).is_ok());
+}
+
+#[test]
+fn production_coverage_rejects_wrong_action_checks_before_and_acknowledgement() {
+    use crate::helper_action::{SqlAction, VerifiedSqlObject};
+    let (mapping, receipt, proposal) = production_coverage_fixture();
+    let mut binding = crate::helper::journal::tests::permit().binding().clone();
+    binding.case_id = mapping.case_id;
+    binding.case_revision = mapping.case_revision;
+    binding.scope_sha256 = mapping.production_scope_sha256.clone();
+    binding.action = match &proposal.action {
+        CatalogAction::Sql { action, .. } => action.clone(),
+        _ => unreachable!(),
+    };
+    binding.verification_sha256 = receipt.verification_sha256.clone();
+    binding.before_sha256 = mapping.production_before_sha256.clone();
+    binding.statistics_limit_acknowledged = true;
+    assert!(
+        receipt
+            .validate_production_coverage(
+                mapping.case_id,
+                mapping.case_revision,
+                &proposal,
+                &binding
+            )
+            .is_ok()
+    );
+
+    let mut wrong_binding = binding.clone();
+    wrong_binding.before_sha256 = d('9');
+    assert!(
+        receipt
+            .validate_production_coverage(
+                mapping.case_id,
+                mapping.case_revision,
+                &proposal,
+                &wrong_binding
+            )
+            .is_err()
+    );
+    wrong_binding = binding.clone();
+    wrong_binding.action = SqlAction::PostgresAnalyze {
+        object: VerifiedSqlObject {
+            table: "another_table".into(),
+            ..binding.action.object().clone()
+        },
+    };
+    assert!(
+        receipt
+            .validate_production_coverage(
+                mapping.case_id,
+                mapping.case_revision,
+                &proposal,
+                &wrong_binding
+            )
+            .is_err()
+    );
+    wrong_binding = binding.clone();
+    wrong_binding.statistics_limit_acknowledged = false;
+    assert!(
+        receipt
+            .validate_production_coverage(
+                mapping.case_id,
+                mapping.case_revision,
+                &proposal,
+                &wrong_binding
+            )
+            .is_err()
+    );
+
+    let mut wrong_proposal = proposal.clone();
+    wrong_proposal.verification.checks.pop();
+    wrong_proposal.verification.criteria.pop();
+    assert!(
+        receipt
+            .validate_production_coverage(
+                mapping.case_id,
+                mapping.case_revision,
+                &wrong_proposal,
+                &binding
+            )
+            .is_err()
+    );
+    let mut wrong_proposal = proposal.clone();
+    wrong_proposal.verification.criteria[0].threshold_bits = 101f64.to_bits();
+    assert!(
+        receipt
+            .validate_production_coverage(
+                mapping.case_id,
+                mapping.case_revision,
+                &wrong_proposal,
+                &binding
+            )
+            .is_err()
+    );
+
+    let mut old_receipt = receipt.clone();
+    old_receipt.production_before_sha256 = None;
+    old_receipt.content_sha256 = old_receipt.fingerprint().unwrap();
+    assert!(
+        old_receipt
+            .validate_production_coverage(
+                mapping.case_id,
+                mapping.case_revision,
+                &proposal,
+                &binding
+            )
+            .is_err()
+    );
 }
 
 #[test]

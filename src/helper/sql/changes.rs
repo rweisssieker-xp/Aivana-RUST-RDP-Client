@@ -77,6 +77,15 @@ pub struct NativePreflight {
 }
 
 impl NativePreflight {
+    pub(crate) fn object_id(&self) -> u64 {
+        self.state.object_id
+    }
+    pub(crate) fn database_id(&self) -> u64 {
+        self.state.database_id
+    }
+    pub(crate) fn restoration_guard_digest(&self) -> Result<String> {
+        self.state.restoration_guard_digest()
+    }
     pub(crate) fn metadata_sha256(&self) -> &str {
         &self.metadata_sha256
     }
@@ -97,6 +106,41 @@ impl NativePreflight {
                 &self.state.physical_instance,
                 &self.state.database,
                 self.state.database_id,
+            ),
+        )
+    }
+}
+
+impl NativeState {
+    fn physical_digest(&self) -> Result<String> {
+        digest(
+            b"relayne-helper-physical-database-v1",
+            &(
+                self.engine,
+                &self.physical_instance,
+                &self.database,
+                self.database_id,
+            ),
+        )
+    }
+
+    fn restoration_guard_digest(&self) -> Result<String> {
+        digest(
+            b"relayne-helper-sql-restoration-guard-v1",
+            &(
+                self.engine,
+                &self.physical_instance,
+                &self.database,
+                self.database_id,
+                &self.schema,
+                self.schema_id,
+                &self.table,
+                self.object_id,
+                &self.principal,
+                &self.version,
+                &self.columns,
+                &self.grants,
+                &self.configuration,
             ),
         )
     }
@@ -937,6 +981,7 @@ pub struct NativeActionProof {
     created_index_id: Option<u64>,
     created_index_definition_sha256: Option<String>,
     ownership_marker_sha256: Option<String>,
+    ownership_marker: Option<String>,
 }
 
 impl NativeActionProof {
@@ -954,6 +999,7 @@ impl NativeActionProof {
             created_index_id: None,
             created_index_definition_sha256: None,
             ownership_marker_sha256: None,
+            ownership_marker: None,
         })
     }
 
@@ -973,6 +1019,7 @@ impl NativeActionProof {
             created_index_id: None,
             created_index_definition_sha256: None,
             ownership_marker_sha256: None,
+            ownership_marker: None,
         }
     }
     pub(crate) fn run_id(&self) -> uuid::Uuid {
@@ -998,6 +1045,9 @@ impl NativeActionProof {
     }
     pub(crate) fn ownership_marker_sha256(&self) -> Option<&str> {
         self.ownership_marker_sha256.as_deref()
+    }
+    pub(crate) fn ownership_marker(&self) -> Option<&str> {
+        self.ownership_marker.as_deref()
     }
     pub(crate) fn intent_state(&self) -> IntentState {
         match self.state {
@@ -1114,6 +1164,7 @@ async fn pg_execute(
         created_index_id: None,
         created_index_definition_sha256: None,
         ownership_marker_sha256: None,
+        ownership_marker: None,
     };
     let Ok((client, driver, _)) = pg_connection(scope).await else {
         proof.state = NativeActionState::Failed;
@@ -1186,7 +1237,7 @@ async fn pg_execute(
                 "PostgreSQL index readback changed"
             );
         }
-        Ok::<_, anyhow::Error>((committed_after, index_proof))
+        Ok::<_, anyhow::Error>((committed_after, index_proof, marker))
     };
     let result = tokio::select! {
         _ = cancel.cancelled() => Err(anyhow::anyhow!("SQL action canceled")),
@@ -1194,8 +1245,9 @@ async fn pg_execute(
             result.unwrap_or_else(|_| Err(anyhow::anyhow!("SQL action deadline elapsed"))),
     };
     match result {
-        Ok((after, index)) => {
+        Ok((after, index, marker)) => {
             proof.state = NativeActionState::Verified;
+            proof.ownership_marker = marker;
             proof.after_sha256 = digest(b"relayne-helper-native-sql-after-v1", &after).ok();
             if let Some((id, definition, marker)) = index {
                 proof.created_index_id = Some(id);
@@ -1246,6 +1298,7 @@ async fn tds_execute(
         created_index_id: None,
         created_index_definition_sha256: None,
         ownership_marker_sha256: None,
+        ownership_marker: None,
     };
     let Ok(mut client) = tds_connection(scope).await else {
         proof.state = NativeActionState::Failed;
@@ -1321,7 +1374,7 @@ async fn tds_execute(
                 "SQL Server index readback changed"
             );
         }
-        Ok::<_, anyhow::Error>((committed_after, index_proof))
+        Ok::<_, anyhow::Error>((committed_after, index_proof, marker))
     };
     let result = tokio::select! {
         _ = cancel.cancelled() => Err(anyhow::anyhow!("SQL action canceled")),
@@ -1329,8 +1382,9 @@ async fn tds_execute(
             result.unwrap_or_else(|_| Err(anyhow::anyhow!("SQL action deadline elapsed"))),
     };
     match result {
-        Ok((after, index)) => {
+        Ok((after, index, marker)) => {
             proof.state = NativeActionState::Verified;
+            proof.ownership_marker = marker;
             proof.after_sha256 = digest(b"relayne-helper-native-sql-after-v1", &after).ok();
             if let Some((id, definition, marker)) = index {
                 proof.created_index_id = Some(id);
@@ -1415,6 +1469,239 @@ pub(crate) async fn execute_sql_change(
         "Native run identity changed"
     );
     Ok(proof)
+}
+
+/// The production path uses the same closed builder and transactional native
+/// executors as rehearsal. Its caller must have obtained a started intent from
+/// the shared final case/review gate; no SQL text or target is accepted here.
+pub(crate) async fn execute_sql_production(
+    permit: &DispatchPermit,
+    intent_id: IntentId,
+    journal_path: &Path,
+    scope: &BoundScope,
+    metadata: &VerifiedSqlMetadata,
+    before: &NativePreflight,
+    production_physical_sha256: &str,
+    cancel: CancellationToken,
+) -> Result<NativeActionProof> {
+    ActionJournal::require_durable_started(journal_path, intent_id, permit)?;
+    let binding = permit.binding();
+    ensure!(
+        binding.run_kind == RunKind::Production
+            && matches!(
+                binding.proof,
+                crate::helper_approval::ActionProof::SqlRehearsalReceipt { .. }
+            ),
+        "Only protected SQL rehearsal receipt can authorize production"
+    );
+    ensure!(
+        before.observed_at <= Utc::now()
+            && Utc::now().signed_duration_since(before.observed_at)
+                < chrono::Duration::seconds(120),
+        "Production native before-state expired"
+    );
+    ensure!(
+        scope.digest()? == binding.scope_sha256
+            && scope.credential_scope_digest()? == binding.credential_scope_sha256
+            && before.credential_scope_sha256 == binding.credential_scope_sha256
+            && before.metadata_sha256 == binding.metadata_sha256
+            && before.before_sha256 == binding.before_sha256
+            && before.physical_digest()? == production_physical_sha256,
+        "Production target, credential, metadata, or before-state changed"
+    );
+    let prepared = prepare_sql_change(&binding.action, scope, metadata)?;
+    let identity = NativeActionIdentity::from_permit(permit)?;
+    let proof = match binding.action.object().engine {
+        SqlEngine::Postgres => {
+            pg_execute(
+                scope,
+                &binding.action,
+                &prepared,
+                before,
+                permit,
+                identity,
+                cancel,
+            )
+            .await
+        }
+        SqlEngine::SqlServer => {
+            tds_execute(
+                scope,
+                &binding.action,
+                &prepared,
+                before,
+                permit,
+                identity,
+                cancel,
+            )
+            .await
+        }
+    };
+    ensure!(
+        proof.run_id() == binding.run_id,
+        "Production native run identity changed"
+    );
+    Ok(proof)
+}
+
+fn exact_original_index(
+    state: &NativeState,
+    receipt: &super::restoration::ProductionReceipt,
+) -> Result<()> {
+    let observed = state
+        .indexes
+        .iter()
+        .map(|index| super::restoration::ObservedIndex {
+            id: index.id,
+            name: &index.name,
+            definition: &index.definition,
+            valid: index.valid,
+            marker: index.ownership.as_deref(),
+        })
+        .collect::<Vec<_>>();
+    super::restoration::verify_original_index(
+        receipt,
+        &state.physical_digest()?,
+        state.database_id,
+        state.object_id,
+        &state.restoration_guard_digest()?,
+        &observed,
+    )
+}
+
+fn original_index_absent(
+    state: &NativeState,
+    receipt: &super::restoration::ProductionReceipt,
+) -> Result<()> {
+    let index = receipt
+        .index()
+        .ok_or_else(|| anyhow::anyhow!("Index restoration proof missing"))?;
+    ensure!(
+        state.physical_digest()? == receipt.physical_sha256()
+            && state.object_id == receipt.object_id()
+            && state.restoration_guard_digest()? == receipt.guard_sha256()
+            && state
+                .indexes
+                .iter()
+                .all(|candidate| candidate.id != index.id && candidate.name != index.name),
+        "Restored original index readback incomplete"
+    );
+    Ok(())
+}
+
+/// Called only after a durable one-shot restoration intent. Every native
+/// failure, including an ambiguous COMMIT, is intervention and never retried.
+pub(crate) async fn restore_exact_production_index(
+    receipt: &super::restoration::ProductionReceipt,
+    cancel: CancellationToken,
+) -> super::restoration::RestorationOutcome {
+    use super::restoration::RestorationOutcome;
+    if receipt.validate().is_err() || receipt.index().is_none() || cancel.is_cancelled() {
+        return RestorationOutcome::NeedsIntervention;
+    }
+    #[cfg(test)]
+    {
+        RESTORE_TEST_ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let delay = RESTORE_TEST_DELAY_MS.load(std::sync::atomic::Ordering::SeqCst);
+        if delay > 0 {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+        }
+    }
+    let scope = receipt.scope();
+    let action = receipt.action();
+    let result: Result<()> = match action {
+        SqlAction::PostgresCreateIndex { object, index, .. } => {
+            async {
+                let (client, driver, _) = pg_connection(scope).await?;
+                let transaction = async {
+                    client.batch_execute("BEGIN").await?;
+                    client
+                        .batch_execute(
+                            "SET LOCAL statement_timeout = '30s'; SET LOCAL lock_timeout = '5s'",
+                        )
+                        .await?;
+                    let fresh = pg_state(&client, scope).await?;
+                    exact_original_index(&fresh, receipt)?;
+                    client
+                        .batch_execute(&format!(
+                            "DROP INDEX {}.{}",
+                            pg_ident(&object.schema),
+                            pg_ident(index)
+                        ))
+                        .await?;
+                    let after = pg_state(&client, scope).await?;
+                    original_index_absent(&after, receipt)?;
+                    client.batch_execute("COMMIT").await?;
+                    let committed = pg_state(&client, scope).await?;
+                    original_index_absent(&committed, receipt)
+                };
+                let outcome = tokio::select! {
+                    _ = cancel.cancelled() => anyhow::bail!("Restoration canceled"),
+                    value = tokio::time::timeout(ACTION_LIMIT, transaction) =>
+                        value.context("Restoration deadline elapsed")?,
+                };
+                driver.abort();
+                outcome
+            }
+            .await
+        }
+        SqlAction::SqlServerCreateIndex { object, index, .. } => {
+            async {
+                let mut client = tds_connection(scope).await?;
+                let transaction = async {
+                    tds_execute_sql(&mut client, "SET LOCK_TIMEOUT 5000; BEGIN TRAN").await?;
+                    let fresh = tds_state(&mut client, scope).await?;
+                    exact_original_index(&fresh, receipt)?;
+                    tds_execute_sql(
+                        &mut client,
+                        &format!(
+                            "DROP INDEX {} ON {}.{}",
+                            tds_ident(index),
+                            tds_ident(&object.schema),
+                            tds_ident(&object.table)
+                        ),
+                    )
+                    .await?;
+                    let after = tds_state(&mut client, scope).await?;
+                    original_index_absent(&after, receipt)?;
+                    tds_execute_sql(&mut client, "COMMIT TRAN").await?;
+                    let committed = tds_state(&mut client, scope).await?;
+                    original_index_absent(&committed, receipt)
+                };
+                tokio::select! {
+                    _ = cancel.cancelled() => anyhow::bail!("Restoration canceled"),
+                    value = tokio::time::timeout(ACTION_LIMIT, transaction) =>
+                        value.context("Restoration deadline elapsed")?,
+                }
+            }
+            .await
+        }
+        _ => Err(anyhow::anyhow!(
+            "Statistics cannot be restored to prior state"
+        )),
+    };
+    if result.is_ok() {
+        RestorationOutcome::Restored
+    } else {
+        RestorationOutcome::NeedsIntervention
+    }
+}
+
+#[cfg(test)]
+static RESTORE_TEST_ATTEMPTS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static RESTORE_TEST_DELAY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+pub(crate) fn set_restore_test_delay(delay_ms: u64) -> usize {
+    RESTORE_TEST_DELAY_MS.store(delay_ms, std::sync::atomic::Ordering::SeqCst);
+    RESTORE_TEST_ATTEMPTS.swap(0, std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(test)]
+pub(crate) fn restore_test_attempts() -> usize {
+    RESTORE_TEST_ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 #[cfg(test)]

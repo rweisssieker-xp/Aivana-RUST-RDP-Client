@@ -3,6 +3,7 @@
 use super::approval::DispatchPermit;
 use super::sql::changes::{NativeActionProof, NativeActionState};
 use super::sql::rehearsal::SqlRehearsalReceipt;
+use super::sql::restoration::{ProductionReceipt, RestorationOutcome};
 use crate::helper_approval::{ActionOutcomeAckV2, ActionOutcomeEventV2, ActionOutcomeV2};
 use anyhow::{Result, ensure};
 use chrono::{DateTime, Utc};
@@ -51,6 +52,10 @@ pub struct IntentRecord {
     pub native_receipt_sha256: Option<String>,
     #[serde(default)]
     pub native_after_sha256: Option<String>,
+    #[serde(default)]
+    pub restoration_outcome: Option<RestorationOutcome>,
+    #[serde(default)]
+    pub restoration_pending: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -139,6 +144,42 @@ fn lock(path: &Path) -> Result<std::fs::File> {
     Ok(options.open(path.with_extension("lock"))?)
 }
 impl ActionJournal {
+    #[cfg(test)]
+    pub(crate) fn test_seed_verified_production(
+        &mut self,
+        run_id: Uuid,
+        case_id: Uuid,
+        approval_id: Uuid,
+        consume_id: Uuid,
+        binding_fingerprint: String,
+        production_receipt_sha256: String,
+        after_sha256: String,
+    ) -> Result<()> {
+        let now = Utc::now();
+        self.intents.push(IntentRecord {
+            id: Uuid::new_v4(),
+            case_id,
+            approval_id,
+            consume_id,
+            run_id,
+            binding_fingerprint,
+            state: IntentState::Verified,
+            prepared_at: now,
+            updated_at: now,
+            outcome_event: None,
+            outcome_note: None,
+            outcome_acknowledged: false,
+            outcome_corrections: Vec::new(),
+            native_receipt_sha256: Some(production_receipt_sha256),
+            native_after_sha256: Some(after_sha256),
+            restoration_outcome: None,
+            restoration_pending: false,
+        });
+        self.save()
+    }
+    pub(crate) fn storage_path(&self) -> &Path {
+        &self.path
+    }
     pub fn path() -> Result<PathBuf> {
         crate::security::app_data_file("relayne-helper-action-journal.dpapi")
     }
@@ -191,6 +232,13 @@ impl ActionJournal {
                         .as_deref()
                         .is_none_or(crate::helper_action::valid_digest),
                 "Invalid native SQL outcome reference"
+            );
+            ensure!(
+                !(item.restoration_pending && item.restoration_outcome.is_some())
+                    && (!(item.restoration_pending || item.restoration_outcome.is_some())
+                        || (item.state == IntentState::Verified
+                            && item.native_receipt_sha256.is_some())),
+                "Restoration state is not bound to verified native effect"
             );
             if let Some(event) = &item.outcome_event {
                 ensure!(
@@ -381,6 +429,8 @@ impl ActionJournal {
             outcome_corrections: Vec::new(),
             native_receipt_sha256: None,
             native_after_sha256: None,
+            restoration_outcome: None,
+            restoration_pending: false,
         });
         self.save()?;
         Ok(id)
@@ -673,6 +723,124 @@ impl ActionJournal {
         next.save()?;
         *self = next;
         Ok(event)
+    }
+
+    /// A production Verified event can only be derived from the separately
+    /// protected original-target receipt and the same sealed native proof.
+    pub(crate) fn record_production_outcome(
+        &mut self,
+        id: IntentId,
+        proof: &NativeActionProof,
+        receipt: &ProductionReceipt,
+    ) -> Result<ActionOutcomeEventV2> {
+        let item = self
+            .intents
+            .iter()
+            .find(|item| item.id == id)
+            .ok_or_else(|| anyhow::anyhow!("Production intent missing"))?;
+        let identity = proof.identity();
+        ensure!(
+            item.state == IntentState::DispatchStarted
+                && item.run_id == identity.run_id()
+                && item.case_id == identity.case_id()
+                && item.approval_id == identity.approval_id()
+                && item.consume_id == identity.consume_id()
+                && item.binding_fingerprint == identity.binding_fingerprint()
+                && proof.state() == NativeActionState::Verified,
+            "Production native outcome differs durable started intent"
+        );
+        receipt.validate_native_proof(proof, item)?;
+        let mut next = self.clone();
+        next.reconcile_inner(proof.run_id(), Some(IntentState::Verified), false)?;
+        let item = next
+            .intents
+            .iter_mut()
+            .find(|item| item.id == id)
+            .ok_or_else(|| anyhow::anyhow!("Production intent missing"))?;
+        item.native_receipt_sha256 = Some(receipt.content_sha256().to_owned());
+        item.native_after_sha256 = proof.after_sha256().map(str::to_owned);
+        let event = next.queue_outcome_inner(id, ActionOutcomeV2::Verified, None, false)?;
+        next.save()?;
+        *self = next;
+        Ok(event)
+    }
+
+    pub(crate) fn record_restoration_outcome(
+        &mut self,
+        receipt: &ProductionReceipt,
+        outcome: RestorationOutcome,
+    ) -> Result<()> {
+        receipt.validate()?;
+        super::sql::restoration::require_terminal_restoration(receipt, outcome)?;
+        ensure!(
+            super::sql::restoration::load_production_receipt(receipt.run_id())?.content_sha256()
+                == receipt.content_sha256(),
+            "Original production receipt changed"
+        );
+        let mut next = self.clone();
+        let item = next
+            .intents
+            .iter_mut()
+            .find(|item| item.run_id == receipt.run_id())
+            .ok_or_else(|| anyhow::anyhow!("Original production intent missing"))?;
+        ensure!(
+            item.state == IntentState::Verified
+                && item.native_receipt_sha256.as_deref() == Some(receipt.content_sha256()),
+            "Restoration does not match verified original production action"
+        );
+        if let Some(existing) = item.restoration_outcome {
+            ensure!(existing == outcome, "Restoration outcome already recorded");
+            return Ok(());
+        }
+        item.restoration_outcome = Some(outcome);
+        item.restoration_pending = false;
+        item.updated_at = Utc::now();
+        next.save()?;
+        *self = next;
+        Ok(())
+    }
+
+    pub(crate) fn record_restoration_intent(&mut self, receipt: &ProductionReceipt) -> Result<()> {
+        receipt.validate()?;
+        ensure!(
+            super::sql::restoration::load_production_receipt(receipt.run_id())?.content_sha256()
+                == receipt.content_sha256(),
+            "Original production receipt changed"
+        );
+        let mut next = self.clone();
+        let item = next
+            .intents
+            .iter_mut()
+            .find(|item| item.run_id == receipt.run_id())
+            .ok_or_else(|| anyhow::anyhow!("Original production intent missing"))?;
+        ensure!(
+            item.state == IntentState::Verified
+                && item.native_receipt_sha256.as_deref() == Some(receipt.content_sha256())
+                && item.restoration_outcome.is_none()
+                && !item.restoration_pending,
+            "Original run already restored or restoration pending"
+        );
+        item.restoration_pending = true;
+        item.updated_at = Utc::now();
+        next.save()?;
+        *self = next;
+        Ok(())
+    }
+
+    pub(crate) fn has_open_intervention(&self, case_id: Uuid, current_run: Uuid) -> bool {
+        self.intents.iter().any(|item| {
+            item.case_id == case_id
+                && (matches!(
+                    item.state,
+                    IntentState::NeedsIntervention | IntentState::OutcomeUnknown
+                ) || (item.run_id != current_run
+                    && matches!(
+                        item.state,
+                        IntentState::Prepared | IntentState::DispatchStarted
+                    ))
+                    || item.restoration_pending
+                    || item.restoration_outcome == Some(RestorationOutcome::NeedsIntervention))
+        })
     }
     pub fn acknowledge_outcome(&mut self, ack: &ActionOutcomeAckV2) -> Result<()> {
         ensure!(ack.accepted, "Team did not accept outcome");

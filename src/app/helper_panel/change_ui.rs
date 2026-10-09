@@ -1,6 +1,9 @@
 //! Read-only catalog and proposal review; there is intentionally no dispatch control.
 use super::*;
 use crate::helper::catalog::{Applicability, Catalog, CatalogEntry, CatalogTrust, ProposalParams};
+use crate::helper_approval::{
+    ActionApprovalStateV2, ConsumeActionApprovalV2, CreateActionApprovalV2,
+};
 
 fn publisher_enrollment(
     state: &mut HelperState,
@@ -650,6 +653,7 @@ fn action_authority(
             }
         }
     }
+    show_production_controls(state, ui, case, team);
     if let Some(id) = state.action_ui.intent {
         ui.label(format!(
             "Durable prepared intent {id}; awaiting executor and explicit reconciliation."
@@ -732,6 +736,276 @@ fn action_authority(
 }
 
 /// The protected local journal remains usable without a team connection.
+fn show_production_controls(
+    state: &mut HelperState,
+    ui: &mut Ui,
+    case: &HelperCase,
+    team: &super::super::team_panel::TeamState,
+) {
+    let Some(rehearsal) = state.action_ui.staging_receipt.clone() else {
+        return;
+    };
+    ui.separator();
+    ui.heading("Production SQL promotion");
+    ui.label(format!(
+        "Protected native rehearsal {} · original database {}",
+        rehearsal.content_sha256(),
+        rehearsal.production_physical_sha256()
+    ));
+    ui.strong("A separate current production approval and fresh native before-state are required.");
+    if state.action_ui.production_approval.is_none()
+        && state.action_ui.pending.is_none()
+        && state.action_ui.organization_confirmed
+        && ui.button("Request production SQL approval").clicked()
+    {
+        let case = case.clone();
+        let proposal = state.reviewed_proposal.clone();
+        let organization = state.action_ui.organization.clone();
+        let case_path = state.path.clone();
+        let rehearsal_for_request = rehearsal.clone();
+        let client = team.repair_client().map(|value| value.0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        state.action_ui.pending = Some(rx);
+        std::thread::spawn(move || {
+            let result = (|| -> anyhow::Result<_> {
+                let proposal =
+                    proposal.ok_or_else(|| anyhow::anyhow!("Reviewed proposal missing"))?;
+                let organization =
+                    organization.ok_or_else(|| anyhow::anyhow!("Team identity missing"))?;
+                let case_path = case_path.ok_or_else(|| anyhow::anyhow!("Case store missing"))?;
+                let journal_path = crate::helper::journal::ActionJournal::path()?;
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
+                let native =
+                    runtime.block_on(crate::helper::approval::NativeDispatchProof::collect(
+                        &case,
+                        &proposal,
+                        tokio_util::sync::CancellationToken::new(),
+                    ))?;
+                crate::helper::approval::record_local_review(
+                    &case_path,
+                    &journal_path,
+                    &case,
+                    &proposal,
+                )?;
+                let journal = crate::helper::journal::ActionJournal::load(&journal_path)?;
+                let binding = crate::helper::approval::production_request_binding(
+                    &case,
+                    &proposal,
+                    organization.clone(),
+                    &native,
+                    &rehearsal_for_request,
+                    &journal,
+                )?;
+                let client = client?;
+                let caps = client.helper_capabilities()?;
+                anyhow::ensure!(
+                    caps.organization_sha256 == organization && caps.authority_version == 2,
+                    "Team organization identity changed"
+                );
+                client
+                    .request_action_v2(&CreateActionApprovalV2 {
+                        request_id: Uuid::new_v4(),
+                        binding,
+                    })
+                    .map(super::ActionUiEvent::ProductionRequested)
+            })();
+            let _ = tx.send(result);
+        });
+    }
+    if let Some(approval) = state.action_ui.production_approval.clone() {
+        ui.label(format!(
+            "Production approval {:?} · run {} · expires {}",
+            approval.state, approval.binding.run_id, approval.expires_at
+        ));
+        ui.monospace(format!(
+            "Exact production fingerprint: {}",
+            approval.fingerprint
+        ));
+        if state.action_ui.pending.is_none() && ui.button("Refresh production approval").clicked() {
+            let client = team.repair_client().map(|value| value.0);
+            let (tx, rx) = std::sync::mpsc::channel();
+            state.action_ui.pending = Some(rx);
+            std::thread::spawn(move || {
+                let _ = tx.send(client.and_then(|client| {
+                    client
+                        .action_v2(approval.id)
+                        .map(super::ActionUiEvent::ProductionRefreshed)
+                }));
+            });
+        }
+        if approval.state == ActionApprovalStateV2::Approved
+            && state.action_ui.production_consume.is_none()
+            && !state.action_ui.production_consume_attempted
+            && approval.expires_at > chrono::Utc::now()
+            && state.action_ui.pending.is_none()
+            && ui
+                .button("Consume production approval for final native check")
+                .clicked()
+        {
+            state.action_ui.production_consume_attempted = true;
+            let client = team.repair_client().map(|value| value.0);
+            let (tx, rx) = std::sync::mpsc::channel();
+            state.action_ui.pending = Some(rx);
+            std::thread::spawn(move || {
+                let _ = tx.send(client.and_then(|client| {
+                    client
+                        .consume_action_v2(
+                            approval.id,
+                            &ConsumeActionApprovalV2 {
+                                binding: approval.binding,
+                            },
+                        )
+                        .map(super::ActionUiEvent::ProductionConsumed)
+                }));
+            });
+        }
+    }
+    if state.action_ui.production_consume_attempted && state.action_ui.production_consume.is_none()
+    {
+        ui.strong("Production consumption may have reached team. Reconcile; never consume or run SQL twice.");
+    }
+    if let (Some(approval), Some(consumed)) = (
+        state.action_ui.production_approval.clone(),
+        state.action_ui.production_consume.clone(),
+    ) {
+        ui.label(format!(
+            "Production consent consumed once: {}",
+            consumed.receipt().consume_id
+        ));
+        let already_journaled = crate::helper::journal::ActionJournal::path()
+            .and_then(|path| crate::helper::journal::ActionJournal::load(&path))
+            .map(|journal| {
+                journal
+                    .intents()
+                    .iter()
+                    .any(|item| item.run_id == approval.binding.run_id)
+            })
+            .unwrap_or(true);
+        if already_journaled {
+            ui.strong("This production run has a durable intent or outcome. Use journal reconciliation; SQL cannot be replayed.");
+        }
+        if state.action_ui.pending.is_none()
+            && !already_journaled
+            && state.action_ui.production_receipt.is_none()
+            && ui
+                .button("Apply approved SQL to original production target")
+                .clicked()
+        {
+            let case = case.clone();
+            let proposal = state.reviewed_proposal.clone();
+            let case_path = state.path.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            state.action_ui.pending = Some(rx);
+            std::thread::spawn(move || {
+                let result = (|| -> anyhow::Result<_> {
+                    let proposal =
+                        proposal.ok_or_else(|| anyhow::anyhow!("Reviewed proposal missing"))?;
+                    let case_path =
+                        case_path.ok_or_else(|| anyhow::anyhow!("Case store missing"))?;
+                    let journal_path = crate::helper::journal::ActionJournal::path()?;
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()?;
+                    let native =
+                        runtime.block_on(crate::helper::approval::NativeDispatchProof::collect(
+                            &case,
+                            &proposal,
+                            tokio_util::sync::CancellationToken::new(),
+                        ))?;
+                    let intent = crate::helper::approval::authorize_and_record_intent(
+                        &case_path,
+                        &journal_path,
+                        &proposal,
+                        &approval.binding,
+                        &consumed,
+                        &native,
+                    )?;
+                    let refreshed =
+                        runtime.block_on(crate::helper::approval::NativeDispatchProof::collect(
+                            &case,
+                            &proposal,
+                            tokio_util::sync::CancellationToken::new(),
+                        ))?;
+                    let permit = crate::helper::approval::authorize_and_start_dispatch(
+                        &case_path,
+                        &journal_path,
+                        intent,
+                        &proposal,
+                        &approval.binding,
+                        &consumed,
+                        &refreshed,
+                    )?;
+                    let launch = crate::helper::sql::promotion::ProductionLaunch::from_authorized(
+                        &case,
+                        &proposal,
+                        &rehearsal,
+                        refreshed,
+                        permit,
+                        intent,
+                        &journal_path,
+                    )?;
+                    let mut journal = crate::helper::journal::ActionJournal::load(&journal_path)?;
+                    runtime
+                        .block_on(crate::helper::sql::promotion::apply_sql_production(
+                            launch,
+                            &mut journal,
+                            tokio_util::sync::CancellationToken::new(),
+                        ))
+                        .map(super::ActionUiEvent::Produced)
+                })();
+                let _ = tx.send(result);
+            });
+        }
+    }
+    if let Some(receipt) = state.action_ui.production_receipt.as_ref() {
+        ui.label(format!(
+            "Original production run {} · physical database {} · protected receipt {}",
+            receipt.run_id(),
+            receipt.physical_sha256(),
+            receipt.content_sha256()
+        ));
+        if let Some(index) = receipt.index() {
+            ui.label(format!(
+                "Owned index {} · native ID {} · definition {} · marker digest {}",
+                index.name, index.id, index.definition_sha256, index.marker_sha256
+            ));
+            if state.action_ui.pending.is_none()
+                && state.action_ui.restoration_outcome.is_none()
+                && ui
+                    .button("Restore this exact original production index")
+                    .clicked()
+            {
+                let run_id = receipt.run_id();
+                let (tx, rx) = std::sync::mpsc::channel();
+                state.action_ui.pending = Some(rx);
+                std::thread::spawn(move || {
+                    let result = (|| -> anyhow::Result<_> {
+                        let path = crate::helper::journal::ActionJournal::path()?;
+                        let mut journal = crate::helper::journal::ActionJournal::load(&path)?;
+                        let runtime = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()?;
+                        runtime
+                            .block_on(crate::helper::sql::restoration::restore_index(
+                                run_id,
+                                &mut journal,
+                                tokio_util::sync::CancellationToken::new(),
+                            ))
+                            .map(super::ActionUiEvent::Restored)
+                    })();
+                    let _ = tx.send(result);
+                });
+            }
+        } else {
+            ui.strong(
+                "Statistics maintenance is non-restorable; the acknowledged limitation applies.",
+            );
+        }
+    }
+}
+
 fn show_local_journal(
     state: &mut HelperState,
     ui: &mut Ui,
@@ -768,6 +1042,58 @@ fn show_local_journal(
             "Run {} · {:?} · first outcome acknowledged {}",
             intent.run_id, intent.state, intent.outcome_acknowledged
         ));
+        if let Ok(production) =
+            crate::helper::sql::restoration::load_production_receipt(intent.run_id)
+        {
+            if intent.native_receipt_sha256.as_deref() == Some(production.content_sha256()) {
+                ui.label(format!(
+                    "Original production target {} · restoration {:?} · pending {}",
+                    production.physical_sha256(),
+                    intent.restoration_outcome,
+                    intent.restoration_pending
+                ));
+                if intent.restoration_pending
+                    || intent.restoration_outcome
+                        == Some(
+                            crate::helper::sql::restoration::RestorationOutcome::NeedsIntervention,
+                        )
+                {
+                    ui.strong("Restoration outcome requires human reconciliation. Later SQL targets are blocked.");
+                }
+                if production.index().is_some()
+                    && intent.restoration_outcome.is_none()
+                    && !intent.restoration_pending
+                    && state.action_ui.pending.is_none()
+                    && ui
+                        .button(format!(
+                            "Restore exact owned index for run {}",
+                            intent.run_id
+                        ))
+                        .clicked()
+                {
+                    let run_id = intent.run_id;
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    state.action_ui.pending = Some(rx);
+                    std::thread::spawn(move || {
+                        let result = (|| -> anyhow::Result<_> {
+                            let path = ActionJournal::path()?;
+                            let mut journal = ActionJournal::load(&path)?;
+                            let runtime = tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build()?;
+                            runtime
+                                .block_on(crate::helper::sql::restoration::restore_index(
+                                    run_id,
+                                    &mut journal,
+                                    tokio_util::sync::CancellationToken::new(),
+                                ))
+                                .map(super::ActionUiEvent::Restored)
+                        })();
+                        let _ = tx.send(result);
+                    });
+                }
+            }
+        }
         if matches!(
             intent.state,
             IntentState::DispatchStarted | IntentState::OutcomeUnknown

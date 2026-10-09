@@ -35,6 +35,11 @@ struct ActionUiState {
     staging_confirmed: bool,
     staging_mapping: Option<crate::helper::sql::rehearsal::SqlTrialMapping>,
     staging_receipt: Option<crate::helper::sql::rehearsal::SqlRehearsalReceipt>,
+    production_approval: Option<crate::helper_approval::ActionApprovalV2>,
+    production_consume: Option<crate::team_client::VerifiedConsumeV2>,
+    production_consume_attempted: bool,
+    production_receipt: Option<crate::helper::sql::restoration::ProductionReceipt>,
+    restoration_outcome: Option<crate::helper::sql::restoration::RestorationOutcome>,
 }
 enum ActionUiEvent {
     Identity(String),
@@ -42,6 +47,11 @@ enum ActionUiEvent {
     Refreshed(crate::helper_approval::ActionApprovalV2),
     Consumed(crate::team_client::VerifiedConsumeV2),
     Rehearsed(crate::helper::sql::rehearsal::SqlRehearsalReceipt),
+    ProductionRequested(crate::helper_approval::ActionApprovalV2),
+    ProductionRefreshed(crate::helper_approval::ActionApprovalV2),
+    ProductionConsumed(crate::team_client::VerifiedConsumeV2),
+    Produced(crate::helper::sql::promotion::ProductionOutcome),
+    Restored(crate::helper::sql::restoration::RestorationOutcome),
 }
 
 pub(super) struct HelperState {
@@ -409,6 +419,30 @@ impl AivanaApp {
                         receipt.content_sha256()
                     );
                     self.helper.action_ui.staging_receipt = Some(receipt);
+                }
+                Ok(ActionUiEvent::ProductionRequested(item)) => {
+                    self.helper.notice = format!("Production approval requested: {:?}", item.state);
+                    self.helper.action_ui.production_approval = Some(item);
+                }
+                Ok(ActionUiEvent::ProductionRefreshed(item)) => {
+                    self.helper.action_ui.production_approval = Some(item);
+                    self.helper.notice = "Production approval status refreshed".into();
+                }
+                Ok(ActionUiEvent::ProductionConsumed(receipt)) => {
+                    self.helper.action_ui.production_consume = Some(receipt);
+                    self.helper.notice = "Production consent consumed; fresh native check and durable intent required".into();
+                }
+                Ok(ActionUiEvent::Produced(outcome)) => {
+                    self.helper.notice = format!(
+                        "Production native outcome saved: {:?} (whole-case verification remains separate)",
+                        outcome.event.outcome
+                    );
+                    self.helper.action_ui.production_receipt = outcome.receipt;
+                }
+                Ok(ActionUiEvent::Restored(outcome)) => {
+                    self.helper.notice =
+                        format!("Original production index restoration: {outcome:?}");
+                    self.helper.action_ui.restoration_outcome = Some(outcome);
                 }
                 Err(error) => {
                     self.helper.notice = format!("Action authority request failed: {error}")

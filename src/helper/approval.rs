@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 /// Immutable observations from local collectors. A launcher must re-observe live
 /// remote metadata/credential/proof before calling the case-store gate below.
-struct DispatchObservation {
+pub(crate) struct DispatchObservation {
     metadata_sha256: String,
     before_sha256: String,
     credential_scope_sha256: String,
@@ -65,6 +65,12 @@ impl NativeDispatchProof {
     }
     pub(crate) fn native(&self) -> &super::sql::changes::NativePreflight {
         &self.native
+    }
+    pub(crate) fn observation(&self) -> &DispatchObservation {
+        &self.observation
+    }
+    pub(crate) fn into_native(self) -> super::sql::changes::NativePreflight {
+        self.native
     }
 }
 
@@ -184,11 +190,85 @@ pub fn staged_request_binding(
     Ok(binding)
 }
 
+pub fn production_request_binding(
+    case: &HelperCase,
+    proposal: &HelperProposal,
+    organization_sha256: String,
+    native: &NativeDispatchProof,
+    rehearsal: &super::sql::rehearsal::SqlRehearsalReceipt,
+    journal: &ActionJournal,
+) -> Result<ActionBindingV2> {
+    let now = Utc::now();
+    ensure!(
+        valid_digest(&organization_sha256),
+        "Unreviewed team organization identity"
+    );
+    ensure!(
+        proposal.case_id == case.id() && proposal.case_revision == case.revision(),
+        "Stale production proposal"
+    );
+    let CatalogAction::Sql { action, metadata } = &proposal.action else {
+        anyhow::bail!("Only typed SQL actions can be promoted")
+    };
+    action.validate(metadata)?;
+    let scope = case
+        .scopes()
+        .iter()
+        .find(|scope| scope.digest().ok().as_deref() == Some(metadata.object.scope_sha256.as_str()))
+        .ok_or_else(|| anyhow::anyhow!("Production scope missing"))?;
+    ensure!(
+        scope
+            .credential()
+            .is_some_and(|credential| credential.purpose == CredentialPurpose::ControlledChange)
+            && native.physical_sha256() == rehearsal.production_physical_sha256(),
+        "Production scope or physical database differs rehearsal"
+    );
+    let expires_at = std::cmp::min(now + chrono::Duration::minutes(3), rehearsal.expires_at());
+    let binding = ActionBindingV2 {
+        version: 2,
+        case_id: case.id(),
+        case_revision: case.revision(),
+        evidence_revision: case.evidence_revision(),
+        run_id: Uuid::new_v4(),
+        run_kind: RunKind::Production,
+        organization_sha256,
+        scope_sha256: scope.digest()?,
+        credential_scope_sha256: scope.credential_scope_digest()?,
+        action_version: proposal.action_version,
+        action: action.clone(),
+        metadata_sha256: digest(b"relayne-helper-sql-metadata-v2", metadata)?,
+        before_sha256: native.observation.before_sha256.clone(),
+        plan_sha256: proposal.plan_sha256.clone(),
+        verification_sha256: digest(
+            b"relayne-helper-reviewed-verification-v2",
+            &proposal.verification,
+        )?,
+        proof: ActionProof::SqlRehearsalReceipt {
+            receipt_id: rehearsal.receipt_id(),
+            receipt_sha256: rehearsal.content_sha256().to_owned(),
+            expires_at,
+        },
+        restoration: proposal.restoration.clone(),
+        statistics_limit_acknowledged: proposal.statistics_limit_acknowledged,
+        captured_at: now,
+        expires_at,
+    };
+    binding.validate(now)?;
+    let current = DispatchContext {
+        case,
+        proposal,
+        journal,
+        observation: &native.observation,
+    };
+    super::sql::promotion::check_sql_promotion(case, proposal, rehearsal, &binding, &current, now)?;
+    Ok(binding)
+}
+
 pub struct DispatchContext<'a> {
-    case: &'a HelperCase,
-    proposal: &'a HelperProposal,
-    journal: &'a ActionJournal,
-    observation: &'a DispatchObservation,
+    pub(crate) case: &'a HelperCase,
+    pub(crate) proposal: &'a HelperProposal,
+    pub(crate) journal: &'a ActionJournal,
+    pub(crate) observation: &'a DispatchObservation,
 }
 /// Only this authority module can mint a permit. It cannot be cloned,
 /// serialized or constructed from a provider/imported value.
@@ -258,6 +338,12 @@ pub fn authorize_dispatch(
     ensure!(
         !is_blocked(binding.case_id)?,
         "Case edit or review withdrawal suspended action authority"
+    );
+    ensure!(
+        !current
+            .journal
+            .has_open_intervention(binding.case_id, binding.run_id),
+        "Case has unresolved native or restoration outcome"
     );
     ensure!(
         receipt.receipt().approval_id != Uuid::nil()
@@ -384,15 +470,37 @@ pub fn authorize_dispatch(
             review_sha256 == &reviewed.review_sha256,
             "Staging review proof changed"
         ),
-        (RunKind::Production, ActionProof::SqlRehearsalReceipt { .. }) => anyhow::bail!(
-            "Protected SQL rehearsal receipt verification is registered by the Wave 14 executor"
-        ),
+        (RunKind::Production, ActionProof::SqlRehearsalReceipt { receipt_id, .. }) => {
+            let rehearsal = super::sql::rehearsal::load_protected_rehearsal_by_id(*receipt_id)?;
+            super::sql::promotion::check_sql_promotion(
+                current.case,
+                current.proposal,
+                &rehearsal,
+                binding,
+                current,
+                now,
+            )?;
+        }
         _ => anyhow::bail!("Proof type mismatch"),
     }
     Ok(DispatchPermit {
         binding: binding.clone(),
         receipt: receipt.receipt().clone(),
     })
+}
+
+fn require_production_physical(
+    binding: &ActionBindingV2,
+    observation: &NativeDispatchProof,
+) -> Result<()> {
+    if let ActionProof::SqlRehearsalReceipt { receipt_id, .. } = &binding.proof {
+        let receipt = super::sql::rehearsal::load_protected_rehearsal_by_id(*receipt_id)?;
+        ensure!(
+            observation.physical_sha256() == receipt.production_physical_sha256(),
+            "Physical production database changed after rehearsal"
+        );
+    }
+    Ok(())
 }
 
 /// Review and withdrawal both use the same case lock as saves/dispatch.
@@ -456,6 +564,7 @@ pub fn authorize_and_record_intent(
                 observation: &observation.observation,
             };
             let permit = authorize_dispatch(binding, receipt, &current)?;
+            require_production_physical(binding, observation)?;
             journal.record_intent(permit)
         })
     })
@@ -499,6 +608,7 @@ pub fn authorize_and_start_dispatch(
                 observation: &observation.observation,
             };
             let permit = authorize_dispatch(binding, receipt, &current)?;
+            require_production_physical(binding, observation)?;
             journal.mark_dispatch_started(intent_id)?;
             Ok(permit)
         })
