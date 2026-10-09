@@ -1,4 +1,32 @@
 use super::*;
+
+#[test]
+fn verified_legacy_staging_entry_without_production_marker_stays_readable_and_nonblocking() {
+    let journal_path = path();
+    let mut journal = ActionJournal::load(&journal_path).unwrap();
+    let case_id = Uuid::new_v4();
+    journal
+        .test_seed_verified_production(
+            Uuid::new_v4(),
+            case_id,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            d(),
+            d(),
+            d(),
+        )
+        .unwrap();
+    journal.intents[0].production_receipt_sha256 = None;
+    journal.save().unwrap();
+    assert!(
+        !serde_json::to_string(&journal)
+            .unwrap()
+            .contains("production_receipt_sha256")
+    );
+    let reopened = ActionJournal::load(&journal_path).unwrap();
+    assert_eq!(reopened.intents()[0].production_receipt_sha256, None);
+    assert!(!reopened.has_open_intervention(case_id, Uuid::new_v4()));
+}
 use crate::helper_action::{
     RestorationSpec, SqlAction, SqlEngine, StatisticsLimitation, VerifiedSqlObject,
 };

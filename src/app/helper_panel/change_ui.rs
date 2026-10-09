@@ -966,43 +966,7 @@ fn show_production_controls(
             receipt.physical_sha256(),
             receipt.content_sha256()
         ));
-        if let Some(index) = receipt.index() {
-            ui.label(format!(
-                "Owned index {} · native ID {} · definition {} · marker digest {}",
-                index.name, index.id, index.definition_sha256, index.marker_sha256
-            ));
-            if state.action_ui.pending.is_none()
-                && state.action_ui.restoration_outcome.is_none()
-                && ui
-                    .button("Restore this exact original production index")
-                    .clicked()
-            {
-                let run_id = receipt.run_id();
-                let (tx, rx) = std::sync::mpsc::channel();
-                state.action_ui.pending = Some(rx);
-                std::thread::spawn(move || {
-                    let result = (|| -> anyhow::Result<_> {
-                        let path = crate::helper::journal::ActionJournal::path()?;
-                        let mut journal = crate::helper::journal::ActionJournal::load(&path)?;
-                        let runtime = tokio::runtime::Builder::new_current_thread()
-                            .enable_all()
-                            .build()?;
-                        runtime
-                            .block_on(crate::helper::sql::restoration::restore_index(
-                                run_id,
-                                &mut journal,
-                                tokio_util::sync::CancellationToken::new(),
-                            ))
-                            .map(super::ActionUiEvent::Restored)
-                    })();
-                    let _ = tx.send(result);
-                });
-            }
-        } else {
-            ui.strong(
-                "Statistics maintenance is non-restorable; the acknowledged limitation applies.",
-            );
-        }
+        ui.label("Use Original production recovery below for the exact original case and run.");
     }
 }
 
@@ -1042,58 +1006,6 @@ fn show_local_journal(
             "Run {} · {:?} · first outcome acknowledged {}",
             intent.run_id, intent.state, intent.outcome_acknowledged
         ));
-        if let Ok(production) =
-            crate::helper::sql::restoration::load_production_receipt(intent.run_id)
-        {
-            if intent.native_receipt_sha256.as_deref() == Some(production.content_sha256()) {
-                ui.label(format!(
-                    "Original production target {} · restoration {:?} · pending {}",
-                    production.physical_sha256(),
-                    intent.restoration_outcome,
-                    intent.restoration_pending
-                ));
-                if intent.restoration_pending
-                    || intent.restoration_outcome
-                        == Some(
-                            crate::helper::sql::restoration::RestorationOutcome::NeedsIntervention,
-                        )
-                {
-                    ui.strong("Restoration outcome requires human reconciliation. Later SQL targets are blocked.");
-                }
-                if production.index().is_some()
-                    && intent.restoration_outcome.is_none()
-                    && !intent.restoration_pending
-                    && state.action_ui.pending.is_none()
-                    && ui
-                        .button(format!(
-                            "Restore exact owned index for run {}",
-                            intent.run_id
-                        ))
-                        .clicked()
-                {
-                    let run_id = intent.run_id;
-                    let (tx, rx) = std::sync::mpsc::channel();
-                    state.action_ui.pending = Some(rx);
-                    std::thread::spawn(move || {
-                        let result = (|| -> anyhow::Result<_> {
-                            let path = ActionJournal::path()?;
-                            let mut journal = ActionJournal::load(&path)?;
-                            let runtime = tokio::runtime::Builder::new_current_thread()
-                                .enable_all()
-                                .build()?;
-                            runtime
-                                .block_on(crate::helper::sql::restoration::restore_index(
-                                    run_id,
-                                    &mut journal,
-                                    tokio_util::sync::CancellationToken::new(),
-                                ))
-                                .map(super::ActionUiEvent::Restored)
-                        })();
-                        let _ = tx.send(result);
-                    });
-                }
-            }
-        }
         if matches!(
             intent.state,
             IntentState::DispatchStarted | IntentState::OutcomeUnknown
@@ -1172,4 +1084,106 @@ fn show_local_journal(
             };
         }
     }
+    show_original_production_recovery(state, ui, &journal);
+}
+
+fn show_original_production_recovery(
+    state: &mut HelperState,
+    ui: &mut Ui,
+    journal: &crate::helper::journal::ActionJournal,
+) {
+    use crate::helper::sql::restoration::{RestorationOutcome, load_production_receipt};
+
+    let originals = journal
+        .intents()
+        .iter()
+        .filter(|intent| intent.production_receipt_sha256.is_some())
+        .collect::<Vec<_>>();
+    if originals.is_empty() {
+        return;
+    }
+    ui.heading("Original production recovery");
+    for intent in originals {
+        ui.label(format!(
+            "Original case {} · production run {} · restoration {:?} · pending {}",
+            intent.case_id, intent.run_id, intent.restoration_outcome, intent.restoration_pending
+        ));
+        let proof = load_production_receipt(intent.run_id)
+            .ok()
+            .filter(|receipt| {
+                intent.production_receipt_sha256.as_deref() == Some(receipt.content_sha256())
+            });
+        match proof {
+            Some(receipt) => {
+                ui.label(format!(
+                    "Original physical database {}",
+                    receipt.physical_sha256()
+                ));
+                if matches!(
+                    intent.restoration_outcome,
+                    Some(RestorationOutcome::NeedsIntervention | RestorationOutcome::NotRestorable)
+                ) || intent.restoration_pending
+                {
+                    ui.strong("Original run requires human reconciliation; later SQL targets are blocked.");
+                }
+                if intent.restoration_outcome.is_none()
+                    && !intent.restoration_pending
+                    && state.action_ui.pending.is_none()
+                {
+                    let label = if receipt.index().is_some() {
+                        format!(
+                            "Restore exact owned index for original run {}",
+                            intent.run_id
+                        )
+                    } else {
+                        format!(
+                            "Record non-restorable statistics for original run {}",
+                            intent.run_id
+                        )
+                    };
+                    if ui.button(label).clicked() {
+                        start_original_restoration(state, intent.run_id);
+                    }
+                }
+            }
+            None => {
+                ui.strong(
+                    "Protected original production proof unavailable. Restoration is unsafe; later SQL targets are blocked.",
+                );
+                if intent.restoration_outcome != Some(RestorationOutcome::NeedsIntervention)
+                    && state.action_ui.pending.is_none()
+                    && ui
+                        .button(format!(
+                            "Record unavailable-proof intervention for original case {} run {}",
+                            intent.case_id, intent.run_id
+                        ))
+                        .clicked()
+                {
+                    start_original_restoration(state, intent.run_id);
+                }
+            }
+        }
+    }
+}
+
+fn start_original_restoration(state: &mut HelperState, run_id: Uuid) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    state.action_ui.pending = Some(rx);
+    std::thread::spawn(move || {
+        let result = (|| -> anyhow::Result<_> {
+            let path = crate::helper::journal::ActionJournal::path()?;
+            let mut journal = crate::helper::journal::ActionJournal::load(&path)?;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            runtime
+                .block_on(crate::helper::sql::restoration::restore_index(
+                    run_id,
+                    &mut journal,
+                    tokio_util::sync::CancellationToken::new(),
+                ))
+                .map(super::ActionUiEvent::Restored)
+        })();
+        let _ = tx.send(result);
+    });
 }

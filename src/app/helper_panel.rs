@@ -41,6 +41,30 @@ struct ActionUiState {
     production_receipt: Option<crate::helper::sql::restoration::ProductionReceipt>,
     restoration_outcome: Option<crate::helper::sql::restoration::RestorationOutcome>,
 }
+
+impl ActionUiState {
+    fn clear_case_bound(&mut self) {
+        // Dropping the receiver also discards any delayed result from the old case.
+        self.pending = None;
+        self.approval = None;
+        self.receipt = None;
+        self.recovered.clear();
+        self.lookup_approval_id.clear();
+        self.outcome_notes.clear();
+        self.intent = None;
+        self.consume_attempted = false;
+        self.staging_scope_sha256.clear();
+        self.staging_limits.clear();
+        self.staging_confirmed = false;
+        self.staging_mapping = None;
+        self.staging_receipt = None;
+        self.production_approval = None;
+        self.production_consume = None;
+        self.production_consume_attempted = false;
+        self.production_receipt = None;
+        self.restoration_outcome = None;
+    }
+}
 enum ActionUiEvent {
     Identity(String),
     Requested(crate::helper_approval::ActionApprovalV2),
@@ -217,14 +241,7 @@ impl HelperState {
     fn select(&mut self, id: Uuid) {
         self.scope_editor.clear_cloud_draft();
         self.reviewed_proposal = None;
-        self.action_ui.approval = None;
-        self.action_ui.receipt = None;
-        self.action_ui.pending = None;
-        self.action_ui.recovered.clear();
-        self.action_ui.lookup_approval_id.clear();
-        self.action_ui.outcome_notes.clear();
-        self.action_ui.intent = None;
-        self.action_ui.consume_attempted = false;
+        self.action_ui.clear_case_bound();
         self.statistics_limit_acknowledged = false;
         self.statistics_ack_case = None;
         if let Some(cancel) = self.advisory_cancel.take() {
@@ -255,14 +272,7 @@ impl HelperState {
     }
     fn revise(&mut self, edit: CaseEdit) {
         self.reviewed_proposal = None;
-        self.action_ui.approval = None;
-        self.action_ui.receipt = None;
-        self.action_ui.pending = None;
-        self.action_ui.recovered.clear();
-        self.action_ui.lookup_approval_id.clear();
-        self.action_ui.outcome_notes.clear();
-        self.action_ui.intent = None;
-        self.action_ui.consume_attempted = false;
+        self.action_ui.clear_case_bound();
         self.statistics_limit_acknowledged = false;
         self.statistics_ack_case = None;
         if let Some(cancel) = self.advisory_cancel.take() {
@@ -533,6 +543,80 @@ impl AivanaApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_approval(case_id: Uuid) -> crate::helper_approval::ActionApprovalV2 {
+        let mut binding = crate::helper::journal::tests::permit().binding().clone();
+        binding.case_id = case_id;
+        crate::helper_approval::ActionApprovalV2 {
+            id: Uuid::new_v4(),
+            request_id: Uuid::new_v4(),
+            fingerprint: binding.fingerprint().unwrap(),
+            binding,
+            requester: "fixture-requester".into(),
+            approver: Some("fixture-approver".into()),
+            state: crate::helper_approval::ActionApprovalStateV2::Approved,
+            expires_at: chrono::Utc::now() + chrono::Duration::minutes(3),
+        }
+    }
+
+    #[test]
+    fn case_switch_and_revision_clear_task15_authority_and_late_worker_result() {
+        let ctx = egui::Context::default();
+        let mut app = AivanaApp::from_context(&ctx);
+        let path = std::env::temp_dir()
+            .join(format!("relayne-helper-task15-ui-{}", Uuid::new_v4()))
+            .join("cases.dpapi");
+        app.helper = HelperState::at_path(path);
+        app.helper.create();
+        let first = app.helper.selected.unwrap();
+        let old_approval = test_approval(first);
+        app.helper.action_ui.production_approval = Some(old_approval.clone());
+        app.helper.action_ui.staging_scope_sha256 = "old staging scope".into();
+        app.helper.action_ui.staging_limits = "old staging limits".into();
+        app.helper.action_ui.staging_confirmed = true;
+        app.helper.action_ui.production_consume_attempted = true;
+        app.helper.action_ui.restoration_outcome =
+            Some(crate::helper::sql::restoration::RestorationOutcome::NeedsIntervention);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        app.helper.action_ui.pending = Some(receiver);
+
+        app.helper.create();
+        assert_ne!(app.helper.selected, Some(first));
+        assert!(
+            sender
+                .send(Ok(ActionUiEvent::ProductionRequested(old_approval)))
+                .is_err()
+        );
+        app.poll_helper();
+        assert!(app.helper.action_ui.pending.is_none());
+        assert!(app.helper.action_ui.production_approval.is_none());
+        assert!(app.helper.action_ui.staging_receipt.is_none());
+        assert!(app.helper.action_ui.staging_scope_sha256.is_empty());
+        assert!(app.helper.action_ui.staging_limits.is_empty());
+        assert!(!app.helper.action_ui.staging_confirmed);
+        assert!(!app.helper.action_ui.production_consume_attempted);
+        assert!(app.helper.action_ui.restoration_outcome.is_none());
+
+        let second = app.helper.selected.unwrap();
+        app.helper.action_ui.production_approval = Some(test_approval(second));
+        app.helper.action_ui.staging_confirmed = true;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        app.helper.action_ui.pending = Some(receiver);
+        app.helper
+            .revise(CaseEdit::Description(Answer::Known("Changed case".into())));
+        assert!(
+            sender
+                .send(Ok(ActionUiEvent::ProductionRequested(test_approval(
+                    second
+                ))))
+                .is_err()
+        );
+        app.poll_helper();
+        assert!(app.helper.action_ui.production_approval.is_none());
+        assert!(!app.helper.action_ui.staging_confirmed);
+        assert!(app.helper.action_ui.pending.is_none());
+    }
+
     #[test]
     fn operator_run_reference_is_cleared_on_case_selection_and_edit() {
         let dir =

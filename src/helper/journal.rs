@@ -50,6 +50,8 @@ pub struct IntentRecord {
     pub outcome_corrections: Vec<OutcomeDelivery>,
     #[serde(default)]
     pub native_receipt_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub production_receipt_sha256: Option<String>,
     #[serde(default)]
     pub native_after_sha256: Option<String>,
     #[serde(default)]
@@ -170,7 +172,8 @@ impl ActionJournal {
             outcome_note: None,
             outcome_acknowledged: false,
             outcome_corrections: Vec::new(),
-            native_receipt_sha256: Some(production_receipt_sha256),
+            native_receipt_sha256: Some(production_receipt_sha256.clone()),
+            production_receipt_sha256: Some(production_receipt_sha256),
             native_after_sha256: Some(after_sha256),
             restoration_outcome: None,
             restoration_pending: false,
@@ -227,6 +230,14 @@ impl ActionJournal {
                 item.native_receipt_sha256
                     .as_deref()
                     .is_none_or(crate::helper_action::valid_digest)
+                    && item
+                        .production_receipt_sha256
+                        .as_deref()
+                        .is_none_or(|hash| {
+                            crate::helper_action::valid_digest(hash)
+                                && item.native_receipt_sha256.as_deref() == Some(hash)
+                                && item.state == IntentState::Verified
+                        })
                     && item
                         .native_after_sha256
                         .as_deref()
@@ -428,6 +439,7 @@ impl ActionJournal {
             outcome_acknowledged: false,
             outcome_corrections: Vec::new(),
             native_receipt_sha256: None,
+            production_receipt_sha256: None,
             native_after_sha256: None,
             restoration_outcome: None,
             restoration_pending: false,
@@ -758,6 +770,7 @@ impl ActionJournal {
             .find(|item| item.id == id)
             .ok_or_else(|| anyhow::anyhow!("Production intent missing"))?;
         item.native_receipt_sha256 = Some(receipt.content_sha256().to_owned());
+        item.production_receipt_sha256 = Some(receipt.content_sha256().to_owned());
         item.native_after_sha256 = proof.after_sha256().map(str::to_owned);
         let event = next.queue_outcome_inner(id, ActionOutcomeV2::Verified, None, false)?;
         next.save()?;
@@ -785,7 +798,8 @@ impl ActionJournal {
             .ok_or_else(|| anyhow::anyhow!("Original production intent missing"))?;
         ensure!(
             item.state == IntentState::Verified
-                && item.native_receipt_sha256.as_deref() == Some(receipt.content_sha256()),
+                && item.native_receipt_sha256.as_deref() == Some(receipt.content_sha256())
+                && item.production_receipt_sha256.as_deref() == Some(receipt.content_sha256()),
             "Restoration does not match verified original production action"
         );
         if let Some(existing) = item.restoration_outcome {
@@ -816,6 +830,7 @@ impl ActionJournal {
         ensure!(
             item.state == IntentState::Verified
                 && item.native_receipt_sha256.as_deref() == Some(receipt.content_sha256())
+                && item.production_receipt_sha256.as_deref() == Some(receipt.content_sha256())
                 && item.restoration_outcome.is_none()
                 && !item.restoration_pending,
             "Original run already restored or restoration pending"
@@ -839,8 +854,57 @@ impl ActionJournal {
                         IntentState::Prepared | IntentState::DispatchStarted
                     ))
                     || item.restoration_pending
-                    || item.restoration_outcome == Some(RestorationOutcome::NeedsIntervention))
+                    || matches!(
+                        item.restoration_outcome,
+                        Some(
+                            RestorationOutcome::NeedsIntervention
+                                | RestorationOutcome::NotRestorable
+                        )
+                    )
+                    || item
+                        .production_receipt_sha256
+                        .as_deref()
+                        .is_some_and(|expected| {
+                            super::sql::restoration::load_production_receipt(item.run_id)
+                                .map(|receipt| receipt.content_sha256() != expected)
+                                .unwrap_or(true)
+                        }))
         })
+    }
+
+    /// A verified production run whose original protected proof is unavailable
+    /// cannot be safely restored. The verified native outcome remains intact.
+    pub(crate) fn record_unavailable_production_receipt(&mut self, run_id: Uuid) -> Result<()> {
+        let mut next = self.clone();
+        let item = next
+            .intents
+            .iter_mut()
+            .find(|item| item.run_id == run_id)
+            .ok_or_else(|| anyhow::anyhow!("Original production intent missing"))?;
+        let expected = item
+            .production_receipt_sha256
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("No verified production receipt reference"))?;
+        ensure!(
+            item.state == IntentState::Verified
+                && super::sql::restoration::load_production_receipt(run_id)
+                    .map(|receipt| receipt.content_sha256() != expected)
+                    .unwrap_or(true),
+            "Original production proof is still available or action is not verified"
+        );
+        if item.restoration_outcome == Some(RestorationOutcome::NeedsIntervention) {
+            return Ok(());
+        }
+        item.restoration_pending = false;
+        item.restoration_outcome = Some(RestorationOutcome::NeedsIntervention);
+        item.updated_at = Utc::now();
+        #[cfg(test)]
+        if UNAVAILABLE_RECEIPT_SAVE_FAULT.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("Injected unavailable-receipt journal persistence failure");
+        }
+        next.save()?;
+        *self = next;
+        Ok(())
     }
     pub fn acknowledge_outcome(&mut self, ack: &ActionOutcomeAckV2) -> Result<()> {
         ensure!(ack.accepted, "Team did not accept outcome");
@@ -884,6 +948,15 @@ impl ActionJournal {
                 )
         })
     }
+}
+
+#[cfg(test)]
+static UNAVAILABLE_RECEIPT_SAVE_FAULT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+pub(crate) fn arm_unavailable_receipt_save_fault() {
+    UNAVAILABLE_RECEIPT_SAVE_FAULT.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
 #[cfg(test)]

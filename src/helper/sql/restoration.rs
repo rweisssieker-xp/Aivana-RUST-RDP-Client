@@ -491,10 +491,20 @@ pub async fn restore_index(
     journal: &mut ActionJournal,
     cancel: CancellationToken,
 ) -> Result<RestorationOutcome> {
-    let journal_path = journal.storage_path().to_path_buf();
-    let receipt = load_production_receipt(run_id)?;
+    let journal_path = ActionJournal::path()?;
     let path = restoration_path(run_id)?;
     let case_path = HelperStore::path()?;
+    let receipt = match load_production_receipt(run_id) {
+        Ok(receipt) => receipt,
+        Err(_) => {
+            return HelperStore::inspect_locked(&case_path, |_store| {
+                let _guard = lock(&path)?;
+                *journal = ActionJournal::load(&journal_path)?;
+                journal.record_unavailable_production_receipt(run_id)?;
+                Ok(RestorationOutcome::NeedsIntervention)
+            });
+        }
+    };
     let existing = HelperStore::inspect_locked(&case_path, |_store| {
         // One short OS lock covers the actual protected record and journal
         // claim under the same CASE gate as later target dispatch.
@@ -530,7 +540,16 @@ pub async fn restore_index(
             original.restoration_outcome.is_none(),
             "Restoration already terminal"
         );
-        journal.record_restoration_intent(&receipt)?;
+        if let Err(error) = journal.record_restoration_intent(&receipt) {
+            let proof_unavailable = load_production_receipt(run_id)
+                .map(|current| current.content_sha256() != receipt.content_sha256())
+                .unwrap_or(true);
+            if proof_unavailable {
+                journal.record_unavailable_production_receipt(run_id)?;
+                return Ok(Some(RestorationOutcome::NeedsIntervention));
+            }
+            return Err(error);
+        }
         #[cfg(test)]
         if RESTORATION_TEST_FAULT
             .compare_exchange(

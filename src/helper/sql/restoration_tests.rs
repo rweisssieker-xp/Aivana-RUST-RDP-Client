@@ -240,6 +240,10 @@ fn restoration_record_is_one_shot_and_protected_receipt_bound() {
 
 fn seeded_production() -> (ProductionReceipt, ActionJournal) {
     let (receipt, _) = production_index(SqlEngine::Postgres);
+    seeded_receipt(receipt)
+}
+
+fn seeded_receipt(receipt: ProductionReceipt) -> (ProductionReceipt, ActionJournal) {
     receipt.save().unwrap();
     let path = ActionJournal::path().unwrap();
     let mut journal = ActionJournal::load(&path).unwrap();
@@ -255,6 +259,99 @@ fn seeded_production() -> (ProductionReceipt, ActionJournal) {
         )
         .unwrap();
     (receipt, journal)
+}
+
+#[tokio::test]
+async fn missing_or_tampered_verified_production_proof_persists_original_run_barrier() {
+    for tamper in [false, true] {
+        let (receipt, mut journal) = seeded_production();
+        let path = receipt_path(receipt.run_id()).unwrap();
+        if tamper {
+            std::fs::write(&path, b"invalid protected production receipt").unwrap();
+        } else {
+            std::fs::remove_file(&path).unwrap();
+        }
+        super::super::changes::set_restore_test_delay(0);
+        let later_run = Uuid::new_v4();
+        assert!(journal.has_open_intervention(receipt.case_id, later_run));
+        assert_eq!(
+            restore_index(receipt.run_id(), &mut journal, CancellationToken::new())
+                .await
+                .unwrap(),
+            RestorationOutcome::NeedsIntervention
+        );
+        let reloaded = ActionJournal::load(&ActionJournal::path().unwrap()).unwrap();
+        let original = reloaded
+            .intents()
+            .iter()
+            .find(|i| i.run_id == receipt.run_id())
+            .unwrap();
+        assert_eq!(original.state, IntentState::Verified);
+        assert_eq!(original.case_id, receipt.case_id);
+        assert_eq!(
+            original.restoration_outcome,
+            Some(RestorationOutcome::NeedsIntervention)
+        );
+        assert!(reloaded.has_open_intervention(receipt.case_id, later_run));
+        assert_eq!(super::super::changes::restore_test_attempts(), 0);
+    }
+}
+
+#[tokio::test]
+async fn unavailable_production_proof_save_failure_still_denies_later_dispatch() {
+    let (receipt, mut journal) = seeded_production();
+    std::fs::remove_file(receipt_path(receipt.run_id()).unwrap()).unwrap();
+    super::super::changes::set_restore_test_delay(0);
+    crate::helper::journal::arm_unavailable_receipt_save_fault();
+    assert!(
+        restore_index(receipt.run_id(), &mut journal, CancellationToken::new())
+            .await
+            .is_err()
+    );
+    let reloaded = ActionJournal::load(&ActionJournal::path().unwrap()).unwrap();
+    let original = reloaded
+        .intents()
+        .iter()
+        .find(|i| i.run_id == receipt.run_id())
+        .unwrap();
+    assert_eq!(original.restoration_outcome, None);
+    assert!(reloaded.has_open_intervention(receipt.case_id, Uuid::new_v4()));
+    assert_eq!(super::super::changes::restore_test_attempts(), 0);
+}
+
+#[tokio::test]
+async fn requested_nonrestorable_statistics_halts_later_targets_for_both_engines() {
+    for engine in [SqlEngine::Postgres, SqlEngine::SqlServer] {
+        let (mut receipt, _) = production_index(engine);
+        let object = receipt.action.object().clone();
+        receipt.action = match engine {
+            SqlEngine::Postgres => SqlAction::PostgresAnalyze { object },
+            SqlEngine::SqlServer => SqlAction::SqlServerUpdateStatistics { object },
+        };
+        receipt.index = None;
+        receipt.content_sha256 = receipt.fingerprint().unwrap();
+        let (receipt, mut journal) = seeded_receipt(receipt);
+        super::super::changes::set_restore_test_delay(0);
+        assert_eq!(
+            restore_index(receipt.run_id(), &mut journal, CancellationToken::new())
+                .await
+                .unwrap(),
+            RestorationOutcome::NotRestorable
+        );
+        let reloaded = ActionJournal::load(&ActionJournal::path().unwrap()).unwrap();
+        let original = reloaded
+            .intents()
+            .iter()
+            .find(|i| i.run_id == receipt.run_id())
+            .unwrap();
+        assert_eq!(
+            original.restoration_outcome,
+            Some(RestorationOutcome::NotRestorable)
+        );
+        assert!(!original.restoration_pending);
+        assert!(reloaded.has_open_intervention(receipt.case_id, Uuid::new_v4()));
+        assert_eq!(super::super::changes::restore_test_attempts(), 0);
+    }
 }
 
 #[tokio::test]
