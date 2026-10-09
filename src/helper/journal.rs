@@ -892,7 +892,10 @@ impl ActionJournal {
                     .unwrap_or(true),
             "Original production proof is still available or action is not verified"
         );
-        if item.restoration_outcome == Some(RestorationOutcome::NeedsIntervention) {
+        // A completed restoration remains one-shot even when its production proof
+        // is temporarily unavailable. has_open_intervention blocks later dispatch
+        // until that proof is readable again.
+        if item.restoration_outcome.is_some() {
             return Ok(());
         }
         item.restoration_pending = false;

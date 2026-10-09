@@ -298,6 +298,94 @@ async fn missing_or_tampered_verified_production_proof_persists_original_run_bar
 }
 
 #[tokio::test]
+async fn terminal_restoration_survives_unavailable_production_proof() {
+    for outcome in [
+        RestorationOutcome::Restored,
+        RestorationOutcome::NotRestorable,
+    ] {
+        for tamper in [false, true] {
+            let (receipt, mut journal) = if outcome == RestorationOutcome::Restored {
+                seeded_production()
+            } else {
+                let (mut receipt, _) = production_index(SqlEngine::Postgres);
+                receipt.action = SqlAction::PostgresAnalyze {
+                    object: receipt.action.object().clone(),
+                };
+                receipt.index = None;
+                receipt.content_sha256 = receipt.fingerprint().unwrap();
+                seeded_receipt(receipt)
+            };
+            let record_path = restoration_path(receipt.run_id()).unwrap();
+            journal.record_restoration_intent(&receipt).unwrap();
+            let mut record = RestorationRecord::new(&receipt).unwrap();
+            write_restoration(&record_path, &record, &receipt).unwrap();
+            record.finish(outcome).unwrap();
+            write_restoration(&record_path, &record, &receipt).unwrap();
+            journal
+                .record_restoration_outcome(&receipt, outcome)
+                .unwrap();
+
+            let receipt_file = receipt_path(receipt.run_id()).unwrap();
+            let receipt_bytes = std::fs::read(&receipt_file).unwrap();
+            if tamper {
+                std::fs::write(&receipt_file, b"invalid protected production receipt").unwrap();
+            } else {
+                std::fs::remove_file(&receipt_file).unwrap();
+            }
+            super::super::changes::set_restore_test_delay(0);
+            let later_run = Uuid::new_v4();
+            assert!(journal.has_open_intervention(receipt.case_id, later_run));
+            assert_eq!(
+                restore_index(receipt.run_id(), &mut journal, CancellationToken::new())
+                    .await
+                    .unwrap(),
+                RestorationOutcome::NeedsIntervention
+            );
+            let reloaded = ActionJournal::load(&ActionJournal::path().unwrap()).unwrap();
+            let original = reloaded
+                .intents()
+                .iter()
+                .find(|item| item.run_id == receipt.run_id())
+                .unwrap();
+            assert_eq!(original.restoration_outcome, Some(outcome));
+            assert!(!original.restoration_pending);
+            assert!(reloaded.has_open_intervention(receipt.case_id, later_run));
+            assert_eq!(super::super::changes::restore_test_attempts(), 0);
+
+            std::fs::write(&receipt_file, receipt_bytes).unwrap();
+            for _ in 0..2 {
+                assert_eq!(
+                    restore_index(receipt.run_id(), &mut journal, CancellationToken::new())
+                        .await
+                        .unwrap(),
+                    outcome
+                );
+            }
+            let reloaded = ActionJournal::load(&ActionJournal::path().unwrap()).unwrap();
+            let original = reloaded
+                .intents()
+                .iter()
+                .find(|item| item.run_id == receipt.run_id())
+                .unwrap();
+            assert_eq!(original.restoration_outcome, Some(outcome));
+            assert!(!original.restoration_pending);
+            assert_eq!(
+                read_restoration(&record_path, &receipt)
+                    .unwrap()
+                    .unwrap()
+                    .outcome,
+                Some(outcome)
+            );
+            assert_eq!(
+                reloaded.has_open_intervention(receipt.case_id, later_run),
+                outcome == RestorationOutcome::NotRestorable
+            );
+            assert_eq!(super::super::changes::restore_test_attempts(), 0);
+        }
+    }
+}
+
+#[tokio::test]
 async fn unavailable_production_proof_save_failure_still_denies_later_dispatch() {
     let (receipt, mut journal) = seeded_production();
     std::fs::remove_file(receipt_path(receipt.run_id()).unwrap()).unwrap();
