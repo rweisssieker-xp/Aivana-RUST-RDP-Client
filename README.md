@@ -78,6 +78,29 @@ The visual workspace combines the spatial overview, quiet focus and incident inv
 - OpenAI CUA Request Briefs summarize provider, model, goal, framebuffer state, step limits, delays, and guardrails before hosted Computer Use is invoked.
 - KI Goal Audit in the Verification Center provides a prompt-to-artifact checklist, displayed RDP env source, blocking gate count, next-gate guidance, structured next-gate JSON copy, command-index JSON copy, visible handoff-check status, handoff-check JSON copy, handoff risk summary copy/export, verification snapshot JSON copy/export, direct RDP proof check JSON copy, no-secrets RDP proof prompt copy, RDP recovery plan copy with acceptance criteria, direct live evidence, and proxy-evidence rejection, recovery command copy, live-gate doctor JSON copy, direct live-gate next-command copy, concise operator-brief copy, full live-gate sequence copy, LLM review prompt copy with `summary.md` Early LLM Triage and `operator-handoff-risk-summary.json` cross-check, live-gate LLM plan copy, LLM action-contract JSON copy/export with `summary.md` Early LLM Triage, `direct_live_evidence_requirements`, `early_triage_artifacts`, and evidence success signals, latest handoff-pack and live-gate evidence, a live-gate runbook, copyable RDP env template, copyable Markdown, JSON/Markdown export, and one-click Operator Handoff Pack export.
 
+## Generischer Helper
+
+Der generische Helper führt von der Problembeschreibung über geprüfte Systembereiche und gesammelte Diagnosebelege zu einem nachvollziehbaren Reparaturplan. Unbekannte Angaben bleiben ausdrücklich offen. Für unterstützte Quellen kann Relayne lesende Diagnosen ausführen; Belege sind an Fall, Bereich und Revision gebunden. Veraltete oder unvollständige Daten gelten nicht als Erfolg.
+
+Änderungen laufen über getrennte Prüfung, Freigabe und Ausführung. SQL-Änderungen benötigen passende, einmalig verwendbare Berechtigungen und dauerhafte Aktionsnachweise. Wo eine abgesicherte Probe oder Wiederherstellung fehlt, bleibt der Schritt blockiert. Die Verifikation vergleicht beobachtete Ergebnisse mit den vereinbarten Kriterien und kennzeichnet fehlende, widersprüchliche oder verrauschte Belege als unvollständig beziehungsweise ungeklärt.
+
+Aus unabhängig verifizierten Produktionsergebnissen lassen sich Lernregeln ableiten. Sie müssen geprüft und erneut validiert werden, bevor sie Empfehlungen liefern. Regressionen können mit Grund und Beleg dauerhaft zur Invalidierung einer Lernregel führen. JSON- und Markdown-Berichte enthalten begrenzte, typisierte Referenzen.
+
+Die Helper-Ansicht zeigt gespeicherte Abnahmeberichte, bindet sie an Fall- und Belegrevision und kennzeichnet historische Ergebnisse. Die Ansicht und ihre neuen Abnahmetexte sind auf Deutsch, Englisch, Französisch und Italienisch verfügbar.
+
+### Abnahme-Preflight
+
+Für einen vorhandenen Fall lassen sich begrenzte Preflight-Berichte erzeugen:
+
+```powershell
+cargo run --bin relayne -- --helper-lab --case-id <uuid> [--report <path>]
+cargo run --bin relayne -- --helper-acceptance --case-id <uuid> [--report <path>]
+```
+
+`--helper-lab` kennzeichnet den Bericht als Simulations-Preflight; `--helper-acceptance` als Gast-Abnahme-Preflight. Beide Befehle prüfen den gespeicherten Fall und erfassen Abhängigkeiten für sieben Szenarien: Fallaufnahme und Neuladen, native Datenbankdiagnose, Selektivitätswartung, Indexänderung und Wiederherstellung, API-/Portalprüfungen, Abgleich nach Kontextänderungen sowie Lernregel-Invalidierung und Export. Die Berichte weisen fehlende Voraussetzungen als blockiert oder unvollständig aus. Sie führen diese Szenarien nicht aus, behaupten keine gemessenen Gast-Ergebnisse und setzen Produktabnahme nicht auf erfolgreich. Ohne `--report` wird der Bericht im Relayne-App-Datenverzeichnis gespeichert.
+
+Insbesondere SQL-Änderung und Index-Wiederherstellung benötigen akzeptierte, geschützte Task-14-Probe- und Task-15-Produktionsbelege. Bis diese vorliegen, bleiben die entsprechenden Szenarien blockiert. Der Preflight ersetzt weder eine native Sandbox-Abnahme noch eine Prüfung in der Zielumgebung.
+
 ## Requirements
 
 - Rust 1.95 or newer
