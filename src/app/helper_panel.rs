@@ -12,6 +12,7 @@ mod change_ui;
 mod connectors_ui;
 mod evidence_ui;
 mod intake_ui;
+mod knowledge_ui;
 mod planning_ui;
 mod scope_ui;
 mod sql_ui;
@@ -563,6 +564,7 @@ impl AivanaApp {
             planning_ui::show(&mut self.helper, ui, &case);
             change_ui::show(&mut self.helper, ui, &case, &self.team);
             verification_ui::show(&mut self.helper, ui, &case);
+            knowledge_ui::show(&mut self.helper, ui, &case, self.desktop.locale);
         } else if self.helper.store.is_some() {
             ui.label("Create or select a case to begin.");
         }
