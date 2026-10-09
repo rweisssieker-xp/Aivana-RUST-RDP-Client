@@ -1092,7 +1092,7 @@ fn show_original_production_recovery(
     ui: &mut Ui,
     journal: &crate::helper::journal::ActionJournal,
 ) {
-    use crate::helper::sql::restoration::{RestorationOutcome, load_production_receipt};
+    use crate::helper::sql::restoration::{load_production_receipt, RestorationOutcome};
 
     let originals = journal
         .intents()

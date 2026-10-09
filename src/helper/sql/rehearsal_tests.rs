@@ -664,29 +664,20 @@ fn production_coverage_rejects_wrong_action_checks_before_and_acknowledgement() 
     binding.verification_sha256 = receipt.verification_sha256.clone();
     binding.before_sha256 = mapping.production_before_sha256.clone();
     binding.statistics_limit_acknowledged = true;
-    assert!(
-        receipt
-            .validate_production_coverage(
-                mapping.case_id,
-                mapping.case_revision,
-                &proposal,
-                &binding
-            )
-            .is_ok()
-    );
+    assert!(receipt
+        .validate_production_coverage(mapping.case_id, mapping.case_revision, &proposal, &binding)
+        .is_ok());
 
     let mut wrong_binding = binding.clone();
     wrong_binding.before_sha256 = d('9');
-    assert!(
-        receipt
-            .validate_production_coverage(
-                mapping.case_id,
-                mapping.case_revision,
-                &proposal,
-                &wrong_binding
-            )
-            .is_err()
-    );
+    assert!(receipt
+        .validate_production_coverage(
+            mapping.case_id,
+            mapping.case_revision,
+            &proposal,
+            &wrong_binding
+        )
+        .is_err());
     wrong_binding = binding.clone();
     wrong_binding.action = SqlAction::PostgresAnalyze {
         object: VerifiedSqlObject {
@@ -694,68 +685,53 @@ fn production_coverage_rejects_wrong_action_checks_before_and_acknowledgement() 
             ..binding.action.object().clone()
         },
     };
-    assert!(
-        receipt
-            .validate_production_coverage(
-                mapping.case_id,
-                mapping.case_revision,
-                &proposal,
-                &wrong_binding
-            )
-            .is_err()
-    );
+    assert!(receipt
+        .validate_production_coverage(
+            mapping.case_id,
+            mapping.case_revision,
+            &proposal,
+            &wrong_binding
+        )
+        .is_err());
     wrong_binding = binding.clone();
     wrong_binding.statistics_limit_acknowledged = false;
-    assert!(
-        receipt
-            .validate_production_coverage(
-                mapping.case_id,
-                mapping.case_revision,
-                &proposal,
-                &wrong_binding
-            )
-            .is_err()
-    );
+    assert!(receipt
+        .validate_production_coverage(
+            mapping.case_id,
+            mapping.case_revision,
+            &proposal,
+            &wrong_binding
+        )
+        .is_err());
 
     let mut wrong_proposal = proposal.clone();
     wrong_proposal.verification.checks.pop();
     wrong_proposal.verification.criteria.pop();
-    assert!(
-        receipt
-            .validate_production_coverage(
-                mapping.case_id,
-                mapping.case_revision,
-                &wrong_proposal,
-                &binding
-            )
-            .is_err()
-    );
+    assert!(receipt
+        .validate_production_coverage(
+            mapping.case_id,
+            mapping.case_revision,
+            &wrong_proposal,
+            &binding
+        )
+        .is_err());
     let mut wrong_proposal = proposal.clone();
     wrong_proposal.verification.criteria[0].threshold_bits = 101f64.to_bits();
-    assert!(
-        receipt
-            .validate_production_coverage(
-                mapping.case_id,
-                mapping.case_revision,
-                &wrong_proposal,
-                &binding
-            )
-            .is_err()
-    );
+    assert!(receipt
+        .validate_production_coverage(
+            mapping.case_id,
+            mapping.case_revision,
+            &wrong_proposal,
+            &binding
+        )
+        .is_err());
 
     let mut old_receipt = receipt.clone();
     old_receipt.production_before_sha256 = None;
     old_receipt.content_sha256 = old_receipt.fingerprint().unwrap();
-    assert!(
-        old_receipt
-            .validate_production_coverage(
-                mapping.case_id,
-                mapping.case_revision,
-                &proposal,
-                &binding
-            )
-            .is_err()
-    );
+    assert!(old_receipt
+        .validate_production_coverage(mapping.case_id, mapping.case_revision, &proposal, &binding)
+        .is_err());
 }
 
 #[test]
@@ -834,22 +810,18 @@ fn journal_rejects_receipt_or_native_after_state_mismatch() {
     let mut altered_receipt = receipt.clone();
     altered_receipt.consume_id = Uuid::new_v4();
     altered_receipt.content_sha256 = altered_receipt.fingerprint().unwrap();
-    assert!(
-        journal
-            .record_native_outcome(intent_id, &proof, Some(&altered_receipt))
-            .is_err()
-    );
+    assert!(journal
+        .record_native_outcome(intent_id, &proof, Some(&altered_receipt))
+        .is_err());
     let altered_proof = changes::NativeActionProof::test_verified_from_permit(
         &permit,
         receipt.before_sha256.clone(),
         d('f'),
     )
     .unwrap();
-    assert!(
-        journal
-            .record_native_outcome(intent_id, &altered_proof, Some(&receipt))
-            .is_err()
-    );
+    assert!(journal
+        .record_native_outcome(intent_id, &altered_proof, Some(&receipt))
+        .is_err());
     assert_eq!(
         ActionJournal::load(&journal_path).unwrap().intents()[0].state,
         IntentState::DispatchStarted
@@ -872,7 +844,7 @@ async fn guest_reviewed_native_rehearsal_mints_protected_receipt() {
     use crate::helper::{
         capability::{ProbeAdapter, ProbeRequest},
         case::{CaseEdit, ProblemIntake},
-        credentials::{PersistentSecretResolver, save_scoped_at},
+        credentials::{save_scoped_at, PersistentSecretResolver},
         evidence::{EvidenceBinding, EvidenceStatus},
         manifest::{CapabilityId, ProbeParams},
         scope::CredentialScope,
@@ -884,7 +856,7 @@ async fn guest_reviewed_native_rehearsal_mints_protected_receipt() {
         VerifiedSqlMetadata, VerifiedSqlObject,
     };
     use crate::helper_approval::{
-        ACTION_BINDING_VERSION, ActionBindingV2, ActionProof, ConsumeReceiptV2,
+        ActionBindingV2, ActionProof, ConsumeReceiptV2, ACTION_BINDING_VERSION,
     };
     use crate::mission::Target;
     use crate::models::SecretCredential;

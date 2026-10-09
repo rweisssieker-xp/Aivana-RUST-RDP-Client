@@ -190,17 +190,15 @@ fn exact_original_index_requires_original_identity_definition_and_random_marker(
                 Some(original.marker.as_str()),
             ),
         ] {
-            assert!(
-                verify_original_index(
-                    &receipt,
-                    &d('d'),
-                    7,
-                    42,
-                    &d('e'),
-                    &[observed(id, name, def, marker)]
-                )
-                .is_err()
-            );
+            assert!(verify_original_index(
+                &receipt,
+                &d('d'),
+                7,
+                42,
+                &d('e'),
+                &[observed(id, name, def, marker)]
+            )
+            .is_err());
         }
         let duplicate = [
             observed(

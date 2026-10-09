@@ -18,11 +18,9 @@ fn verified_legacy_staging_entry_without_production_marker_stays_readable_and_no
         .unwrap();
     journal.intents[0].production_receipt_sha256 = None;
     journal.save().unwrap();
-    assert!(
-        !serde_json::to_string(&journal)
-            .unwrap()
-            .contains("production_receipt_sha256")
-    );
+    assert!(!serde_json::to_string(&journal)
+        .unwrap()
+        .contains("production_receipt_sha256"));
     let reopened = ActionJournal::load(&journal_path).unwrap();
     assert_eq!(reopened.intents()[0].production_receipt_sha256, None);
     assert!(!reopened.has_open_intervention(case_id, Uuid::new_v4()));
@@ -195,14 +193,12 @@ fn ack_save_failure_keeps_exact_event_for_retry() {
     let event = journal.queue_outcome(id, ActionOutcomeV2::Failed).unwrap();
     let saved = std::fs::read(&path).unwrap();
     std::fs::write(&path, b"conflict").unwrap();
-    assert!(
-        journal
-            .acknowledge_outcome(&ActionOutcomeAckV2 {
-                event_id: event.event_id,
-                accepted: true
-            })
-            .is_err()
-    );
+    assert!(journal
+        .acknowledge_outcome(&ActionOutcomeAckV2 {
+            event_id: event.event_id,
+            accepted: true
+        })
+        .is_err());
     std::fs::write(&path, saved).unwrap();
     let mut recovered = ActionJournal::load(&path).unwrap();
     assert_eq!(
@@ -238,11 +234,9 @@ fn acknowledged_unknown_can_be_corrected_once_with_a_linked_event() {
     let unknown = journal
         .queue_outcome(id, ActionOutcomeV2::OutcomeUnknown)
         .unwrap();
-    assert!(
-        journal
-            .reconcile_inner(run, Some(IntentState::Verified), true)
-            .is_err()
-    );
+    assert!(journal
+        .reconcile_inner(run, Some(IntentState::Verified), true)
+        .is_err());
     journal
         .acknowledge_outcome(&ActionOutcomeAckV2 {
             event_id: unknown.event_id,
@@ -284,16 +278,14 @@ fn atomic_operator_report_survives_save_fault_restart_and_intervention_correctio
     journal.mark_dispatch_started(id).unwrap();
     let saved = std::fs::read(&path).unwrap();
     std::fs::write(&path, b"conflicting protected file").unwrap();
-    assert!(
-        journal
-            .observe_and_queue_outcome(
-                id,
-                IntentState::OutcomeUnknown,
-                ActionOutcomeV2::OutcomeUnknown,
-                "password=Secret123; SELECT * FROM customers"
-            )
-            .is_err()
-    );
+    assert!(journal
+        .observe_and_queue_outcome(
+            id,
+            IntentState::OutcomeUnknown,
+            ActionOutcomeV2::OutcomeUnknown,
+            "password=Secret123; SELECT * FROM customers"
+        )
+        .is_err());
     std::fs::write(&path, saved).unwrap();
     let mut recovered = ActionJournal::load(&path).unwrap();
     assert_eq!(
@@ -306,16 +298,14 @@ fn atomic_operator_report_survives_save_fault_restart_and_intervention_correctio
         IntentState::DispatchStarted
     );
     assert_eq!(recovered.pending_outcomes().count(), 0);
-    assert!(
-        recovered
-            .observe_and_queue_outcome(
-                id,
-                IntentState::Verified,
-                ActionOutcomeV2::Verified,
-                "password=Secret123; SELECT * FROM customers"
-            )
-            .is_err()
-    );
+    assert!(recovered
+        .observe_and_queue_outcome(
+            id,
+            IntentState::Verified,
+            ActionOutcomeV2::Verified,
+            "password=Secret123; SELECT * FROM customers"
+        )
+        .is_err());
     let unknown = recovered
         .observe_and_queue_outcome(
             id,
@@ -366,27 +356,21 @@ fn atomic_operator_report_survives_save_fault_restart_and_intervention_correctio
             .as_deref(),
         Some("password=Secret123; SELECT * FROM customers")
     );
-    assert!(
-        !serde_json::to_string(&unknown)
-            .unwrap()
-            .contains("password=Secret123; SELECT * FROM customers")
-    );
-    assert!(
-        !std::fs::read(&path)
-            .unwrap()
-            .windows(b"password=Secret123".len())
-            .any(|window| window == b"password=Secret123")
-    );
-    assert!(
-        restarted
-            .observe_and_queue_outcome(
-                id,
-                IntentState::NeedsIntervention,
-                ActionOutcomeV2::NeedsIntervention,
-                "TICKET-102"
-            )
-            .is_err()
-    );
+    assert!(!serde_json::to_string(&unknown)
+        .unwrap()
+        .contains("password=Secret123; SELECT * FROM customers"));
+    assert!(!std::fs::read(&path)
+        .unwrap()
+        .windows(b"password=Secret123".len())
+        .any(|window| window == b"password=Secret123"));
+    assert!(restarted
+        .observe_and_queue_outcome(
+            id,
+            IntentState::NeedsIntervention,
+            ActionOutcomeV2::NeedsIntervention,
+            "TICKET-102"
+        )
+        .is_err());
     restarted
         .acknowledge_outcome(&ActionOutcomeAckV2 {
             event_id: unknown.event_id,

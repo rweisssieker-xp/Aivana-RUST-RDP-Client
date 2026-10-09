@@ -582,11 +582,9 @@ mod tests {
 
         app.helper.create();
         assert_ne!(app.helper.selected, Some(first));
-        assert!(
-            sender
-                .send(Ok(ActionUiEvent::ProductionRequested(old_approval)))
-                .is_err()
-        );
+        assert!(sender
+            .send(Ok(ActionUiEvent::ProductionRequested(old_approval)))
+            .is_err());
         app.poll_helper();
         assert!(app.helper.action_ui.pending.is_none());
         assert!(app.helper.action_ui.production_approval.is_none());
@@ -604,13 +602,11 @@ mod tests {
         app.helper.action_ui.pending = Some(receiver);
         app.helper
             .revise(CaseEdit::Description(Answer::Known("Changed case".into())));
-        assert!(
-            sender
-                .send(Ok(ActionUiEvent::ProductionRequested(test_approval(
-                    second
-                ))))
-                .is_err()
-        );
+        assert!(sender
+            .send(Ok(ActionUiEvent::ProductionRequested(test_approval(
+                second
+            ))))
+            .is_err());
         app.poll_helper();
         assert!(app.helper.action_ui.production_approval.is_none());
         assert!(!app.helper.action_ui.staging_confirmed);

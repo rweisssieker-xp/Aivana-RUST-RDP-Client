@@ -13,10 +13,10 @@ use crate::helper::{
     scope::{BoundScope, CredentialPurpose, DatabaseEngine},
 };
 use crate::helper_action::{
-    CriterionComparator, CriterionRequirement, RequiredCheck, VerificationSpec, digest,
+    digest, CriterionComparator, CriterionRequirement, RequiredCheck, VerificationSpec,
 };
 use crate::helper_approval::{ActionProof, RunKind};
-use anyhow::{Context, Result, ensure};
+use anyhow::{ensure, Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::{

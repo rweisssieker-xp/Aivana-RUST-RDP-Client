@@ -5,7 +5,7 @@ use super::sql::changes::{NativeActionProof, NativeActionState};
 use super::sql::rehearsal::SqlRehearsalReceipt;
 use super::sql::restoration::{ProductionReceipt, RestorationOutcome};
 use crate::helper_approval::{ActionOutcomeAckV2, ActionOutcomeEventV2, ActionOutcomeV2};
-use anyhow::{Result, ensure};
+use anyhow::{ensure, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};

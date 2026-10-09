@@ -10,7 +10,7 @@ use super::{
 };
 use crate::helper_action::{digest, valid_digest};
 use crate::helper_approval::{ActionBindingV2, ActionProof, ConsumeReceiptV2, RunKind};
-use anyhow::{Result, ensure};
+use anyhow::{ensure, Result};
 use chrono::Utc;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};

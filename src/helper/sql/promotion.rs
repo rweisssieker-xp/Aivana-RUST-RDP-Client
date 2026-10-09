@@ -17,7 +17,7 @@ use crate::helper::{
 };
 use crate::helper_action::VerifiedSqlMetadata;
 use crate::helper_approval::{ActionBindingV2, ActionOutcomeEventV2, ActionProof, RunKind};
-use anyhow::{Result, ensure};
+use anyhow::{ensure, Result};
 use chrono::{DateTime, Utc};
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;

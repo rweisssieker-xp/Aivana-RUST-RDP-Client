@@ -6,10 +6,10 @@ use crate::helper::{
     scope::{BoundScope, CredentialPurpose, DatabaseEngine},
 };
 use crate::helper_action::{
-    SortDirection, SqlAction, SqlEngine, VerifiedSqlColumn, VerifiedSqlMetadata, digest,
+    digest, SortDirection, SqlAction, SqlEngine, VerifiedSqlColumn, VerifiedSqlMetadata,
 };
 use crate::helper_approval::RunKind;
-use anyhow::{Context, Result, ensure};
+use anyhow::{ensure, Context, Result};
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use native_tls::TlsConnector;

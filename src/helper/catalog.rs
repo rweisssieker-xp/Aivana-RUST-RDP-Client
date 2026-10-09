@@ -8,8 +8,8 @@ use crate::helper_action::{
     self, CriterionComparator, CriterionRequirement, Digest, RequiredCheck, RestorationSpec,
     SqlAction, SqlEngine, VerificationSpec, VerifiedSqlMetadata,
 };
-use anyhow::{Result, ensure};
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use anyhow::{ensure, Result};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::{DateTime, Duration, Utc};
 use ring::signature;
 use serde::{Deserialize, Serialize};
@@ -1133,13 +1133,11 @@ mod tests {
         second.body.revision = 2;
         sign(&mut second);
         writer_two.import_signed(second).unwrap();
-        assert!(
-            writer_two
-                .save_protected(&path)
-                .unwrap_err()
-                .to_string()
-                .contains("reload")
-        );
+        assert!(writer_two
+            .save_protected(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("reload"));
         assert_eq!(
             Catalog::load_protected(&path, trust).unwrap().entries[0]
                 .body
@@ -1160,13 +1158,11 @@ mod tests {
         first.enroll(&key_a).unwrap();
         first.save_protected(&path).unwrap();
         stale.enroll(&key_b).unwrap();
-        assert!(
-            stale
-                .save_protected(&path)
-                .unwrap_err()
-                .to_string()
-                .contains("reload")
-        );
+        assert!(stale
+            .save_protected(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("reload"));
         assert_eq!(
             CatalogTrust::load_protected(&path).unwrap().enrolled_keys,
             vec![key_a]
@@ -1340,34 +1336,26 @@ mod tests {
             expected_row_count: 1,
             window: "after change".into(),
         };
-        assert!(
-            check_gaps(&case, &wrong, action.object())
-                .iter()
-                .any(|g| g.contains("SQL functional"))
-        );
+        assert!(check_gaps(&case, &wrong, action.object())
+            .iter()
+            .any(|g| g.contains("SQL functional")));
         let mut wrong = entry.body.verification.clone();
         if let RequiredCheck::Performance { object_id, .. } = &mut wrong.checks[1] {
             *object_id = 43;
         }
-        assert!(
-            check_gaps(&case, &wrong, action.object())
-                .iter()
-                .any(|g| g.contains("Performance"))
-        );
+        assert!(check_gaps(&case, &wrong, action.object())
+            .iter()
+            .any(|g| g.contains("Performance")));
         wrong = entry.body.verification.clone();
         wrong.criteria[0].threshold_bits = 201f64.to_bits();
-        assert!(
-            check_gaps(&case, &wrong, action.object())
-                .iter()
-                .any(|g| g.contains("criteria"))
-        );
+        assert!(check_gaps(&case, &wrong, action.object())
+            .iter()
+            .any(|g| g.contains("criteria")));
         wrong = entry.body.verification.clone();
         wrong.criteria.pop();
-        assert!(
-            check_gaps(&case, &wrong, action.object())
-                .iter()
-                .any(|g| g.contains("criteria"))
-        );
+        assert!(check_gaps(&case, &wrong, action.object())
+            .iter()
+            .any(|g| g.contains("criteria")));
     }
     #[test]
     fn signed_catalog_never_proposes_from_unbound_case_or_revoked_trust() {
@@ -1382,19 +1370,17 @@ mod tests {
             catalog.applicability(&case, &entry, case.evidence(), Utc::now()),
             Applicability::Gaps(_)
         ));
-        assert!(
-            catalog
-                .propose(
-                    &case,
-                    &entry,
-                    ProposalParams {
-                        plan_sha256: d(),
-                        evidence_ids: vec![Uuid::new_v4()],
-                        statistics_limit_acknowledged: true
-                    }
-                )
-                .is_err()
-        );
+        assert!(catalog
+            .propose(
+                &case,
+                &entry,
+                ProposalParams {
+                    plan_sha256: d(),
+                    evidence_ids: vec![Uuid::new_v4()],
+                    statistics_limit_acknowledged: true
+                }
+            )
+            .is_err());
         catalog.trust = CatalogTrust::default();
         assert!(
             matches!(catalog.applicability(&case, &entry, case.evidence(), Utc::now()),
@@ -1406,8 +1392,8 @@ mod tests {
     fn current_protected_recipe_is_rederived_and_rejects_revocation_or_replacement() {
         use crate::helper::{
             evidence::{
-                Coverage, EVIDENCE_SCHEMA, EvidenceBinding, EvidenceEnvelope, EvidenceStatus,
-                NormalizedRecord, Observation, Origin, RecordKind, TimeQuality,
+                Coverage, EvidenceBinding, EvidenceEnvelope, EvidenceStatus, NormalizedRecord,
+                Observation, Origin, RecordKind, TimeQuality, EVIDENCE_SCHEMA,
             },
             manifest::{CapabilityId, CapabilityManifest, ProbeParams},
             planner::{HelperPlan, HelperPlanStep},

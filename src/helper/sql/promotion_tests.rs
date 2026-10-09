@@ -3,38 +3,37 @@
 use super::*;
 use crate::helper::{
     approval::{
-        NativeDispatchProof, authorize_and_record_intent, authorize_and_start_dispatch,
-        production_request_binding, record_local_review, staged_request_binding,
-        withdraw_local_review,
+        authorize_and_record_intent, authorize_and_start_dispatch, production_request_binding,
+        record_local_review, staged_request_binding, withdraw_local_review, NativeDispatchProof,
     },
     capability::{ProbeAdapter, ProbeRequest},
     case::{CaseEdit, Comparator, ProblemIntake, SuccessCriterion},
     catalog::{
-        Catalog, CatalogAction, CatalogTrust, Prerequisite as RecipePrerequisite, ProposalParams,
-        RecipeBody, guest_sign_lab_recipe,
+        guest_sign_lab_recipe, Catalog, CatalogAction, CatalogTrust,
+        Prerequisite as RecipePrerequisite, ProposalParams, RecipeBody,
     },
-    credentials::{PersistentSecretResolver, save_scoped_at},
+    credentials::{save_scoped_at, PersistentSecretResolver},
     evidence::{EvidenceBinding, EvidenceStatus},
     manifest::{CapabilityId, CheckRole, Prerequisite as ProbePrerequisite, ProbeParams},
     planner::{HelperPlan, HelperPlanStep},
     scope::{CredentialPurpose, CredentialScope, DatabaseEngine},
     sql::{
         changes::{
-            GuestPgBoundaryCounts, GuestPgReadback, guest_pg_boundary_counts,
-            guest_pg_read_only_witness, reset_guest_pg_boundary_counts,
+            guest_pg_boundary_counts, guest_pg_read_only_witness, reset_guest_pg_boundary_counts,
+            GuestPgBoundaryCounts, GuestPgReadback,
         },
         postgres::PostgresAdapter,
-        rehearsal::{SqlTrialMapping, load_sql_rehearsal, run_sql_rehearsal},
-        restoration::{RestorationOutcome, load_production_receipt, restore_index},
+        rehearsal::{load_sql_rehearsal, run_sql_rehearsal, SqlTrialMapping},
+        restoration::{load_production_receipt, restore_index, RestorationOutcome},
         templates::ReviewedSelectTemplate,
         types::SqlObservation,
     },
     store::HelperStore,
 };
 use crate::helper_action::{
-    CriterionComparator, CriterionRequirement, PlainIndexColumn, RequiredCheck, RestorationSpec,
-    SortDirection, SqlAction, SqlEngine, VerificationSpec, VerifiedSqlColumn, VerifiedSqlMetadata,
-    VerifiedSqlObject, digest,
+    digest, CriterionComparator, CriterionRequirement, PlainIndexColumn, RequiredCheck,
+    RestorationSpec, SortDirection, SqlAction, SqlEngine, VerificationSpec, VerifiedSqlColumn,
+    VerifiedSqlMetadata, VerifiedSqlObject,
 };
 use crate::helper_approval::{
     ActionApprovalStateV2, ActionBindingV2, ActionDecisionV2, ConsumeActionApprovalV2,
@@ -44,7 +43,7 @@ use crate::mission::Target;
 use crate::models::SecretCredential;
 use crate::team_client::{TeamClient, VerifiedConsumeV2};
 use crate::team_server::{Role, TokenRequest};
-use anyhow::{Context, Result, ensure};
+use anyhow::{ensure, Context, Result};
 use chrono::{Duration, Utc};
 use serde::Serialize;
 use std::{
