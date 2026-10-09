@@ -4,8 +4,8 @@ use super::*;
 use crate::helper::credentials::{PersistentSecretResolver, SecretResolver};
 use crate::helper::sql::{
     benchmark::{
-        self, CompatibilityEngine, CompatibilityEvidence, POLICY_VERSION, ReviewedWorkload,
-        SamplingPolicy, WorkloadSamples,
+        self, CompatibilityEngine, CompatibilityEvidence, POLICY_VERSION,
+        PostcommitWorkloadAdmission, ReviewedWorkload, SamplingPolicy, WorkloadSamples,
     },
     templates::{FIXTURE_SCHEMA, TemplateBind, TemplateStatement},
 };
@@ -336,9 +336,32 @@ pub(in crate::helper::sql) async fn run_rehearsal_workload(
     request: &ReviewedWorkload,
     policy: &SamplingPolicy,
     cancel: CancellationToken,
+) -> Result<WorkloadSamples> {
+    run_rehearsal_workload_inner(request, policy, cancel, true).await
+}
+
+pub(in crate::helper::sql) async fn run_admitted_rehearsal_workload(
+    admission: &PostcommitWorkloadAdmission,
+    policy: &SamplingPolicy,
+    cancel: CancellationToken,
+) -> Result<WorkloadSamples> {
+    run_rehearsal_workload_inner(admission.request(), policy, cancel, false).await
+}
+
+async fn run_rehearsal_workload_inner(
+    request: &ReviewedWorkload,
+    policy: &SamplingPolicy,
+    cancel: CancellationToken,
     require_fresh_review: bool,
 ) -> Result<WorkloadSamples> {
     policy.validate()?;
+    if require_fresh_review {
+        ensure!(
+            chrono::Utc::now().signed_duration_since(request.reviewed_at)
+                < chrono::Duration::minutes(5),
+            "SQL Server workload review expired"
+        );
+    }
     let statement = request.template.sql_server_statement(&request.scope)?;
     let BoundScope::Database {
         target,

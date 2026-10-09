@@ -283,9 +283,10 @@ async fn admitted_postcommit_read_keeps_native_guards_after_review_expiry() {
     let (mut review, statement) = reviewed();
     let now = chrono::Utc::now();
     review.reviewed_at = now - chrono::Duration::minutes(6);
-    assert!(benchmark::admit_postcommit_workload_at(&review, now).is_err());
+    assert!(benchmark::admit_postcommit_workload(&review).is_err());
+    assert!(benchmark::test_admit_postcommit_workload_at(&review, now).is_err());
     let admission =
-        benchmark::admit_postcommit_workload_at(&review, now - chrono::Duration::minutes(2))
+        benchmark::test_admit_postcommit_workload_at(&review, now - chrono::Duration::minutes(2))
             .unwrap();
     assert_eq!(admission.request().reviewed_at, review.reviewed_at);
 

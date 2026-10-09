@@ -70,13 +70,21 @@ pub(super) fn admit_postcommit_workload(
     admit_postcommit_workload_at(request, chrono::Utc::now())
 }
 
-pub(super) fn admit_postcommit_workload_at(
+fn admit_postcommit_workload_at(
     request: &ReviewedWorkload,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<PostcommitWorkloadAdmission> {
     ensure_review_freshness_at(request, now)?;
     request.fingerprint()?;
     Ok(PostcommitWorkloadAdmission(request.clone()))
+}
+
+#[cfg(test)]
+pub(super) fn test_admit_postcommit_workload_at(
+    request: &ReviewedWorkload,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<PostcommitWorkloadAdmission> {
+    admit_postcommit_workload_at(request, now)
 }
 
 fn ensure_review_freshness(request: &ReviewedWorkload) -> Result<()> {
@@ -956,6 +964,15 @@ pub async fn run_sandbox_workload(
     policy: &SamplingPolicy,
     cancel: CancellationToken,
 ) -> Result<WorkloadSamples> {
+    if matches!(
+        &request.scope,
+        BoundScope::Database {
+            engine: DatabaseEngine::SqlServer,
+            ..
+        }
+    ) {
+        return super::sql_server::run_rehearsal_workload(request, policy, cancel).await;
+    }
     run_sandbox_workload_inner(request, policy, cancel, true).await
 }
 
@@ -964,6 +981,15 @@ pub(super) async fn run_admitted_postcommit_workload(
     policy: &SamplingPolicy,
     cancel: CancellationToken,
 ) -> Result<WorkloadSamples> {
+    if matches!(
+        &admission.request().scope,
+        BoundScope::Database {
+            engine: DatabaseEngine::SqlServer,
+            ..
+        }
+    ) {
+        return super::sql_server::run_admitted_rehearsal_workload(admission, policy, cancel).await;
+    }
     run_sandbox_workload_inner(admission.request(), policy, cancel, false).await
 }
 
@@ -973,21 +999,6 @@ async fn run_sandbox_workload_inner(
     cancel: CancellationToken,
     require_fresh_review: bool,
 ) -> Result<WorkloadSamples> {
-    if matches!(
-        &request.scope,
-        BoundScope::Database {
-            engine: DatabaseEngine::SqlServer,
-            ..
-        }
-    ) {
-        return super::sql_server::run_rehearsal_workload(
-            request,
-            policy,
-            cancel,
-            require_fresh_review,
-        )
-        .await;
-    }
     policy.validate()?;
     ensure!(!cancel.is_cancelled(), "workload canceled");
     if require_fresh_review {
