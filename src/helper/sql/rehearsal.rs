@@ -727,6 +727,10 @@ impl SqlRehearsalReceipt {
     pub fn run_id(&self) -> Uuid {
         self.run_id
     }
+    #[cfg(test)]
+    pub(crate) fn guest_production_before_sha256(&self) -> Option<&str> {
+        self.production_before_sha256.as_deref()
+    }
     pub fn path(&self) -> Result<PathBuf> {
         crate::security::app_data_file(&format!(
             "relayne-helper-sql-rehearsal-{}.dpapi",

@@ -444,6 +444,10 @@ impl ActionJournal {
             restoration_outcome: None,
             restoration_pending: false,
         });
+        #[cfg(test)]
+        if guest_persistence_fault(1) {
+            anyhow::bail!("Injected guest intent persistence failure");
+        }
         self.save()?;
         Ok(id)
     }
@@ -837,6 +841,10 @@ impl ActionJournal {
         );
         item.restoration_pending = true;
         item.updated_at = Utc::now();
+        #[cfg(test)]
+        if guest_persistence_fault(2) {
+            anyhow::bail!("Injected guest restoration claim persistence failure");
+        }
         next.save()?;
         *self = next;
         Ok(())
@@ -951,6 +959,28 @@ impl ActionJournal {
                 )
         })
     }
+}
+
+#[cfg(test)]
+static GUEST_PERSISTENCE_FAULT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+#[cfg(test)]
+pub(crate) fn arm_guest_persistence_fault(phase: u8) {
+    assert!(matches!(phase, 1 | 2));
+    GUEST_PERSISTENCE_FAULT.store(phase, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(test)]
+fn guest_persistence_fault(phase: u8) -> bool {
+    std::env::var("USERNAME").ok().as_deref() == Some("WDAGUtilityAccount")
+        && GUEST_PERSISTENCE_FAULT
+            .compare_exchange(
+                phase,
+                0,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_ok()
 }
 
 #[cfg(test)]

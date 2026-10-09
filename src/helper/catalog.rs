@@ -386,6 +386,29 @@ fn recipe_bytes(body: &RecipeBody, provenance: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// A fresh, explicitly enrolled lab publisher for the ignored guest fixture only.
+/// Admission still verifies the ordinary protected trust and signed catalog entry.
+#[cfg(test)]
+pub(crate) fn guest_sign_lab_recipe(body: RecipeBody) -> Result<CatalogEntry> {
+    use ring::{
+        rand::SystemRandom,
+        signature::{Ed25519KeyPair, KeyPair},
+    };
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new())
+        .map_err(|_| anyhow::anyhow!("Guest lab recipe key generation failed"))?;
+    let key = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
+        .map_err(|_| anyhow::anyhow!("Guest lab recipe key invalid"))?;
+    let provenance = "ActorTest: isolated Task 15 guest fixture".to_owned();
+    let entry = CatalogEntry {
+        publisher_key: STANDARD.encode(key.public_key().as_ref()),
+        signature: STANDARD.encode(key.sign(&recipe_bytes(&body, &provenance)?).as_ref()),
+        body,
+        provenance,
+    };
+    entry.validate()?;
+    Ok(entry)
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Catalog {
     pub entries: Vec<CatalogEntry>,

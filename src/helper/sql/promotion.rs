@@ -193,3 +193,7 @@ pub async fn apply_sql_production(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "promotion_tests.rs"]
+mod tests;

@@ -164,7 +164,11 @@ pub(crate) async fn collect_trial_target(
     ensure!(!cancel.is_cancelled(), "Trial collection canceled");
     let stage_state = match production.state.engine {
         SqlEngine::Postgres => {
+            #[cfg(test)]
+            READ_ONLY_PG_CONTACTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let (client, driver, _) = pg_connection(stage_scope).await?;
+            #[cfg(test)]
+            READ_ONLY_PG_OPENS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let observed = tokio::time::timeout(CONNECT_LIMIT, pg_state(&client, stage_scope))
                 .await
                 .context("Staging metadata timed out")?;
@@ -597,6 +601,165 @@ async fn pg_state(client: &PgClient, scope: &BoundScope) -> Result<NativeState> 
     })
 }
 
+#[cfg(test)]
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct GuestPgIndexWitness {
+    pub id: u64,
+    pub name: String,
+    pub definition_sha256: String,
+    pub marker_sha256: Option<String>,
+    pub valid: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct GuestPgReadback {
+    pub physical_sha256: String,
+    pub database_id: u64,
+    pub object_id: u64,
+    pub row_count: usize,
+    pub row_sha256: String,
+    pub index_set_sha256: String,
+    pub indexes: Vec<GuestPgIndexWitness>,
+    pub customer_id_index_present: bool,
+}
+
+/// Fixed, read-only synthetic fixture witness. No SQL text is accepted from a caller.
+#[cfg(test)]
+pub(crate) async fn guest_pg_read_only_witness(
+    change_scope: &BoundScope,
+    read_scope: &BoundScope,
+    cancel: CancellationToken,
+) -> Result<GuestPgReadback> {
+    use sha2::Digest as _;
+    ensure!(
+        change_scope
+            .credential()
+            .is_some_and(|credential| credential.purpose == CredentialPurpose::ControlledChange)
+            && read_scope
+                .credential()
+                .is_some_and(|credential| credential.purpose == CredentialPurpose::Read)
+            && change_scope.resource_digest()? == read_scope.resource_digest()?
+            && matches!(read_scope, BoundScope::Database { engine: DatabaseEngine::Postgres, schema: Some(schema), object: Some(table), .. } if schema == "fixture" && table == "orders"),
+        "Guest witness requires exact fixture change and reader scopes"
+    );
+    ensure!(!cancel.is_cancelled(), "Guest readback canceled");
+    READ_ONLY_PG_CONTACTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let (client, driver, _) = pg_connection(change_scope).await?;
+    READ_ONLY_PG_OPENS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    READ_ONLY_PG_CONTACTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let (reader, reader_driver) = match guest_pg_reader_connection(read_scope, &cancel).await {
+        Ok(connection) => connection,
+        Err(error) => {
+            driver.abort();
+            return Err(error);
+        }
+    };
+    READ_ONLY_PG_OPENS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let result = async {
+        let state = pg_state(&client, change_scope).await?;
+        let rows = tokio::select! {
+            _ = cancel.cancelled() => anyhow::bail!("Guest readback canceled"),
+            result = tokio::time::timeout(
+                ACTION_LIMIT,
+                reader.query(
+                    "SELECT row_to_json(t)::text FROM fixture.orders AS t ORDER BY t.order_id LIMIT 100001",
+                    &[],
+                ),
+            ) => result.context("Fixture row witness timed out")??,
+        };
+        ensure!(rows.len() <= 100_000, "Fixture row witness exceeds bound");
+        let mut row_hash = sha2::Sha256::new();
+        for row in &rows {
+            let text: String = row.try_get(0)?;
+            row_hash.update((text.len() as u64).to_le_bytes());
+            row_hash.update(text.as_bytes());
+        }
+        let indexes = state
+            .indexes
+            .iter()
+            .map(|index| {
+                Ok(GuestPgIndexWitness {
+                    id: index.id,
+                    name: index.name.clone(),
+                    definition_sha256: digest(b"relayne-guest-pg-index-definition-v1", &index.definition)?,
+                    marker_sha256: index
+                        .ownership
+                        .as_ref()
+                        .map(|marker| digest(b"relayne-guest-pg-index-marker-v1", marker))
+                        .transpose()?,
+                    valid: index.valid,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(GuestPgReadback {
+            physical_sha256: digest(
+                b"relayne-helper-physical-database-v1",
+                &(state.engine, &state.physical_instance, &state.database, state.database_id),
+            )?,
+            database_id: state.database_id,
+            object_id: state.object_id,
+            row_count: rows.len(),
+            row_sha256: format!("{:x}", row_hash.finalize()),
+            index_set_sha256: digest(b"relayne-guest-pg-index-set-v1", &state.indexes)?,
+            indexes,
+            customer_id_index_present: state
+                .indexes
+                .iter()
+                .any(|index| index.definition.to_ascii_lowercase().contains("customer_id")),
+        })
+    }
+    .await;
+    driver.abort();
+    reader_driver.abort();
+    result
+}
+
+#[cfg(test)]
+async fn guest_pg_reader_connection(
+    scope: &BoundScope,
+    cancel: &CancellationToken,
+) -> Result<(PgClient, tokio::task::JoinHandle<()>)> {
+    scope.validate()?;
+    let BoundScope::Database {
+        target,
+        engine: DatabaseEngine::Postgres,
+        port,
+        database,
+        credential: Some(credential),
+        ..
+    } = scope
+    else {
+        anyhow::bail!("Fixed guest PostgreSQL reader scope required")
+    };
+    ensure!(
+        credential.purpose == CredentialPurpose::Read,
+        "Guest readback cannot use change credential"
+    );
+    let secret = PersistentSecretResolver::new()?.resolve(credential, CredentialPurpose::Read)?;
+    ensure!(
+        secret.username() == credential.principal,
+        "Guest reader principal changed"
+    );
+    let tls = MakeTlsConnector::new(TlsConnector::builder().build()?);
+    let mut cfg = PgConfig::new();
+    cfg.host(&target.host)
+        .port(*port)
+        .dbname(database)
+        .user(&credential.principal)
+        .password(secret.password())
+        .ssl_mode(tokio_postgres::config::SslMode::Require)
+        .connect_timeout(CONNECT_LIMIT);
+    let (client, connection) = tokio::select! {
+        _ = cancel.cancelled() => anyhow::bail!("Guest reader canceled"),
+        result = tokio::time::timeout(CONNECT_LIMIT, cfg.connect(tls)) => result.context("Guest reader connection timed out")??,
+    };
+    let driver = tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    Ok((client, driver))
+}
+
 fn check_against_metadata(
     state: &NativeState,
     action: &SqlAction,
@@ -657,7 +820,11 @@ pub(crate) async fn collect_native_preflight(
     ensure!(!cancel.is_cancelled(), "SQL preflight canceled");
     let state = match action.object().engine {
         SqlEngine::Postgres => {
+            #[cfg(test)]
+            READ_ONLY_PG_CONTACTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let (client, driver, _) = pg_connection(scope).await?;
+            #[cfg(test)]
+            READ_ONLY_PG_OPENS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let result = tokio::select! {
                 _ = cancel.cancelled() => anyhow::bail!("SQL preflight canceled"),
                 result = tokio::time::timeout(CONNECT_LIMIT, pg_state(&client, scope)) =>
@@ -1166,7 +1333,16 @@ async fn pg_execute(
         ownership_marker_sha256: None,
         ownership_marker: None,
     };
-    let Ok((client, driver, _)) = pg_connection(scope).await else {
+    #[cfg(test)]
+    if permit.binding().run_kind == RunKind::Production {
+        PRODUCTION_PG_CONTACTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    let connection = pg_connection(scope).await;
+    #[cfg(test)]
+    if connection.is_ok() && permit.binding().run_kind == RunKind::Production {
+        PRODUCTION_PG_OPENS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    let Ok((client, driver, _)) = connection else {
         proof.state = NativeActionState::Failed;
         return proof;
     };
@@ -1187,6 +1363,10 @@ async fn pg_execute(
                 schema,
                 index,
             } => {
+                #[cfg(test)]
+                if permit.binding().run_kind == RunKind::Production {
+                    PRODUCTION_PG_MUTATIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
                 client.batch_execute(statement).await?;
                 #[cfg(test)]
                 inject_guest_native_fault(NativeFaultPhase::PgMarker)?;
@@ -1612,7 +1792,11 @@ pub(crate) async fn restore_exact_production_index(
     let result: Result<()> = match action {
         SqlAction::PostgresCreateIndex { object, index, .. } => {
             async {
+                #[cfg(test)]
+                RESTORATION_PG_CONTACTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let (client, driver, _) = pg_connection(scope).await?;
+                #[cfg(test)]
+                RESTORATION_PG_OPENS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let transaction = async {
                     client.batch_execute("BEGIN").await?;
                     client
@@ -1622,6 +1806,8 @@ pub(crate) async fn restore_exact_production_index(
                         .await?;
                     let fresh = pg_state(&client, scope).await?;
                     exact_original_index(&fresh, receipt)?;
+                    #[cfg(test)]
+                    RESTORATION_PG_DROPS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     client
                         .batch_execute(&format!(
                             "DROP INDEX {}.{}",
@@ -1685,6 +1871,70 @@ pub(crate) async fn restore_exact_production_index(
     } else {
         RestorationOutcome::NeedsIntervention
     }
+}
+
+#[cfg(test)]
+static READ_ONLY_PG_CONTACTS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static READ_ONLY_PG_OPENS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static PRODUCTION_PG_CONTACTS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static PRODUCTION_PG_OPENS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static PRODUCTION_PG_MUTATIONS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static RESTORATION_PG_CONTACTS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static RESTORATION_PG_OPENS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static RESTORATION_PG_DROPS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub(crate) struct GuestPgBoundaryCounts {
+    pub read_only_contacts: usize,
+    pub read_only_opens: usize,
+    pub production_executor_contacts: usize,
+    pub production_executor_opens: usize,
+    pub production_mutation_attempts: usize,
+    pub restoration_executor_contacts: usize,
+    pub restoration_executor_opens: usize,
+    pub restoration_drop_attempts: usize,
+}
+
+#[cfg(test)]
+pub(crate) fn guest_pg_boundary_counts() -> GuestPgBoundaryCounts {
+    use std::sync::atomic::Ordering::SeqCst;
+    GuestPgBoundaryCounts {
+        read_only_contacts: READ_ONLY_PG_CONTACTS.load(SeqCst),
+        read_only_opens: READ_ONLY_PG_OPENS.load(SeqCst),
+        production_executor_contacts: PRODUCTION_PG_CONTACTS.load(SeqCst),
+        production_executor_opens: PRODUCTION_PG_OPENS.load(SeqCst),
+        production_mutation_attempts: PRODUCTION_PG_MUTATIONS.load(SeqCst),
+        restoration_executor_contacts: RESTORATION_PG_CONTACTS.load(SeqCst),
+        restoration_executor_opens: RESTORATION_PG_OPENS.load(SeqCst),
+        restoration_drop_attempts: RESTORATION_PG_DROPS.load(SeqCst),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn reset_guest_pg_boundary_counts() {
+    use std::sync::atomic::Ordering::SeqCst;
+    READ_ONLY_PG_CONTACTS.store(0, SeqCst);
+    READ_ONLY_PG_OPENS.store(0, SeqCst);
+    PRODUCTION_PG_CONTACTS.store(0, SeqCst);
+    PRODUCTION_PG_OPENS.store(0, SeqCst);
+    PRODUCTION_PG_MUTATIONS.store(0, SeqCst);
+    RESTORATION_PG_CONTACTS.store(0, SeqCst);
+    RESTORATION_PG_OPENS.store(0, SeqCst);
+    RESTORATION_PG_DROPS.store(0, SeqCst);
 }
 
 #[cfg(test)]
