@@ -682,11 +682,14 @@ pub(crate) async fn guest_pg_read_only_witness(
                 Ok(GuestPgIndexWitness {
                     id: index.id,
                     name: index.name.clone(),
-                    definition_sha256: digest(b"relayne-guest-pg-index-definition-v1", &index.definition)?,
+                    definition_sha256: digest(
+                        b"relayne-helper-created-index-definition-v1",
+                        &index.definition,
+                    )?,
                     marker_sha256: index
                         .ownership
                         .as_ref()
-                        .map(|marker| digest(b"relayne-guest-pg-index-marker-v1", marker))
+                        .map(|marker| digest(b"relayne-helper-created-index-marker-v1", marker))
                         .transpose()?,
                     valid: index.valid,
                 })

@@ -824,6 +824,148 @@ fn assert_no_production_or_restore_contact(before: GuestPgBoundaryCounts) -> Res
     Ok(())
 }
 
+async fn reject_rotated_vault_generation_at_final_start(
+    trace: &mut GuestTrace,
+    fixture: &GuestFixture,
+    team: &GuestTeam,
+    rehearsal: &crate::helper::sql::rehearsal::SqlRehearsalReceipt,
+    previous_run_id: Uuid,
+    previous_approval_id: Uuid,
+) -> Result<()> {
+    use crate::helper::approval::DispatchContext;
+
+    let native =
+        NativeDispatchProof::collect(&fixture.case, &fixture.proposal, CancellationToken::new())
+            .await?;
+    let journal = ActionJournal::load(&fixture.journal_path)?;
+    let binding = production_request_binding(
+        &fixture.case,
+        &fixture.proposal,
+        team.organization.clone(),
+        &native,
+        rehearsal,
+        &journal,
+    )?;
+    ensure!(
+        binding.run_id != previous_run_id,
+        "Rotated-vault run reused production run"
+    );
+    let consumed = team.approve_once(trace, binding.clone(), true)?;
+    ensure!(
+        consumed.receipt().approval_id != previous_approval_id,
+        "Rotated-vault run reused consumed approval"
+    );
+    let current = DispatchContext {
+        case: &fixture.case,
+        proposal: &fixture.proposal,
+        journal: &journal,
+        observation: native.observation(),
+    };
+    check_sql_promotion(
+        &fixture.case,
+        &fixture.proposal,
+        rehearsal,
+        &binding,
+        &current,
+        Utc::now(),
+    )?;
+
+    let before = guest_pg_boundary_counts();
+    let intent_id = trace.track(
+        TraceStage::NegativeGate,
+        "PersistRotatedVaultPreparedIntent",
+        Some(fixture.case.id()),
+        Some(binding.run_id),
+        || {
+            authorize_and_record_intent(
+                &fixture.case_path,
+                &fixture.journal_path,
+                &fixture.proposal,
+                &binding,
+                &consumed,
+                &native,
+            )
+        },
+    )?;
+    ensure!(
+        ActionJournal::load(&fixture.journal_path)?
+            .intents()
+            .iter()
+            .any(|intent| {
+                intent.run_id == binding.run_id
+                    && intent.state == crate::helper::journal::IntentState::Prepared
+            }),
+        "Rotated-vault negative lacks durable prepared intent"
+    );
+    assert_no_production_or_restore_contact(before)?;
+
+    let case_before = std::fs::read(&fixture.case_path)?;
+    let vault = crate::security::app_data_file("credentials.scoped.dpapi")?;
+    let old_generation = fixture
+        .production_change
+        .credential()
+        .context("Controlled-change scope absent")?
+        .generation;
+    let rotated = save_scoped_at(
+        &vault,
+        &fixture.production_change.resource_digest()?,
+        CredentialPurpose::ControlledChange,
+        SecretCredential {
+            username: "relayne_fixture_owner".into(),
+            password: Uuid::new_v4().to_string(),
+            domain: String::new(),
+        },
+    )?;
+    ensure!(
+        rotated.generation > old_generation && std::fs::read(&fixture.case_path)? == case_before,
+        "Vault rotation changed reviewed case or failed to advance generation"
+    );
+    trace.mark(
+        TraceStage::NegativeGate,
+        "RejectRotatedVaultFinalStart",
+        TraceBoundary::Before,
+        Some(fixture.case.id()),
+        Some(binding.run_id),
+    )?;
+    let error = match authorize_and_start_dispatch(
+        &fixture.case_path,
+        &fixture.journal_path,
+        intent_id,
+        &fixture.proposal,
+        &binding,
+        &consumed,
+        &native,
+    ) {
+        Err(error) => error,
+        Ok(_) => {
+            anyhow::bail!("Rotated protected vault generation reached production dispatch start")
+        }
+    };
+    ensure!(
+        format!("{error:#}").contains("Credential scope mismatch"),
+        "Final dispatch start rejected for a reason other than protected vault generation"
+    );
+    ensure!(
+        ActionJournal::load(&fixture.journal_path)?
+            .intents()
+            .iter()
+            .any(|intent| {
+                intent.run_id == binding.run_id
+                    && intent.state == crate::helper::journal::IntentState::Prepared
+            }),
+        "Rejected final start did not preserve the conservative prepared intent"
+    );
+    assert_no_production_or_restore_contact(before)?;
+    trace.mark(
+        TraceStage::NegativeGate,
+        "RejectRotatedVaultFinalStart",
+        TraceBoundary::After,
+        Some(fixture.case.id()),
+        Some(binding.run_id),
+    )?;
+    Ok(())
+}
+
 fn negative_rehearsal_and_production_admission(
     trace: &mut GuestTrace,
     fixture: &GuestFixture,
@@ -934,23 +1076,6 @@ fn negative_rehearsal_and_production_admission(
         )
         .is_err(),
         "Expired rehearsal or approval timing admitted"
-    );
-    let mut rotated_case = fixture.case.clone();
-    rotated_case.revise(
-        rotated_case.revision(),
-        CaseEdit::Scopes(vec![fixture.production_read.clone()]),
-    )?;
-    ensure!(
-        check_sql_promotion(
-            &rotated_case,
-            &fixture.proposal,
-            rehearsal,
-            binding,
-            &current,
-            Utc::now()
-        )
-        .is_err(),
-        "Changed reviewed credential context admitted"
     );
     let copy_path = Path::new(PRODUCTION_ROOT)
         .join("evidence")
@@ -1439,15 +1564,18 @@ async fn run_guest_pg_task15() -> Result<()> {
         after_create.row_sha256 == fixture.baseline.row_sha256
             && after_create.database_id == fixture.baseline.database_id
             && after_create.object_id == fixture.baseline.object_id
-            && after_create
-                .indexes
-                .iter()
-                .any(|index| index.id == owned.id && index.name == owned.name && index.valid)
+            && after_create.indexes.iter().any(|index| {
+                index.id == owned.id
+                    && index.name == owned.name
+                    && index.valid
+                    && index.definition_sha256 == owned.definition_sha256
+                    && index.marker_sha256.as_deref() == Some(owned.marker_sha256.as_str())
+            })
             && fixture.baseline.indexes.iter().all(|old| after_create
                 .indexes
                 .iter()
                 .any(|index| index.id == old.id && index.name == old.name)),
-        "Production exact-run readback changed old rows/indexes or lacks new index"
+        "Production exact-run readback changed old rows/indexes or exact created index proof"
     );
 
     crate::helper::journal::arm_guest_persistence_fault(2);
@@ -1565,6 +1693,15 @@ async fn run_guest_pg_task15() -> Result<()> {
         case_id,
         Some(receipt.run_id()),
     )?;
+    reject_rotated_vault_generation_at_final_start(
+        &mut trace,
+        &fixture,
+        &team,
+        &rehearsal,
+        receipt.run_id(),
+        production_consumed.receipt().approval_id,
+    )
+    .await?;
     trace.mark(
         TraceStage::Complete,
         "BoundedHostWitness",
@@ -1683,6 +1820,20 @@ fn write_success_witness(
     let driver = required_hex_env("RELAYNE_GUEST_DRIVER_SHA256", 64)?;
     let case = fixture.case.id();
     let hash8 = &source[..8];
+    let owned = receipt
+        .index()
+        .context("Production receipt lacks owned index")?;
+    let observed = after_create
+        .indexes
+        .iter()
+        .find(|index| index.id == owned.id && index.name == owned.name)
+        .context("Created index absent from independent readback")?;
+    ensure!(
+        observed.valid
+            && observed.definition_sha256 == owned.definition_sha256
+            && observed.marker_sha256.as_deref() == Some(owned.marker_sha256.as_str()),
+        "Independent created index proof differs from protected receipt"
+    );
     let witness = serde_json::json!({
         "Stage": "Complete", "ProductAcceptance": false, "ExactlyOneTestPassed": true,
         "ActorTest": "task15-requester / task15-stage-approver / task15-production-approver",
@@ -1697,6 +1848,9 @@ fn write_success_witness(
         "OriginalRowSha256": fixture.baseline.row_sha256,
         "OriginalIndexSetSha256": fixture.baseline.index_set_sha256,
         "ProductionAfterCreateIndexSetSha256": after_create.index_set_sha256,
+        "ProductionCreatedIndexOid": observed.id,
+        "ProductionCreatedIndexDefinitionSha256": observed.definition_sha256,
+        "ProductionCreatedIndexMarkerSha256": observed.marker_sha256,
         "AfterRestoreRowSha256": after_restore.row_sha256,
         "AfterRestoreIndexSetSha256": after_restore.index_set_sha256,
         "StagingReceiptSha256": rehearsal.content_sha256(),
