@@ -10,6 +10,10 @@ use crate::helper::sql::{
 };
 
 trait WorkloadSession: Send {
+    fn compatibility_snapshot<'a>(
+        &'a mut self,
+        statement: &'a TemplateStatement,
+    ) -> TdsFuture<'a, String>;
     fn identity<'a>(&'a mut self) -> TdsFuture<'a, Vec<SqlObservation>>;
     fn read_object<'a>(
         &'a mut self,
@@ -20,6 +24,12 @@ trait WorkloadSession: Send {
 }
 
 impl WorkloadSession for NativeSession {
+    fn compatibility_snapshot<'a>(
+        &'a mut self,
+        statement: &'a TemplateStatement,
+    ) -> TdsFuture<'a, String> {
+        Box::pin(async move { NativeSession::compatibility_snapshot(self, statement).await })
+    }
     fn identity<'a>(&'a mut self) -> TdsFuture<'a, Vec<SqlObservation>> {
         <Self as Session>::read(self, SqlServerReadProbe::Identity, "", "")
     }
@@ -108,6 +118,9 @@ async fn collect_with_session(
     metadata_hash.update(request.scope.digest()?.as_bytes());
     metadata_hash.update(serde_json::to_vec(&metadata)?);
     let metadata_sha256 = format!("{:x}", metadata_hash.finalize());
+    let compatibility_before = gated(cancel, deadline, session.compatibility_snapshot(statement))
+        .await
+        .ok();
 
     let mut samples = Vec::with_capacity(policy.samples as usize);
     let mut result_digest: Option<String> = None;
@@ -141,6 +154,21 @@ async fn collect_with_session(
             samples.push(elapsed_ms);
         }
     }
+    let compatibility_after = gated(cancel, deadline, session.compatibility_snapshot(statement))
+        .await
+        .ok();
+    let compatibility = match (&compatibility_before, &compatibility_after) {
+        (Some(before), Some(after)) if before == after => CompatibilityEvidence::native_complete(
+            CompatibilityEngine::SqlServer,
+            before.clone(),
+            after.clone(),
+        )?,
+        _ => CompatibilityEvidence::incomplete(
+            CompatibilityEngine::SqlServer,
+            compatibility_before,
+            compatibility_after,
+        ),
+    };
     let (median_ms, p95_ms, mad_ms) = benchmark::summary(&samples)?;
     let mut environment = Sha256::new();
     environment.update(b"relayne-sqlserver-fixture-workload-v1\0");
@@ -165,11 +193,7 @@ async fn collect_with_session(
         result_sha256: result_digest.ok_or_else(|| anyhow::anyhow!("Missing workload result"))?,
         environment_fingerprint: environment_fingerprint.clone(),
         live_metadata_sha256: metadata_sha256,
-        compatibility: CompatibilityEvidence::incomplete(
-            CompatibilityEngine::SqlServer,
-            Some(environment_fingerprint),
-            None,
-        ),
+        compatibility,
         warmups: policy.warmups,
         milliseconds: samples,
         median_ms,

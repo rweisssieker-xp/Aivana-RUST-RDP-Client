@@ -4,7 +4,7 @@ use crate::helper::{
     case::HelperCase, evidence::Eligibility, manifest::CapabilityId, scope::BoundScope,
     sql::types::SqlObservation,
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
@@ -310,6 +310,28 @@ impl Default for CompatibilityEvidence {
 }
 
 impl CompatibilityEvidence {
+    /// Called only after native pre/post observations in one live session.
+    /// Imported JSON never restores verified_complete.
+    pub(crate) fn native_complete(
+        engine: CompatibilityEngine,
+        before: String,
+        after: String,
+    ) -> Result<Self> {
+        ensure!(
+            engine != CompatibilityEngine::Unknown
+                && crate::helper::evidence::is_digest(&before)
+                && before == after,
+            "Native compatibility observations differ or are incomplete"
+        );
+        Ok(Self {
+            status: CompatibilityStatus::NativeComplete,
+            engine,
+            observed_pre_sha256: Some(before),
+            observed_post_sha256: Some(after),
+            missing: Vec::new(),
+            verified_complete: true,
+        })
+    }
     pub(crate) fn incomplete(
         engine: CompatibilityEngine,
         observed_pre_sha256: Option<String>,
@@ -376,6 +398,243 @@ impl CompatibilityEvidence {
             "invalid compatibility coverage"
         );
         Ok(())
+    }
+}
+
+struct BoundedPlanJson(Vec<u8>);
+impl<'a> tokio_postgres::types::FromSql<'a> for BoundedPlanJson {
+    fn from_sql(
+        _ty: &tokio_postgres::types::Type,
+        raw: &'a [u8],
+    ) -> std::result::Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        if raw.len() > 1024 * 1024 {
+            return Err(
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "plan exceeds bound").into(),
+            );
+        }
+        Ok(Self(raw.to_vec()))
+    }
+    fn accepts(ty: &tokio_postgres::types::Type) -> bool {
+        *ty == tokio_postgres::types::Type::JSON
+    }
+}
+
+async fn native_pg_data_digest(
+    session: &super::templates::VerifiedPgSession,
+    template: ReviewedSelectTemplate,
+) -> Result<String> {
+    let data_sql = match template {
+        ReviewedSelectTemplate::OrderSort => {
+            "SELECT to_jsonb(t)::text FROM fixture.spill_events t ORDER BY event_id LIMIT 100001"
+        }
+        _ => "SELECT to_jsonb(t)::text FROM fixture.orders t ORDER BY order_id LIMIT 100001",
+    };
+    let rows = session.client.query(data_sql, &[]).await?;
+    ensure!(
+        !rows.is_empty() && rows.len() <= 100_000,
+        "Data coverage incomplete"
+    );
+    let mut hash = Sha256::new();
+    hash.update(b"relayne-helper-fixture-full-data-v1\0");
+    hash.update((rows.len() as u64).to_be_bytes());
+    for row in rows {
+        let value: String = row.try_get(0)?;
+        ensure!(value.len() <= 16 * 1024, "Data row exceeds bound");
+        hash.update(value.len().to_be_bytes());
+        hash.update(value.as_bytes());
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+pub(crate) async fn fixture_data_digest(
+    scope: &BoundScope,
+    template: ReviewedSelectTemplate,
+    cancel: CancellationToken,
+) -> Result<String> {
+    let session = connect_fixture(scope, template, &cancel).await?;
+    session
+        .client
+        .batch_execute("BEGIN READ ONLY; SET LOCAL statement_timeout = '15000ms'")
+        .await?;
+    let value = native_pg_data_digest(&session, template).await;
+    let _ = session.client.batch_execute("ROLLBACK").await;
+    value
+}
+
+async fn native_pg_compatibility_snapshot(
+    session: &super::templates::VerifiedPgSession,
+    template: ReviewedSelectTemplate,
+    statement: &super::templates::TemplateStatement,
+) -> Result<String> {
+    let mut hash = Sha256::new();
+    hash.update(b"relayne-helper-native-pg-compatibility-v2\0");
+    // The verified connection attests exact column name/type/order and object OID.
+    hash.update(session.metadata_sha256.as_bytes());
+    let settings = session.client.query_one(
+        "SELECT current_setting('work_mem'), current_setting('enable_seqscan'), current_setting('enable_indexscan'), current_setting('random_page_cost'), current_setting('effective_cache_size'), current_setting('max_parallel_workers_per_gather'), current_setting('search_path'), current_setting('default_statistics_target'), current_setting('jit')",
+        &[],
+    ).await?;
+    for i in 0..9 {
+        let value: String = settings.try_get(i)?;
+        ensure!(value.len() <= 128, "Optimizer setting exceeds bound");
+        hash.update(value.len().to_be_bytes());
+        hash.update(value.as_bytes());
+    }
+    let indexes = session.client.query(
+        "SELECT pg_get_indexdef(ic.oid)::text FROM pg_index i JOIN pg_class ic ON ic.oid=i.indexrelid JOIN pg_class t ON t.oid=i.indrelid JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname='fixture' AND t.relname=$1 ORDER BY ic.relname LIMIT 21",
+        &[&template.object()],
+    ).await?;
+    ensure!(indexes.len() <= 20, "Index coverage incomplete");
+    for row in indexes {
+        let definition: String = row.try_get(0)?;
+        ensure!(definition.len() <= 2048, "Index definition exceeds bound");
+        hash.update(definition.len().to_be_bytes());
+        hash.update(definition.as_bytes());
+    }
+    let stats = session.client.query(
+        "SELECT attname::text, COALESCE(null_frac::text,''), COALESCE(avg_width::text,''), COALESCE(n_distinct::text,''), \
+         most_common_vals IS NULL, octet_length(convert_to(COALESCE(most_common_vals::text,''),'UTF8'))::bigint, \
+         encode(sha256(convert_to(COALESCE(most_common_vals::text,''),'UTF8')),'hex')::text, \
+         histogram_bounds IS NULL, octet_length(convert_to(COALESCE(histogram_bounds::text,''),'UTF8'))::bigint, \
+         encode(sha256(convert_to(COALESCE(histogram_bounds::text,''),'UTF8')),'hex')::text \
+         FROM pg_stats WHERE schemaname='fixture' AND tablename=$1 ORDER BY attname LIMIT 21",
+        &[&template.object()],
+    ).await?;
+    ensure!(
+        !stats.is_empty() && stats.len() <= 20,
+        "Statistics coverage incomplete"
+    );
+    hash.update((stats.len() as u64).to_be_bytes());
+    let mut total_statistics_bytes = 0_u64;
+    let mut previous_column: Option<String> = None;
+    for row in stats {
+        for i in 0..4 {
+            let value: String = row.try_get(i)?;
+            ensure!(
+                value.len() <= 128,
+                "Statistics scalar projection exceeds bound"
+            );
+            total_statistics_bytes = total_statistics_bytes
+                .checked_add(value.len() as u64)
+                .context("Statistics projection length overflow")?;
+            ensure!(
+                total_statistics_bytes <= 128 * 1024,
+                "Statistics aggregate exceeds bound"
+            );
+            if i == 0 {
+                ensure!(
+                    previous_column
+                        .as_deref()
+                        .is_none_or(|name| name < value.as_str()),
+                    "Statistics column coverage not unique"
+                );
+                previous_column = Some(value.clone());
+            }
+            hash.update(value.len().to_be_bytes());
+            hash.update(value.as_bytes());
+        }
+        for (null_at, length_at, digest_at) in [(4, 5, 6), (7, 8, 9)] {
+            add_native_statistics_field(
+                &mut hash,
+                row.try_get(null_at)?,
+                row.try_get(length_at)?,
+                &row.try_get::<_, String>(digest_at)?,
+                &mut total_statistics_bytes,
+            )?;
+        }
+    }
+    hash.update(native_pg_data_digest(session, template).await?.as_bytes());
+    let plan = match statement.bind {
+        TemplateBind::None => session.client.query_one(statement.explain_sql, &[]).await?,
+        TemplateBind::Integer(value) => {
+            session
+                .client
+                .query_one(statement.explain_sql, &[&value])
+                .await?
+        }
+        TemplateBind::Status(value) => {
+            session
+                .client
+                .query_one(statement.explain_sql, &[&value.as_str()])
+                .await?
+        }
+    };
+    let bytes: BoundedPlanJson = plan.try_get(0)?;
+    hash.update(bytes.0.len().to_be_bytes());
+    hash.update(&bytes.0);
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+fn add_native_statistics_field(
+    hash: &mut Sha256,
+    is_null: bool,
+    length: i64,
+    digest: &str,
+    total_bytes: &mut u64,
+) -> Result<()> {
+    let length = u64::try_from(length).context("Negative statistics field length")?;
+    ensure!(length <= 64 * 1024, "Statistics field exceeds bound");
+    *total_bytes = total_bytes
+        .checked_add(length)
+        .context("Statistics projection length overflow")?;
+    ensure!(
+        *total_bytes <= 128 * 1024,
+        "Statistics aggregate exceeds bound"
+    );
+    ensure!(
+        crate::helper::evidence::is_digest(digest)
+            && (!is_null
+                || (length == 0
+                    && digest
+                        == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")),
+        "Invalid native statistics digest projection"
+    );
+    hash.update([u8::from(is_null)]);
+    hash.update(length.to_be_bytes());
+    hash.update(digest.as_bytes());
+    Ok(())
+}
+
+#[cfg(test)]
+mod native_stats_projection_tests {
+    use super::*;
+
+    #[test]
+    fn complete_large_field_is_hashed_with_its_declared_length() {
+        let digest = format!("{:x}", Sha256::digest(vec![b'x'; 9798]));
+        let mut first = Sha256::new();
+        let mut total = 0;
+        add_native_statistics_field(&mut first, false, 9798, &digest, &mut total).unwrap();
+        assert_eq!(total, 9798);
+
+        let mut changed_length = Sha256::new();
+        let mut changed_total = 0;
+        add_native_statistics_field(
+            &mut changed_length,
+            false,
+            9797,
+            &digest,
+            &mut changed_total,
+        )
+        .unwrap();
+        assert_ne!(
+            first.finalize().as_slice(),
+            changed_length.finalize().as_slice()
+        );
+    }
+
+    #[test]
+    fn field_and_aggregate_limits_fail_closed() {
+        let digest = format!("{:x}", Sha256::digest(b"value"));
+        let mut hash = Sha256::new();
+        let mut total = 0;
+        assert!(
+            add_native_statistics_field(&mut hash, false, 65_537, &digest, &mut total).is_err()
+        );
+        let mut total = 128 * 1024;
+        assert!(add_native_statistics_field(&mut hash, false, 1, &digest, &mut total).is_err());
+        let mut total = 0;
+        assert!(add_native_statistics_field(&mut hash, true, 0, &digest, &mut total).is_err());
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -470,6 +729,8 @@ pub async fn run_sandbox_workload(
     let session = connect_fixture(&request.scope, request.template, &cancel).await?;
     let run = async {
         session.client.batch_execute("BEGIN READ ONLY; SET LOCAL statement_timeout = '15000ms'; SET LOCAL lock_timeout = '1000ms'").await?;
+        let compatibility_before =
+            native_pg_compatibility_snapshot(&session, request.template, &statement).await?;
         let mut samples = Vec::with_capacity(policy.samples as usize);
         let mut result_digest: Option<String> = None;
         for i in 0..usize::from(policy.warmups + policy.samples) {
@@ -511,6 +772,8 @@ pub async fn run_sandbox_workload(
             }
         }
         let (median_ms, p95_ms, mad_ms) = summary(&samples)?;
+        let compatibility_after =
+            native_pg_compatibility_snapshot(&session, request.template, &statement).await?;
         let mut environment = Sha256::new();
         environment.update(b"relayne-pg-disposable-fixture-v1\0");
         environment.update(request.scope.resource_digest()?.as_bytes());
@@ -535,11 +798,11 @@ pub async fn run_sandbox_workload(
                 .ok_or_else(|| anyhow::anyhow!("missing workload result"))?,
             environment_fingerprint: environment_fingerprint.clone(),
             live_metadata_sha256: session.metadata_sha256.clone(),
-            compatibility: CompatibilityEvidence::incomplete(
+            compatibility: CompatibilityEvidence::native_complete(
                 CompatibilityEngine::Postgres,
-                Some(environment_fingerprint),
-                None,
-            ),
+                compatibility_before,
+                compatibility_after,
+            )?,
             warmups: policy.warmups,
             milliseconds: samples,
             median_ms,

@@ -345,7 +345,7 @@ impl HelperWorker {
     }
 }
 
-fn normalize(request: &ProbeRequest, output: ProbeOutput) -> Result<EvidenceEnvelope> {
+pub(crate) fn normalize(request: &ProbeRequest, output: ProbeOutput) -> Result<EvidenceEnvelope> {
     ensure!(
         output.source_id.len() <= 4096 && !output.source_id.is_empty() && output.parser_version > 0,
         "Invalid source metadata"

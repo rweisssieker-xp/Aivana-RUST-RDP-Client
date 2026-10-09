@@ -37,6 +37,9 @@ pub(super) use plan::estimated_plan;
 mod workload;
 pub(super) use workload::run_sandbox_workload;
 
+#[path = "sql_server_compat.rs"]
+mod compat;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SqlServerReadProbe {
     Identity,

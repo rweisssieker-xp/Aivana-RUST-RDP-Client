@@ -28,6 +28,44 @@ struct DispatchObservation {
 /// available, so stored evidence or a caller-filled DTO cannot authorize launch.
 pub struct NativeDispatchProof {
     observation: DispatchObservation,
+    physical_sha256: String,
+    native: super::sql::changes::NativePreflight,
+}
+impl NativeDispatchProof {
+    /// Only the closed native collector can create this proof.
+    pub async fn collect(
+        case: &HelperCase,
+        proposal: &HelperProposal,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<Self> {
+        let CatalogAction::Sql { action, metadata } = &proposal.action else {
+            anyhow::bail!("Only SQL actions have a native preflight")
+        };
+        let scope = case
+            .scopes()
+            .iter()
+            .find(|s| s.digest().ok().as_deref() == Some(metadata.object.scope_sha256.as_str()))
+            .ok_or_else(|| anyhow::anyhow!("Reviewed SQL change scope missing"))?;
+        let native =
+            super::sql::changes::collect_native_preflight(action, scope, metadata, cancel).await?;
+        let physical_sha256 = native.physical_digest()?;
+        Ok(Self {
+            observation: DispatchObservation {
+                metadata_sha256: native.metadata_sha256().to_owned(),
+                before_sha256: native.before_sha256().to_owned(),
+                credential_scope_sha256: native.credential_scope_sha256().to_owned(),
+                observed_at: native.observed_at(),
+            },
+            physical_sha256,
+            native,
+        })
+    }
+    pub fn physical_sha256(&self) -> &str {
+        &self.physical_sha256
+    }
+    pub(crate) fn native(&self) -> &super::sql::changes::NativePreflight {
+        &self.native
+    }
 }
 
 /// Prepares metadata for a staged consent request from the current reviewed case.
@@ -37,6 +75,8 @@ pub fn staged_request_binding(
     case: &HelperCase,
     proposal: &HelperProposal,
     organization_sha256: String,
+    native: &NativeDispatchProof,
+    mapping: &super::sql::rehearsal::SqlTrialMapping,
 ) -> Result<ActionBindingV2> {
     let now = Utc::now();
     ensure!(
@@ -63,7 +103,7 @@ pub fn staged_request_binding(
         "Controlled-change credential scope missing"
     );
     let resource = scope.resource_digest()?;
-    let evidence = case
+    let _evidence = case
         .evidence()
         .iter()
         .find(|e| {
@@ -90,6 +130,24 @@ pub fn staged_request_binding(
     let review_sha256 = proposal.review_digest()?;
     let metadata_sha256 = digest(b"relayne-helper-sql-metadata-v2", metadata)?;
     let credential_scope_sha256 = scope.credential_scope_digest()?;
+    mapping.validate()?;
+    ensure!(
+        mapping.case_id == case.id()
+            && mapping.case_revision == case.revision()
+            && mapping.production_scope_sha256 == scope.digest()?
+            && mapping.production_physical_sha256 == native.physical_sha256()
+            && mapping.action_sha256 == digest(b"relayne-helper-sql-action-v1", action)?,
+        "Reviewed staging mapping differs live production action"
+    );
+    ensure!(
+        native.observation.metadata_sha256 == metadata_sha256
+            && native.observation.credential_scope_sha256 == credential_scope_sha256
+            && valid_digest(&native.observation.before_sha256)
+            && native.observation.observed_at <= now
+            && now.signed_duration_since(native.observation.observed_at)
+                < chrono::Duration::seconds(120),
+        "Fresh native SQL preflight differs reviewed action"
+    );
     let binding = ActionBindingV2 {
         version: 2,
         case_id: case.id(),
@@ -103,7 +161,7 @@ pub fn staged_request_binding(
         action_version: proposal.action_version,
         action: action.clone(),
         metadata_sha256: metadata_sha256.clone(),
-        before_sha256: evidence.content_sha256.clone(),
+        before_sha256: native.observation.before_sha256.clone(),
         plan_sha256: proposal.plan_sha256.clone(),
         verification_sha256: digest(
             b"relayne-helper-reviewed-verification-v2",
@@ -112,6 +170,9 @@ pub fn staged_request_binding(
         proof: ActionProof::StagingReviewProof {
             review_id: Uuid::new_v4(),
             review_sha256,
+            mapping_sha256: mapping.fingerprint()?,
+            staging_scope_sha256: mapping.staging_scope_sha256.clone(),
+            staging_physical_sha256: mapping.staging_physical_sha256.clone(),
             expires_at: now + chrono::Duration::minutes(5),
         },
         restoration: proposal.restoration.clone(),

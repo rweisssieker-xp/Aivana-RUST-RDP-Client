@@ -32,12 +32,20 @@ fn fixed_queries_never_project_sql_text_and_bind_only_object_names() {
     assert_eq!(template_digest().len(), 64);
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FixtureRows {
+    Normal,
+    Over20,
+    Over64,
+}
+
 struct FakeTransport {
     calls: Arc<Mutex<Vec<String>>>,
     database: String,
     server_port: u16,
     delay: Duration,
     object_present: bool,
+    fixture_rows: FixtureRows,
 }
 struct FakeSession {
     calls: Arc<Mutex<Vec<String>>>,
@@ -45,6 +53,7 @@ struct FakeSession {
     server_port: u16,
     delay: Duration,
     object_present: bool,
+    fixture_rows: FixtureRows,
 }
 impl PgTransport for FakeTransport {
     fn open<'a>(
@@ -73,6 +82,7 @@ impl PgTransport for FakeTransport {
                 server_port: self.server_port,
                 delay: self.delay,
                 object_present: self.object_present,
+                fixture_rows: self.fixture_rows,
             }) as Box<dyn PgSession>)
         })
     }
@@ -96,6 +106,53 @@ impl PgSession for FakeSession {
             self.calls.lock().unwrap().push(probe.label().into());
             if self.delay > Duration::ZERO {
                 tokio::time::sleep(self.delay).await;
+            }
+            if self.fixture_rows != FixtureRows::Normal {
+                let count = match self.fixture_rows {
+                    FixtureRows::Over20 if probe == PgReadProbe::Activity => 21,
+                    FixtureRows::Over64
+                        if matches!(
+                            probe,
+                            PgReadProbe::Activity
+                                | PgReadProbe::Blocking
+                                | PgReadProbe::Indexes
+                                | PgReadProbe::Statistics
+                        ) =>
+                    {
+                        20
+                    }
+                    _ => 0,
+                };
+                if count > 0 {
+                    return Ok((0..count)
+                        .map(|id| match probe {
+                            PgReadProbe::Activity => SqlObservation::Activity {
+                                pid: id + 1,
+                                state: None,
+                                wait_kind: None,
+                                wait_name: None,
+                                age_ms: None,
+                            },
+                            PgReadProbe::Blocking => SqlObservation::Blocking {
+                                waiting_pid: id + 1,
+                                blocking_pid: id + 2,
+                                blocker_state: None,
+                            },
+                            PgReadProbe::Indexes => SqlObservation::Index {
+                                name: format!("idx_{id}"),
+                                method: "btree".into(),
+                                valid: true,
+                                scans: Some(0),
+                            },
+                            PgReadProbe::Statistics => SqlObservation::Statistics {
+                                live_rows: Some(12000),
+                                dead_rows: Some(0),
+                                analyze_count: Some(1),
+                            },
+                            _ => unreachable!(),
+                        })
+                        .collect());
+                }
             }
             Ok(match probe {
                 PgReadProbe::Identity => vec![SqlObservation::Identity {
@@ -221,6 +278,7 @@ async fn native_adapter_orchestration_verifies_identity_and_rolls_back() {
         server_port: 55433,
         delay: Duration::ZERO,
         object_present: true,
+        fixture_rows: FixtureRows::Normal,
     };
     let output = collect_with(&transport, &request, &secrets, CancellationToken::new())
         .await
@@ -256,6 +314,34 @@ async fn native_adapter_orchestration_verifies_identity_and_rolls_back() {
 }
 
 #[tokio::test]
+async fn native_projection_limits_mark_21_rows_and_65_observations_truncated() {
+    for (fixture_rows, expected_kept) in [
+        (FixtureRows::Over20, 24),
+        (
+            FixtureRows::Over64,
+            crate::helper::sql::types::MAX_SQL_OBSERVATIONS,
+        ),
+    ] {
+        let (request, secrets, path) = setup();
+        let transport = FakeTransport {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            database: "relayne_helper_acceptance".into(),
+            server_port: 55433,
+            delay: Duration::ZERO,
+            object_present: true,
+            fixture_rows,
+        };
+        let output = collect_with(&transport, &request, &secrets, CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(output.status, EvidenceStatus::Truncated);
+        assert_eq!(output.sql_observations.len(), expected_kept);
+        assert!(output.coverage.observed < PROBE_COUNT);
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[tokio::test]
 async fn missing_object_skips_dependent_reads_but_present_object_can_have_no_indexes() {
     for present in [false, true] {
         let (request, secrets, path) = setup();
@@ -266,6 +352,7 @@ async fn missing_object_skips_dependent_reads_but_present_object_can_have_no_ind
             server_port: 55433,
             delay: Duration::ZERO,
             object_present: present,
+            fixture_rows: FixtureRows::Normal,
         };
         let output = collect_with(&transport, &request, &secrets, CancellationToken::new())
             .await
@@ -332,6 +419,7 @@ async fn identity_mismatch_prevents_other_queries_and_rolls_back() {
         server_port: 55433,
         delay: Duration::ZERO,
         object_present: true,
+        fixture_rows: FixtureRows::Normal,
     };
     assert!(
         collect_with(&transport, &request, &secrets, CancellationToken::new())
@@ -349,6 +437,7 @@ async fn identity_mismatch_prevents_other_queries_and_rolls_back() {
         server_port: 55434,
         delay: Duration::ZERO,
         object_present: true,
+        fixture_rows: FixtureRows::Normal,
     };
     assert!(
         collect_with(&wrong_server, &request, &secrets, CancellationToken::new())
@@ -372,6 +461,7 @@ async fn canceled_query_attempts_server_cancel_then_rollback() {
         server_port: 55433,
         delay: Duration::from_millis(300),
         object_present: true,
+        fixture_rows: FixtureRows::Normal,
     };
     let cancel = CancellationToken::new();
     let trigger = cancel.clone();

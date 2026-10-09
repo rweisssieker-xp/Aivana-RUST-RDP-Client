@@ -4,9 +4,21 @@ use anyhow::{Result, ensure};
 use sha2::{Digest, Sha256};
 
 pub const FIXTURE_DATABASE: &str = "relayne_helper_acceptance";
+pub const REHEARSAL_DATABASE: &str = "relayne_helper_rehearsal";
 pub const FIXTURE_SCHEMA: &str = "fixture";
+pub const REHEARSAL_TEMPLATE_MAPPING_VERSION: u16 = 1;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Reviewed, literal endpoint/database pairs. This is a closed compatibility
+/// mapping, never a database-name alias or SQL-text parameter.
+fn reviewed_pg_fixture(host: &str, port: u16, database: &str) -> bool {
+    host == "127.0.0.1"
+        && matches!(
+            (port, database),
+            (55433, FIXTURE_DATABASE) | (55434, REHEARSAL_DATABASE)
+        )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum OrderStatus {
     Pending,
     Fulfilled,
@@ -20,7 +32,7 @@ impl OrderStatus {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ReviewedSelectTemplate {
     CustomerOrders { customer_id: i32 },
     StatusCount { status: OrderStatus },
@@ -90,7 +102,9 @@ impl ReviewedSelectTemplate {
     pub fn reviewed_statement(self, scope: &BoundScope) -> Result<TemplateStatement> {
         scope.validate()?;
         let BoundScope::Database {
+            target,
             engine,
+            port,
             database,
             schema,
             object,
@@ -105,7 +119,7 @@ impl ReviewedSelectTemplate {
             "no attested SQL Server fixture; live templates unavailable"
         );
         ensure!(
-            database == FIXTURE_DATABASE
+            reviewed_pg_fixture(&target.host, *port, database)
                 && schema.as_deref() == Some(FIXTURE_SCHEMA)
                 && object.as_deref() == Some(self.object()),
             "template object is not the attested same-database fixture"
@@ -244,7 +258,7 @@ pub(crate) async fn connect_fixture(
         anyhow::bail!("scoped read credential required")
     };
     ensure!(
-        target.host == "127.0.0.1" && *port == 55433 && database == FIXTURE_DATABASE,
+        reviewed_pg_fixture(&target.host, *port, database),
         "only the disposable guest fixture is attested for reviewed workloads"
     );
     let resolver = PersistentSecretResolver::new()?;
@@ -283,7 +297,7 @@ pub(crate) async fn connect_fixture(
     let row = tokio::select! {
         _ = cancel.cancelled() => anyhow::bail!("collection canceled"),
         result = tokio::time::timeout(Duration::from_secs(5), session.client.query_one(
-            "SELECT current_database()::text, session_user::text, current_user::text, s.ssl, inet_server_addr()::text, inet_server_port()::integer, current_setting('server_version_num')::integer, current_setting('work_mem')::text FROM pg_stat_ssl AS s WHERE s.pid = pg_backend_pid()", &[])) => result??,
+            "SELECT current_database()::text, session_user::text, current_user::text, s.ssl, host(inet_server_addr())::text, inet_server_port()::integer, current_setting('server_version_num')::integer, current_setting('work_mem')::text FROM pg_stat_ssl AS s WHERE s.pid = pg_backend_pid()", &[])) => result??,
     };
     let actual_db: String = row.try_get(0)?;
     let session_user: String = row.try_get(1)?;

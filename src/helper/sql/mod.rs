@@ -2,8 +2,10 @@
 
 pub mod artifacts;
 pub mod benchmark;
+pub mod changes;
 pub mod plans;
 pub mod postgres;
+pub mod rehearsal;
 pub mod sql_server;
 pub mod templates;
 pub mod types;

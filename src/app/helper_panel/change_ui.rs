@@ -362,9 +362,48 @@ fn action_authority(
                 "Reviewed proposal: {}",
                 proposal.review_digest().unwrap_or_default()
             ));
+            ui.label("Isolated rehearsal change target");
+            egui::ComboBox::from_id_salt("helper-staging-change-scope")
+                .selected_text(if state.action_ui.staging_scope_sha256.is_empty() {
+                    "Select reviewed staging scope"
+                } else {
+                    "Staging scope selected"
+                })
+                .show_ui(ui, |ui| {
+                    for bound in case.scopes() {
+                        if bound.credential().is_some_and(|c| {
+                            c.purpose == crate::helper::scope::CredentialPurpose::ControlledChange
+                        }) {
+                            if let Ok(sha) = bound.digest() {
+                                if let crate::helper::scope::BoundScope::Database {
+                                    target,
+                                    port,
+                                    database,
+                                    ..
+                                } = bound
+                                {
+                                    ui.selectable_value(
+                                        &mut state.action_ui.staging_scope_sha256,
+                                        sha,
+                                        format!("{}:{} / {}", target.host, port, database),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                });
+            ui.label("Reviewed synthetic-data coverage and disposal/rebuild limits");
+            ui.text_edit_singleline(&mut state.action_ui.staging_limits);
+            ui.checkbox(
+                &mut state.action_ui.staging_confirmed,
+                "I reviewed the isolated target, data coverage and non-restorable limits",
+            );
             if ui
                 .add_enabled(
-                    state.action_ui.pending.is_none() && state.action_ui.organization_confirmed,
+                    state.action_ui.pending.is_none()
+                        && state.action_ui.organization_confirmed
+                        && state.action_ui.staging_confirmed
+                        && !state.action_ui.staging_scope_sha256.is_empty(),
                     egui::Button::new("Request staged action consent"),
                 )
                 .clicked()
@@ -375,10 +414,31 @@ fn action_authority(
                         .organization
                         .clone()
                         .ok_or_else(|| anyhow::anyhow!("Team organization missing"))?;
+                    let native = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()?
+                        .block_on(crate::helper::approval::NativeDispatchProof::collect(
+                            case,
+                            &proposal,
+                            tokio_util::sync::CancellationToken::new(),
+                        ))?;
+                    let mapping = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()?
+                        .block_on(crate::helper::sql::rehearsal::SqlTrialMapping::review(
+                            case,
+                            &proposal,
+                            &native,
+                            &state.action_ui.staging_scope_sha256,
+                            &state.action_ui.staging_limits,
+                            tokio_util::sync::CancellationToken::new(),
+                        ))?;
                     let binding = crate::helper::approval::staged_request_binding(
                         case,
                         &proposal,
                         org.clone(),
+                        &native,
+                        &mapping,
                     )?;
                     let case_path = state
                         .path
@@ -397,10 +457,12 @@ fn action_authority(
                             binding,
                         },
                         org,
+                        mapping,
                     ))
                 })();
                 match result {
-                    Ok((input, org)) => {
+                    Ok((input, org, mapping)) => {
+                        state.action_ui.staging_mapping = Some(mapping);
                         let (tx, rx) = std::sync::mpsc::channel();
                         state.action_ui.pending = Some(rx);
                         let client = team.repair_client().map(|v| v.0);
@@ -505,7 +567,87 @@ fn action_authority(
                 "Consumed once: {}. A durable local intent is required before any target contact.",
                 receipt.receipt().consume_id
             ));
-            ui.strong("Native SQL verification is pending. This consumed approval cannot launch a change from stored evidence.");
+            if let Some(mapping) = state.action_ui.staging_mapping.clone() {
+                ui.label(format!(
+                    "Reviewed staging target {} · physical {}",
+                    mapping.staging_scope_sha256(),
+                    mapping.staging_physical_sha256()
+                ));
+                if ui
+                    .add_enabled(
+                        state.action_ui.pending.is_none()
+                            && state.action_ui.staging_receipt.is_none()
+                            && state.action_ui.intent.is_none(),
+                        egui::Button::new("Run approved isolated SQL rehearsal"),
+                    )
+                    .clicked()
+                {
+                    let case = case.clone();
+                    let proposal = state.reviewed_proposal.clone();
+                    let binding = item.binding.clone();
+                    let case_path = state.path.clone();
+                    let journal_path = crate::helper::journal::ActionJournal::path();
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    state.action_ui.pending = Some(rx);
+                    std::thread::spawn(move || {
+                        let result = (|| -> anyhow::Result<_> {
+                            let case_path = case_path
+                                .ok_or_else(|| anyhow::anyhow!("Case store path missing"))?;
+                            let journal_path = journal_path?;
+                            let proposal = proposal
+                                .ok_or_else(|| anyhow::anyhow!("Reviewed proposal missing"))?;
+                            let runtime = tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build()?;
+                            let native = runtime.block_on(
+                                crate::helper::approval::NativeDispatchProof::collect(
+                                    &case,
+                                    &proposal,
+                                    tokio_util::sync::CancellationToken::new(),
+                                ),
+                            )?;
+                            let id = crate::helper::approval::authorize_and_record_intent(
+                                &case_path,
+                                &journal_path,
+                                &proposal,
+                                &binding,
+                                &receipt,
+                                &native,
+                            )?;
+                            let refreshed = runtime.block_on(
+                                crate::helper::approval::NativeDispatchProof::collect(
+                                    &case,
+                                    &proposal,
+                                    tokio_util::sync::CancellationToken::new(),
+                                ),
+                            )?;
+                            let permit = crate::helper::approval::authorize_and_start_dispatch(
+                                &case_path,
+                                &journal_path,
+                                id,
+                                &proposal,
+                                &binding,
+                                &receipt,
+                                &refreshed,
+                            )?;
+                            runtime
+                                .block_on(crate::helper::sql::rehearsal::run_sql_rehearsal(
+                                    &mapping,
+                                    permit,
+                                    id,
+                                    &case,
+                                    &proposal,
+                                    &journal_path,
+                                    tokio_util::sync::CancellationToken::new(),
+                                ))
+                                .map(super::ActionUiEvent::Rehearsed)
+                        })();
+                        let _ = tx.send(result);
+                    });
+                }
+            } else {
+                ui.strong("Reviewed staging mapping unavailable; reconcile consumed action.");
+            }
         }
     }
     if let Some(id) = state.action_ui.intent {

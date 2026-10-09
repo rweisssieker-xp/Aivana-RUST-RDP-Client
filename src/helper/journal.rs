@@ -1,6 +1,7 @@
 //! Protected local authority journal. Ambiguous launches remain unresolved until
 //! independently observed; reopening a journal never replays an intent.
 use super::approval::DispatchPermit;
+use super::sql::changes::{NativeActionProof, NativeActionState};
 use crate::helper_approval::{ActionOutcomeAckV2, ActionOutcomeEventV2, ActionOutcomeV2};
 use anyhow::{Result, ensure};
 use chrono::{DateTime, Utc};
@@ -45,6 +46,10 @@ pub struct IntentRecord {
     pub outcome_acknowledged: bool,
     #[serde(default)]
     pub outcome_corrections: Vec<OutcomeDelivery>,
+    #[serde(default)]
+    pub native_receipt_sha256: Option<String>,
+    #[serde(default)]
+    pub native_after_sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -175,6 +180,16 @@ impl ActionJournal {
                     && item.run_id != Uuid::nil()
                     && crate::helper_action::valid_digest(&item.binding_fingerprint),
                 "Invalid/duplicate action intent"
+            );
+            ensure!(
+                item.native_receipt_sha256
+                    .as_deref()
+                    .is_none_or(crate::helper_action::valid_digest)
+                    && item
+                        .native_after_sha256
+                        .as_deref()
+                        .is_none_or(crate::helper_action::valid_digest),
+                "Invalid native SQL outcome reference"
             );
             if let Some(event) = &item.outcome_event {
                 ensure!(
@@ -315,6 +330,8 @@ impl ActionJournal {
             outcome_note: None,
             outcome_acknowledged: false,
             outcome_corrections: Vec::new(),
+            native_receipt_sha256: None,
+            native_after_sha256: None,
         });
         self.save()?;
         Ok(id)
@@ -541,6 +558,57 @@ impl ActionJournal {
         let mut next = self.clone();
         next.reconcile_inner(run_id, Some(state), false)?;
         let event = next.queue_outcome_inner(id, outcome, Some(operator_reference), false)?;
+        next.save()?;
+        *self = next;
+        Ok(event)
+    }
+
+    /// Sealed executor result: state and exact team event are one protected
+    /// journal write. A receipt reference is required for native success.
+    pub(crate) fn record_native_outcome(
+        &mut self,
+        id: IntentId,
+        proof: &NativeActionProof,
+        receipt_sha256: Option<&str>,
+    ) -> Result<ActionOutcomeEventV2> {
+        let mut next = self.clone();
+        let item = next
+            .intents
+            .iter()
+            .find(|i| i.id == id)
+            .ok_or_else(|| anyhow::anyhow!("Native action intent missing"))?;
+        ensure!(
+            item.run_id == proof.run_id() && item.state == IntentState::DispatchStarted,
+            "Native action is not the launched durable run"
+        );
+        let (state, outcome) = match (proof.state, receipt_sha256) {
+            (NativeActionState::Verified, Some(digest))
+                if crate::helper_action::valid_digest(digest) =>
+            {
+                (IntentState::Verified, ActionOutcomeV2::Verified)
+            }
+            (NativeActionState::Verified, _) => (
+                IntentState::NeedsIntervention,
+                ActionOutcomeV2::NeedsIntervention,
+            ),
+            (NativeActionState::Failed, _) => (IntentState::Failed, ActionOutcomeV2::Failed),
+            (NativeActionState::OutcomeUnknown, _) => {
+                (IntentState::OutcomeUnknown, ActionOutcomeV2::OutcomeUnknown)
+            }
+            (NativeActionState::NeedsIntervention, _) => (
+                IntentState::NeedsIntervention,
+                ActionOutcomeV2::NeedsIntervention,
+            ),
+        };
+        next.reconcile_inner(proof.run_id(), Some(state), false)?;
+        let item = next
+            .intents
+            .iter_mut()
+            .find(|i| i.id == id)
+            .ok_or_else(|| anyhow::anyhow!("Native action intent missing"))?;
+        item.native_receipt_sha256 = receipt_sha256.map(str::to_owned);
+        item.native_after_sha256 = proof.after_sha256.clone();
+        let event = next.queue_outcome_inner(id, outcome, None, false)?;
         next.save()?;
         *self = next;
         Ok(event)

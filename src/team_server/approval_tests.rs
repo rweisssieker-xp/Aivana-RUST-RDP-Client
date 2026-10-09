@@ -120,6 +120,9 @@ fn binding(org: String) -> ActionBindingV2 {
         proof: ActionProof::StagingReviewProof {
             review_id: Uuid::new_v4(),
             review_sha256: d(),
+            mapping_sha256: d(),
+            staging_scope_sha256: d(),
+            staging_physical_sha256: d(),
             expires_at: now + Duration::minutes(5),
         },
         restoration: RestorationSpec::ManualOrUnavailable {

@@ -16,9 +16,25 @@ struct FakeWorkloadSession {
     calls: Vec<&'static str>,
     changed_result_at: Option<usize>,
     stall_at: Option<usize>,
+    compatibility: Option<[String; 2]>,
+    snapshots: usize,
 }
 
 impl WorkloadSession for FakeWorkloadSession {
+    fn compatibility_snapshot<'a>(
+        &'a mut self,
+        _statement: &'a TemplateStatement,
+    ) -> TdsFuture<'a, String> {
+        Box::pin(async move {
+            let index = self.snapshots;
+            self.snapshots += 1;
+            self.compatibility
+                .as_ref()
+                .and_then(|digests| digests.get(index))
+                .cloned()
+                .ok_or(Failure::Unavailable)
+        })
+    }
     fn identity<'a>(&'a mut self) -> TdsFuture<'a, Vec<SqlObservation>> {
         Box::pin(async move {
             self.calls.push("identity");
@@ -147,6 +163,8 @@ fn fake() -> FakeWorkloadSession {
         calls: vec![],
         changed_result_at: None,
         stall_at: None,
+        compatibility: None,
+        snapshots: 0,
     }
 }
 
@@ -193,6 +211,28 @@ async fn repeated_fixed_samples_have_bound_provenance_and_statistics() {
     );
     assert_eq!(session.calls.len(), 20);
     assert!(!result.can_prove_repair());
+}
+
+#[tokio::test]
+async fn native_snapshots_must_match_across_same_session_samples() {
+    let (review, statement) = reviewed();
+    for (after, complete) in [("a".repeat(64), true), ("b".repeat(64), false)] {
+        let mut session = fake();
+        session.compatibility = Some(["a".repeat(64), after]);
+        let result = collect_with_session(
+            &mut session,
+            &review,
+            &statement,
+            &SamplingPolicy::default(),
+            expected_identity(),
+            &CancellationToken::new(),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        assert_eq!(session.snapshots, 2);
+        assert_eq!(result.compatibility.is_complete(), complete);
+    }
 }
 
 #[tokio::test]

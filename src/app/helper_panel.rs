@@ -30,12 +30,18 @@ struct ActionUiState {
     outcome_notes: HashMap<(Uuid, Uuid), String>,
     intent: Option<crate::helper::journal::IntentId>,
     consume_attempted: bool,
+    staging_scope_sha256: String,
+    staging_limits: String,
+    staging_confirmed: bool,
+    staging_mapping: Option<crate::helper::sql::rehearsal::SqlTrialMapping>,
+    staging_receipt: Option<crate::helper::sql::rehearsal::SqlRehearsalReceipt>,
 }
 enum ActionUiEvent {
     Identity(String),
     Requested(crate::helper_approval::ActionApprovalV2),
     Refreshed(crate::helper_approval::ActionApprovalV2),
     Consumed(crate::team_client::VerifiedConsumeV2),
+    Rehearsed(crate::helper::sql::rehearsal::SqlRehearsalReceipt),
 }
 
 pub(super) struct HelperState {
@@ -396,6 +402,13 @@ impl AivanaApp {
                 Ok(ActionUiEvent::Consumed(receipt)) => {
                     self.helper.action_ui.receipt = Some(receipt);
                     self.helper.notice = "Action approval consumed; final local gate and durable intent are still required".into();
+                }
+                Ok(ActionUiEvent::Rehearsed(receipt)) => {
+                    self.helper.notice = format!(
+                        "Native SQL rehearsal saved: {} (action outcome only)",
+                        receipt.content_sha256()
+                    );
+                    self.helper.action_ui.staging_receipt = Some(receipt);
                 }
                 Err(error) => {
                     self.helper.notice = format!("Action authority request failed: {error}")

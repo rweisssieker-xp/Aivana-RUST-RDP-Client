@@ -25,6 +25,9 @@ pub enum ActionProof {
     StagingReviewProof {
         review_id: Uuid,
         review_sha256: Digest,
+        mapping_sha256: Digest,
+        staging_scope_sha256: Digest,
+        staging_physical_sha256: Digest,
         expires_at: DateTime<Utc>,
     },
     SqlRehearsalReceipt {
@@ -54,10 +57,17 @@ impl ActionProof {
                 Self::StagingReviewProof {
                     review_id,
                     review_sha256,
+                    mapping_sha256,
+                    staging_scope_sha256,
+                    staging_physical_sha256,
                     ..
                 },
             ) => ensure!(
-                *review_id != Uuid::nil() && valid_digest(review_sha256),
+                *review_id != Uuid::nil()
+                    && valid_digest(review_sha256)
+                    && valid_digest(mapping_sha256)
+                    && valid_digest(staging_scope_sha256)
+                    && valid_digest(staging_physical_sha256),
                 "Invalid staged review proof"
             ),
             (

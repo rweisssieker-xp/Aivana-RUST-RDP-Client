@@ -8,7 +8,7 @@ use crate::helper::sql::{
 };
 use tiberius::xml::XmlData;
 
-trait PlanSession: Send {
+pub(super) trait PlanSession: Send {
     fn read_object<'a>(
         &'a mut self,
         schema: &'a str,
