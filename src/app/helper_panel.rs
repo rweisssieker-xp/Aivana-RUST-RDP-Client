@@ -622,11 +622,7 @@ impl AivanaApp {
             return;
         }
         let current = self.helper.current();
-        let is_current = current.is_some_and(|case| {
-            case.id() == report.case_id
-                && case.revision() == report.case_revision
-                && case.evidence_revision() == report.evidence_revision
-        });
+        let is_current = current.is_some_and(|case| report.is_current_for(case));
         ui.group(|ui| {
             ui.strong(match report.fixture {
                 FixtureLabel::SimulationFixture => tr(locale, "Simulation fixture preflight"),

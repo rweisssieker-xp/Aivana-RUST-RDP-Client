@@ -131,6 +131,14 @@ impl AcceptanceReport {
         Ok(())
     }
 
+    /// Returns whether this preflight describes the exact persisted case revision.
+    /// Historical reports remain displayable, but must be visibly marked as stale.
+    pub fn is_current_for(&self, case: &HelperCase) -> bool {
+        self.case_id == case.id()
+            && self.case_revision == case.revision()
+            && self.evidence_revision == case.evidence_revision()
+    }
+
     pub fn to_bounded_json(&self) -> Result<Vec<u8>> {
         self.validate()?;
         let bytes = serde_json::to_vec_pretty(self)?;
@@ -315,6 +323,38 @@ mod tests {
         report.product_acceptance = false;
         report.scenarios.pop();
         assert!(report.validate().is_err());
+    }
+
+    #[test]
+    fn preflight_is_bound_to_exact_case_and_evidence_revisions() {
+        let case = HelperCase::new(ProblemIntake::default()).unwrap();
+        let report = run_acceptance(&case, FixtureLabel::SimulationFixture).unwrap();
+        assert!(report.is_current_for(&case));
+
+        let mut stale_case = report.clone();
+        stale_case.case_revision += 1;
+        assert!(!stale_case.is_current_for(&case));
+
+        let mut stale_evidence = report;
+        stale_evidence.evidence_revision += 1;
+        assert!(!stale_evidence.is_current_for(&case));
+    }
+
+    #[test]
+    fn bounded_json_rejects_tampered_success_and_capture_claims() {
+        let case = HelperCase::new(ProblemIntake::default()).unwrap();
+        let report = run_acceptance(&case, FixtureLabel::SimulationFixture).unwrap();
+
+        let mut tampered = serde_json::to_value(&report).unwrap();
+        tampered["scenarios"][0]["status"] = serde_json::json!("passed");
+        let bytes = serde_json::to_vec(&tampered).unwrap();
+        assert!(AcceptanceReport::from_bounded_json(&bytes).is_err());
+
+        let mut tampered = serde_json::to_value(&report).unwrap();
+        tampered["captures"][3]["status"] = serde_json::json!("verified");
+        tampered["captures"][3]["evidence_refs"] = serde_json::json!(["forged-receipt"]);
+        let bytes = serde_json::to_vec(&tampered).unwrap();
+        assert!(AcceptanceReport::from_bounded_json(&bytes).is_err());
     }
 
     #[test]
